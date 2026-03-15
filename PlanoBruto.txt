@@ -1,0 +1,1091 @@
+Perfeito. Vou assumir **Codex como o agente de código da OpenAI**, usado via app/CLI/IDE, e montar o backlog no formato que ajuda um agente a trabalhar bem: tarefas pequenas, contexto explícito, plano antes da implementação em partes difíceis, e instruções persistidas em `AGENTS.md`, já que a própria documentação do Codex recomenda isso. A OpenAI também descreve o Codex como um agente que pode escrever código, revisar, corrigir bugs e trabalhar em sandbox isolado com o repositório carregado, o que favorece tickets autocontidos e verificáveis. ([OpenAI Developers][1])
+
+# 1. Direção final do projeto
+
+## Produto
+
+Gerenciador de senhas **open source**, **self-hosted**, **zero-knowledge**, com foco em:
+
+* cofre E2EE
+* web app em **Vue 3 + TypeScript**
+* extensão de navegador
+* login items
+* document items
+* anexos criptografados
+* gerador de senha
+* sync
+* organização básica
+* import/export
+* Account Kit
+* device management
+* troca de master password apenas com sessão autenticada
+
+## Princípios inegociáveis
+
+* o servidor **nunca** descriptografa o cofre
+* o admin **nunca** recupera a master password
+* sem master password e sem dispositivo já autenticado, **não há recuperação**
+* o **Account Kit** ajuda no bootstrap de novo dispositivo, **não** no reset de senha
+* o usuário define a própria senha no onboarding
+* anexos são criptografados **no cliente antes do upload**
+
+---
+
+# 2. Como o backlog deve ser escrito pensando no Codex
+
+Como a OpenAI recomenda “plan first” para tarefas difíceis e `AGENTS.md` para guidance reutilizável, o backlog deve evitar tickets vagos do tipo “fazer auth” e preferir tarefas com escopo pequeno, arquivos prováveis, restrições e critérios de aceite mensuráveis. ([OpenAI Developers][1])
+
+## Cada ticket deve ter sempre:
+
+* **Objetivo**
+* **Contexto**
+* **Escopo**
+* **Fora de escopo**
+* **Arquivos/áreas prováveis**
+* **Critérios de aceite**
+* **Comandos para validar**
+* **Riscos de segurança**
+* **Saída esperada do PR**
+
+## Formato ideal para o Codex
+
+Use sempre algo nesta linha:
+
+```md
+Objetivo:
+Implementar X sem alterar Y.
+
+Contexto:
+Este projeto é zero-knowledge. O servidor não pode acessar segredos brutos.
+
+Escopo:
+- Fazer A
+- Fazer B
+- Fazer C
+
+Fora de escopo:
+- Não implementar D
+- Não refatorar E
+
+Arquivos prováveis:
+- apps/web/src/...
+- packages/crypto/src/...
+- workers/api/src/...
+
+Critérios de aceite:
+- Cenário 1 funciona
+- Cenário 2 falha corretamente
+- Testes automatizados passam
+
+Validação:
+- pnpm test
+- pnpm --filter web test
+- pnpm lint
+
+Entrega:
+- código
+- testes
+- docs curtas
+```
+
+Isso reduz a chance de o agente sair “melhorando” metade do projeto porque viu uma oportunidade brilhante. Agentes adoram isso. Humanos também, infelizmente.
+
+---
+
+# 3. `AGENTS.md` recomendado para o repositório
+
+Como o Codex lê `AGENTS.md` antes de trabalhar, vale começar o projeto já com esse arquivo. A própria OpenAI recomenda usar `AGENTS.md` para codificar padrões e expectativas do repositório. ([OpenAI Developers][2])
+
+## Exemplo de `AGENTS.md`
+
+```md
+# AGENTS.md
+
+## Projeto
+Este projeto é um password manager self-hosted, zero-knowledge, com web app em Vue 3, extensão de navegador e backend em Cloudflare Workers.
+
+## Princípios de segurança
+- Nunca mover criptografia sensível para o servidor.
+- Nunca enviar master password em texto claro.
+- Nunca criar mecanismo de recuperação de cofre pelo admin.
+- Account Kit não pode resetar master password.
+- Todo anexo deve ser criptografado no cliente antes do upload.
+
+## Stack
+- Monorepo com pnpm
+- Vue 3 + TypeScript no web app
+- Browser extension separada
+- Cloudflare Workers no backend
+- D1 para metadados
+- R2 para blobs criptografados
+
+## Regras de implementação
+- Prefira mudanças pequenas e localizadas.
+- Não refatore arquivos não relacionados sem necessidade.
+- Escreva testes para comportamento novo.
+- Atualize tipos compartilhados quando alterar contratos.
+- Documente decisões curtas em arquivos README locais quando necessário.
+
+## Regras de UX
+- Fluxos sensíveis devem ter mensagens claras e diretas.
+- Sempre avisar que não existe recuperação de master password.
+- Evitar atrito desnecessário em dispositivos já confiáveis.
+
+## Regras de PR
+Toda entrega deve incluir:
+- resumo do que foi feito
+- riscos ou limitações
+- testes adicionados/ajustados
+- itens pendentes claramente listados
+```
+
+---
+
+# 4. PRD enxuto
+
+## Nome provisório
+
+**VaultLite**
+Nome ruim, provisório, funcional. Como quase tudo em software antes do marketing estragar.
+
+## Problema
+
+Usuários que querem um gerenciador de senhas self-hosted, simples e seguro, com documentos pessoais e anexos criptografados, sem depender de recuperação por e-mail e sem confiar no servidor para acessar seus dados.
+
+## Público inicial
+
+* usuário individual avançado
+* pequenos grupos de amigos/família no futuro
+* self-hosters
+* pessoas que querem guardar credenciais e documentos pessoais
+
+## Proposta de valor
+
+* simples de instalar
+* zero-knowledge real
+* bom no navegador
+* suporta documentos e anexos desde o início
+* sem falsa promessa de recuperação mágica
+
+## Requisitos funcionais do v1
+
+* onboarding por invite token
+* criação de master password pelo usuário
+* geração de Account Key
+* geração de Account Kit
+* login em novo dispositivo com username + master password + Account Key
+* login item
+* document item
+* anexos criptografados
+* sync do cofre
+* busca e tags
+* import/export
+* troca de master password com sessão autenticada
+* revogação básica de dispositivos
+
+## Não objetivos do v1
+
+* reset de senha por e-mail
+* recuperação de cofre pelo admin
+* compartilhamento complexo
+* passkeys
+* mobile nativo
+* OCR
+* thumbnails
+* auditoria enterprise
+
+---
+
+# 5. Entidades principais
+
+## User
+
+* `id`
+* `username`
+* `status`
+* `kdf_params`
+* `auth_verifier`
+* `encrypted_account_bundle`
+* `created_at`
+* `updated_at`
+
+## Device
+
+* `id`
+* `user_id`
+* `name`
+* `public_key`
+* `trusted`
+* `created_at`
+* `last_seen_at`
+* `revoked_at`
+
+## Invite
+
+* `id`
+* `username_reserved`
+* `token_hash`
+* `expires_at`
+* `used_at`
+* `created_by`
+
+## Vault
+
+* `id`
+* `owner_user_id`
+* `encrypted_metadata`
+* `revision`
+* `created_at`
+* `updated_at`
+
+## Item
+
+* `id`
+* `vault_id`
+* `type` (`login`, `document`, `secure_note`)
+* `encrypted_payload`
+* `revision`
+* `created_at`
+* `updated_at`
+
+## Attachment
+
+* `id`
+* `item_id`
+* `object_key`
+* `encrypted_metadata`
+* `size_bytes`
+* `created_at`
+
+## Session
+
+* `id`
+* `user_id`
+* `device_id`
+* `issued_at`
+* `expires_at`
+* `revoked_at`
+
+---
+
+# 6. Telas do v1
+
+## Web app
+
+* login
+* onboarding via invite
+* geração/download do Account Kit
+* cofre / lista de itens
+* detalhe de login item
+* detalhe de document item
+* modal de upload de anexo
+* gerador de senha
+* configurações da conta
+* troca de master password
+* gestão de dispositivos
+* import/export
+
+## Extensão
+
+* lock screen
+* quick unlock
+* lista de logins sugeridos
+* save login
+* preencher login
+* abrir item no cofre
+* gerador rápido de senha
+
+---
+
+# 7. Estrutura sugerida do monorepo
+
+```txt
+/apps
+  /web
+  /extension
+  /api-worker
+
+/packages
+  /crypto
+  /domain
+  /ui
+  /shared-types
+  /test-utils
+
+/infrastructure
+  /migrations
+  /wrangler
+  /scripts
+
+/docs
+  PRD.md
+  SECURITY.md
+  ARCHITECTURE.md
+
+AGENTS.md
+pnpm-workspace.yaml
+```
+
+---
+
+# 8. Backlog por épico e sprint
+
+Vou deixar em formato que já pode virar issue no GitHub ou tarefa para Codex.
+
+## Sprint 0 - Fundação do repositório
+
+### Tarefa 0.1 - Criar monorepo base
+
+**Objetivo**
+Criar estrutura inicial do monorepo com apps e packages compartilhados.
+
+**Escopo**
+
+* configurar `pnpm workspace`
+* criar `apps/web`, `apps/extension`, `apps/api-worker`
+* criar `packages/crypto`, `packages/domain`, `packages/shared-types`
+* configurar lint, format e typecheck
+
+**Fora de escopo**
+
+* lógica de negócio
+* autenticação
+* UI final
+
+**Critérios de aceite**
+
+* projeto instala com um comando
+* typecheck funciona em todos os pacotes
+* lint funciona
+* build básica funciona
+
+**Validação**
+
+```bash
+pnpm install
+pnpm lint
+pnpm typecheck
+pnpm build
+```
+
+---
+
+### Tarefa 0.2 - Adicionar `AGENTS.md` e documentação mínima
+
+**Objetivo**
+Adicionar instruções persistentes para agentes e documentação técnica mínima.
+
+**Escopo**
+
+* criar `AGENTS.md`
+* criar `docs/PRD.md`
+* criar `docs/SECURITY.md`
+* criar `docs/ARCHITECTURE.md`
+
+**Critérios de aceite**
+
+* documentos explicam modelo zero-knowledge
+* deixam explícito que não existe recuperação de master password
+* descrevem Account Kit corretamente
+
+---
+
+## Sprint 1 - Biblioteca de cripto e modelo de conta
+
+### Tarefa 1.1 - Implementar primitives de criptografia no cliente
+
+**Objetivo**
+Criar a base de cripto no pacote compartilhado.
+
+**Escopo**
+
+* derivação de chave a partir da master password
+* geração de Account Key
+* geração de Vault Root Key
+* funções de encrypt/decrypt para payloads JSON
+* funções de encrypt/decrypt para blobs/anexos
+* testes unitários
+
+**Fora de escopo**
+
+* integração com UI
+* upload real
+* sync
+
+**Critérios de aceite**
+
+* payload JSON cifrado e decifrado corretamente
+* blobs binários cifrados e decifrados corretamente
+* funções falham de forma segura com dados inválidos
+* testes cobrindo casos básicos e erro
+
+**Validação**
+
+```bash
+pnpm --filter @app/crypto test
+```
+
+**Instrução para Codex**
+
+```md
+Não invente esquema criptográfico próprio.
+Use APIs/bibliotecas estáveis já escolhidas no projeto.
+Mantenha a interface pequena e testável.
+Não misture lógica de UI com lógica criptográfica.
+```
+
+---
+
+### Tarefa 1.2 - Modelar entidades e contratos compartilhados
+
+**Objetivo**
+Criar tipos e schemas compartilhados para User, Device, Vault, Item e Attachment.
+
+**Escopo**
+
+* tipos TypeScript
+* schemas de validação
+* enums de item type
+* contrato de API para onboarding, login, sync e attachments
+
+**Critérios de aceite**
+
+* tipos são reutilizados por web, extensão e worker
+* schemas validam payloads esperados
+* contratos não expõem segredos brutos
+
+---
+
+### Tarefa 1.3 - Onboarding local e geração do Account Kit
+
+**Objetivo**
+Implementar a lógica cliente de onboarding.
+
+**Escopo**
+
+* consumir invite token
+* gerar Account Key
+* gerar Vault Root Key
+* gerar bundle criptografado
+* gerar arquivo do Account Kit
+* gerar QR code do kit
+
+**Fora de escopo**
+
+* upload de itens
+* login posterior
+* troca de senha
+
+**Critérios de aceite**
+
+* onboarding gera kit válido
+* kit contém URL, username, Account Key e QR
+* kit não contém master password
+* bundle pode ser salvo e lido em testes
+
+---
+
+## Sprint 2 - API de conta e autenticação
+
+### Tarefa 2.1 - Criar tabelas e migrations de base
+
+**Objetivo**
+Criar schema inicial no D1 para usuários, invites, devices, vaults, items e attachments.
+
+**Critérios de aceite**
+
+* migrations executam sem erro
+* schema inclui índices mínimos
+* segredos sensíveis não ficam em colunas erradas
+
+**Validação**
+
+```bash
+pnpm migrate
+pnpm test
+```
+
+---
+
+### Tarefa 2.2 - Implementar fluxo de invite
+
+**Objetivo**
+Permitir criação de invite de uso único com expiração.
+
+**Escopo**
+
+* endpoint para criar invite
+* hash do token no banco
+* validação de expiração
+* marcação de uso único
+
+**Critérios de aceite**
+
+* token não é salvo em claro
+* invite expirado falha
+* invite usado novamente falha
+* resposta de erro é clara
+
+---
+
+### Tarefa 2.3 - Implementar criação de conta
+
+**Objetivo**
+Salvar a conta criada a partir do onboarding.
+
+**Escopo**
+
+* endpoint de criação de usuário
+* persistir `auth_verifier`
+* persistir `encrypted_account_bundle`
+* criar vault inicial
+* registrar device inicial
+
+**Critérios de aceite**
+
+* servidor nunca recebe master password em claro
+* criação duplica username corretamente com erro adequado
+* conta criada pode seguir para login
+
+---
+
+### Tarefa 2.4 - Implementar login em novo dispositivo
+
+**Objetivo**
+Permitir login com username + master password + Account Key no cliente.
+
+**Escopo**
+
+* endpoint para buscar bundle da conta
+* verificação de autenticação
+* criação de sessão
+* registro de novo device confiável
+
+**Critérios de aceite**
+
+* login válido cria sessão
+* login inválido falha sem vazar detalhe excessivo
+* device é registrado
+* fluxo funciona com leitura do kit
+
+---
+
+## Sprint 3 - Web app base
+
+### Tarefa 3.1 - Criar shell do app em Vue
+
+**Objetivo**
+Criar base visual do app web.
+
+**Escopo**
+
+* roteamento
+* layout autenticado
+* layout público
+* store de sessão
+* guardas de rota
+
+**Critérios de aceite**
+
+* app navega entre login, onboarding e cofre
+* páginas protegidas exigem sessão
+* sessão persiste de forma segura no cliente
+
+---
+
+### Tarefa 3.2 - Tela de onboarding
+
+**Objetivo**
+Criar a experiência de ativação da conta.
+
+**Escopo**
+
+* formulário de invite token
+* criação de master password
+* geração e download do Account Kit
+* confirmação obrigatória do aviso de irreversibilidade
+
+**Critérios de aceite**
+
+* usuário não conclui sem baixar o kit
+* mensagem sobre ausência de recuperação é explícita
+* erros comuns são tratados
+
+---
+
+### Tarefa 3.3 - Tela de login e desbloqueio
+
+**Objetivo**
+Criar login em novo dispositivo e unlock local.
+
+**Escopo**
+
+* formulário com URL, username, senha e Account Key
+* leitura de QR do kit
+* fluxo de desbloqueio do cofre
+* persistência segura de sessão
+
+**Critérios de aceite**
+
+* primeiro login em novo device funciona
+* logins seguintes no mesmo device podem exigir menos passos, conforme decisão implementada
+* mensagens de erro são claras
+
+---
+
+## Sprint 4 - Cofre, itens e organização
+
+### Tarefa 4.1 - Criar modelo de item e CRUD local
+
+**Objetivo**
+Implementar CRUD de itens no cliente e persistência sincronizável.
+
+**Escopo**
+
+* criar login item
+* criar document item
+* editar item
+* excluir item
+* salvar payload cifrado
+
+**Critérios de aceite**
+
+* CRUD funciona end-to-end
+* dados sensíveis nunca aparecem em requests em claro
+* revisões de item são atualizadas
+
+---
+
+### Tarefa 4.2 - Lista do cofre e busca
+
+**Objetivo**
+Exibir itens do cofre com filtros básicos.
+
+**Escopo**
+
+* lista
+* busca textual por metadados permitidos
+* tags
+* favoritos
+* ordenação simples
+
+**Critérios de aceite**
+
+* lista responde bem com volume pequeno/médio
+* busca não depende de conteúdo em claro no servidor
+* UX básica é consistente
+
+---
+
+### Tarefa 4.3 - Gerador de senha
+
+**Objetivo**
+Criar gerador de senha/passphrase no web app.
+
+**Escopo**
+
+* gerar senha aleatória
+* gerar passphrase
+* opções mínimas
+* copiar para clipboard
+
+**Critérios de aceite**
+
+* UI simples
+* geração previsivelmente configurável
+* sem dependência de servidor
+
+---
+
+## Sprint 5 - Anexos e documentos
+
+### Tarefa 5.1 - Upload criptografado de anexos
+
+**Objetivo**
+Permitir anexar arquivos a items com criptografia no cliente e armazenamento no R2.
+
+**Escopo**
+
+* selecionar arquivo
+* gerar file key
+* criptografar blob localmente
+* enviar blob criptografado
+* registrar metadados criptografados
+
+**Fora de escopo**
+
+* preview
+* OCR
+* thumbnails
+* compartilhamento de anexos
+
+**Critérios de aceite**
+
+* arquivo chega ao R2 só em formato criptografado
+* nome do arquivo não fica em claro no servidor
+* item pode referenciar múltiplos anexos
+* testes cobrem fluxo mínimo
+
+---
+
+### Tarefa 5.2 - Download e remoção de anexos
+
+**Objetivo**
+Permitir baixar e remover anexos vinculados a um item.
+
+**Escopo**
+
+* listar anexos do item
+* baixar blob
+* descriptografar localmente
+* remover referência e objeto
+
+**Critérios de aceite**
+
+* download recupera arquivo íntegro
+* remoção exclui metadado e objeto
+* erros de permissão e arquivo ausente são tratados
+
+---
+
+### Tarefa 5.3 - Tipo de item “Documento”
+
+**Objetivo**
+Criar UX específica para documentos pessoais.
+
+**Escopo**
+
+* formulário para documento
+* campos como número, emissor, validade, notas
+* suporte a anexos
+* visualização estruturada
+
+**Critérios de aceite**
+
+* usuário consegue cadastrar CNH, RG, CPF e equivalentes
+* anexos ficam bem vinculados ao documento
+* UI diferencia claramente documento de login
+
+---
+
+## Sprint 6 - Sync e gerenciamento de dispositivos
+
+### Tarefa 6.1 - Sync básico do cofre
+
+**Objetivo**
+Sincronizar itens e metadados entre cliente e servidor.
+
+**Escopo**
+
+* upload de revisões
+* download de revisões
+* merge simples por revision
+* tratamento básico de conflito
+
+**Critérios de aceite**
+
+* dois devices sincronizam o mesmo cofre
+* conflito simples é resolvido de forma previsível
+* dados continuam cifrados ponta a ponta
+
+---
+
+### Tarefa 6.2 - Gestão de dispositivos
+
+**Objetivo**
+Permitir ao usuário ver e revogar dispositivos.
+
+**Escopo**
+
+* listar devices
+* mostrar último acesso
+* revogar device
+* invalidar sessões relacionadas
+
+**Critérios de aceite**
+
+* usuário vê device atual e outros
+* revogação funciona
+* device revogado perde acesso em requisições seguintes
+
+---
+
+### Tarefa 6.3 - Troca de master password
+
+**Objetivo**
+Permitir alterar a master password apenas com sessão autenticada e senha atual.
+
+**Escopo**
+
+* formulário com senha atual e nova senha
+* recriptografia local do bundle
+* atualização de verificador
+* manter cofre acessível após troca
+
+**Critérios de aceite**
+
+* sem senha atual correta, troca falha
+* servidor não faz reset sozinho
+* cofre continua íntegro após a troca
+
+---
+
+## Sprint 7 - Import/export
+
+### Tarefa 7.1 - Importação CSV para logins
+
+**Objetivo**
+Permitir importar logins básicos de CSV.
+
+**Escopo**
+
+* parser de CSV
+* mapeamento de colunas
+* validação pré-import
+* criação de itens
+
+**Critérios de aceite**
+
+* importa casos básicos
+* mostra preview antes de confirmar
+* erros por linha são legíveis
+
+---
+
+### Tarefa 7.2 - Exportação JSON/backup completo
+
+**Objetivo**
+Permitir export do cofre e metadados de itens.
+
+**Escopo**
+
+* JSON de itens
+* opção de backup completo
+* incluir referências de anexos ou pacote com blobs
+
+**Critérios de aceite**
+
+* export funciona com login items e document items
+* formato é documentado
+* usuário entende a diferença entre export simples e backup completo
+
+---
+
+## Sprint 8 - Extensão do navegador
+
+### Tarefa 8.1 - Base da extensão
+
+**Objetivo**
+Criar estrutura inicial da extensão conectada ao mesmo modelo de conta.
+
+**Escopo**
+
+* popup
+* lock screen
+* sessão local
+* comunicação com páginas
+
+**Critérios de aceite**
+
+* extensão abre e desbloqueia
+* reutiliza pacotes compartilhados
+* build da extensão funciona
+
+---
+
+### Tarefa 8.2 - Captura e salvamento de login
+
+**Objetivo**
+Permitir detectar login e sugerir salvar credenciais.
+
+**Critérios de aceite**
+
+* sites simples funcionam
+* não sobrescreve item sem confirmação
+* fluxo mínimo de salvar funciona
+
+---
+
+### Tarefa 8.3 - Preenchimento manual
+
+**Objetivo**
+Permitir escolher um item e preencher campos de login.
+
+**Critérios de aceite**
+
+* usuário escolhe credencial
+* extensão preenche usuário e senha
+* falhas em páginas estranhas não quebram a extensão inteira
+
+---
+
+# 9. Template de issue pronto para usar com Codex
+
+Você pode criar todas as tasks do backlog usando este molde:
+
+````md
+# [EPIC] [ID] Título curto
+
+## Objetivo
+Descreva exatamente o que precisa existir ao final.
+
+## Contexto
+Explique a regra de negócio e os princípios de segurança relevantes.
+
+## Escopo
+- item 1
+- item 2
+- item 3
+
+## Fora de escopo
+- item A
+- item B
+
+## Arquivos/áreas prováveis
+- apps/web/src/...
+- packages/crypto/src/...
+- apps/api-worker/src/...
+
+## Critérios de aceite
+- [ ] cenário 1
+- [ ] cenário 2
+- [ ] cenário 3
+
+## Testes esperados
+- unitários
+- integração
+- smoke test manual
+
+## Comandos de validação
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+````
+
+## Restrições
+
+* Não enviar segredos em claro ao servidor
+* Não alterar contratos públicos sem atualizar tipos compartilhados
+* Não implementar funcionalidades fora do escopo
+
+## Entrega esperada
+
+* código
+* testes
+* breve nota técnica
+
+````
+
+---
+
+# 10. Como pedir tarefas ao Codex
+
+Como a recomendação oficial é planejar antes em tarefas difíceis e usar instruções persistentes, eu faria prompts assim. :contentReference[oaicite:3]{index=3}
+
+## Exemplo 1 - tarefa simples
+```md
+Implemente a tela de onboarding em apps/web.
+
+Leia AGENTS.md antes de começar.
+
+Escopo:
+- formulário de invite token
+- criação de master password
+- geração do Account Kit
+- checkbox obrigatório confirmando que não existe recuperação de senha
+
+Fora de escopo:
+- login
+- sync
+- upload de anexos
+
+Critérios de aceite:
+- a tela não finaliza sem gerar o kit
+- a mensagem de irreversibilidade aparece com destaque
+- testes do formulário passam
+
+Ao final:
+- liste os arquivos alterados
+- explique decisões importantes
+- diga o que ainda ficou pendente
+````
+
+## Exemplo 2 - tarefa complexa
+
+```md
+Use modo de planejamento primeiro.
+
+Precisamos implementar upload criptografado de anexos no cliente e armazenamento no R2.
+
+Requisitos:
+- criptografia no cliente antes do upload
+- metadados sensíveis criptografados
+- integração com item do tipo document
+- sem preview, sem OCR, sem thumbnail
+
+Entregue:
+1. plano de implementação
+2. proposta de contratos
+3. código
+4. testes
+5. riscos/limitações
+```
+
+---
+
+# 11. Ordem real de execução que eu recomendo
+
+Se você quiser produtividade de verdade com Codex, eu seguiria esta ordem:
+
+1. monorepo + AGENTS.md
+2. crypto package
+3. entidades/contratos
+4. invite + onboarding
+5. login/device/session
+6. web app base
+7. CRUD de items
+8. anexos/documentos
+9. sync
+10. import/export
+11. extensão
+
+Porque extensão antes de o núcleo funcionar é um ótimo jeito de multiplicar dor por dois. A indústria inteira já testou esse método com grande entusiasmo.
+
+---
+
+# 12. Recomendação final de gestão do backlog
+
+## Regras práticas
+
+* cada ticket deve caber idealmente em **1 PR**
+* cada PR deve ter **um objetivo único**
+* tarefas grandes devem começar com **plan mode**
+* toda feature sensível deve ter **teste**
+* toda decisão de segurança deve ir para `SECURITY.md`
+* nada de “aproveitei e refatorei 14 arquivos” sem necessidade
+
+## Labels úteis
+
+* `epic`
+* `codex-ready`
+* `needs-plan`
+* `security-sensitive`
+* `ui`
+* `worker`
+* `crypto`
+* `extension`
+* `docs`
+
+## Definição de pronto
+
+Uma task só está pronta quando:
+
+* código compila
+* testes passam
+* critérios de aceite batem
+* docs mínimas foram ajustadas
+* não violou os princípios zero-knowledge
+
+[1]: https://developers.openai.com/codex/learn/best-practices/?utm_source=chatgpt.com "Best practices"
+[2]: https://developers.openai.com/codex/guides/agents-md/?utm_source=chatgpt.com "Custom instructions with AGENTS.md"

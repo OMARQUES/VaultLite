@@ -1,0 +1,19 @@
+{
+  "private": true,
+  "name": "@vaultlite/test-utils",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vaultlite/runtime-abstractions": "*",
+    "@vaultlite/storage-abstractions": "*"
+  },
+  "version": "0.1.0",
+  "description": "Shared test utility scaffold for VaultLite"
+}

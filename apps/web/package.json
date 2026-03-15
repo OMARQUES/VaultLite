@@ -1,0 +1,20 @@
+{
+  "dependencies": {
+    "@noble/hashes": "^2.0.1",
+    "vue": "^3.5.30",
+    "vue-router": "^5.0.3"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --environment jsdom",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "dev": "vite"
+  },
+  "devDependencies": {
+    "@vaultlite/contracts": "*"
+  },
+  "name": "@vaultlite/web",
+  "version": "0.1.0",
+  "private": true
+}

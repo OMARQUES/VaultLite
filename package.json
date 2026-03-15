@@ -1,0 +1,35 @@
+{
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:api": "wrangler dev --config wrangler.toml",
+    "dev:web": "npm run dev --workspace @vaultlite/web -- --host 127.0.0.1 --port 5173 --strictPort",
+    "local:invite": "node infrastructure/scripts/local-issue-invite.mjs",
+    "validate:migrations": "node infrastructure/scripts/validate-migrations.mjs",
+    "smoke:local-flow": "node infrastructure/scripts/smoke-local-flow.mjs",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "name": "vaultlite",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "adapters/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@vitejs/plugin-vue": "^6.0.5",
+    "@vue/test-utils": "^2.4.6",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^28.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0",
+    "vue": "^3.5.30",
+    "vue-tsc": "^3.2.5",
+    "wrangler": "^4.35.0"
+  },
+  "description": "VaultLite monorepo scaffold",
+  "private": true,
+  "version": "0.1.0"
+}

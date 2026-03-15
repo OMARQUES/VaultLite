@@ -1,0 +1,27 @@
+{
+  "private": true,
+  "name": "@vaultlite/crypto",
+  "exports": {
+    ".": "./src/index.ts",
+    "./account-key": "./src/account-key.ts",
+    "./account-kit": "./src/account-kit.ts",
+    "./base64": "./src/base64.ts",
+    "./blob-envelope": "./src/blob-envelope.ts",
+    "./kdf": "./src/kdf.ts",
+    "./test-vectors": "./src/test-vectors.ts",
+    "./vault-envelope": "./src/vault-envelope.ts",
+    "./versioned": "./src/versioned.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.0.1",
+    "@vaultlite/contracts": "*"
+  },
+  "version": "0.1.0",
+  "description": "Crypto package scaffold for VaultLite"
+}

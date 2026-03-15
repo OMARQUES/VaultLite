@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "name": "@vaultlite/cloudflare-runtime",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vaultlite/runtime-abstractions": "*"
+  },
+  "version": "0.1.0",
+  "description": "Cloudflare runtime adapter scaffold"
+}

@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "name": "@vaultlite/api",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "private": true,
+  "dependencies": {
+    "@vaultlite/cloudflare-storage": "*",
+    "@vaultlite/contracts": "*",
+    "@vaultlite/crypto": "*",
+    "@vaultlite/runtime-abstractions": "*",
+    "@vaultlite/storage-abstractions": "*",
+    "@vaultlite/cloudflare-runtime": "*",
+    "hono": "^4.12.8"
+  },
+  "devDependencies": {
+    "@vaultlite/test-utils": "*"
+  }
+}

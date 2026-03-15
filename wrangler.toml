@@ -1,0 +1,22 @@
+name = "vaultlite-local-api"
+main = "./apps/api/src/index.ts"
+compatibility_date = "2026-03-15"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+VAULTLITE_SERVER_URL = "http://127.0.0.1:8787"
+VAULTLITE_DEPLOYMENT_FINGERPRINT = "development_deployment"
+VAULTLITE_BOOTSTRAP_ADMIN_TOKEN = "development-bootstrap-admin-token"
+
+[[d1_databases]]
+binding = "VAULTLITE_DB"
+database_name = "vaultlite-local-db"
+database_id = "vaultlite-local-db"
+
+[[r2_buckets]]
+binding = "VAULTLITE_BLOBS"
+bucket_name = "vaultlite-local-blobs"
+
+[dev]
+ip = "127.0.0.1"
+port = 8787
