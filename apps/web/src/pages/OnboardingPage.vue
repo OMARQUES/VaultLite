@@ -2,133 +2,144 @@
 import { computed, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
+import InlineAlert from '../components/ui/InlineAlert.vue';
+import PrimaryButton from '../components/ui/PrimaryButton.vue';
+import SecretField from '../components/ui/SecretField.vue';
+import TextField from '../components/ui/TextField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import type { TrustedLocalStateRecord } from '../lib/trusted-local-state';
 
 const router = useRouter();
 const sessionStore = useSessionStore();
+
 const onboarding = reactive({
   inviteToken: '',
   username: '',
   password: '',
   deviceName: 'Primary Browser',
 });
-const exportedAccountKit = ref<TrustedLocalStateRecord['accountKit'] | null>(null);
-const exportAcknowledged = ref(false);
-const errorMessage = ref<string | null>(null);
-const isSubmitting = ref(false);
 
-const exportedAccountKitJson = computed(() =>
-  exportedAccountKit.value ? JSON.stringify(exportedAccountKit.value, null, 2) : '',
+const accountKit = ref<TrustedLocalStateRecord['accountKit'] | null>(null);
+const acknowledged = ref(false);
+const errorMessage = ref<string | null>(null);
+const busyStep = ref<'prepare' | 'finalize' | null>(null);
+
+const isBusy = computed(() => busyStep.value !== null);
+const surfaceError = computed(() => errorMessage.value ?? sessionStore.state.lastError);
+const prepareLabel = computed(() =>
+  busyStep.value === 'prepare' ? 'Generating Account Kit...' : 'Generate Account Kit',
+);
+const finalizeLabel = computed(() =>
+  busyStep.value === 'finalize' ? 'Finalizing account creation...' : 'Finalize account creation',
 );
 
 function formatOnboardingError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes('username_unavailable')) {
-    return 'Username already exists for this deployment. Pick a different username before generating Account Kit.';
+    return 'Username unavailable.';
   }
 
   return message;
 }
 
+function downloadAccountKit() {
+  if (!accountKit.value) {
+    return;
+  }
+
+  const blob = new Blob([JSON.stringify(accountKit.value, null, 2)], {
+    type: 'application/json',
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${accountKit.value.payload.username}-account-kit.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 async function prepare() {
   errorMessage.value = null;
-  isSubmitting.value = true;
+  busyStep.value = 'prepare';
 
   try {
-    exportedAccountKit.value = await sessionStore.prepareOnboarding(onboarding);
-    exportAcknowledged.value = false;
+    accountKit.value = await sessionStore.prepareOnboarding(onboarding);
+    acknowledged.value = false;
   } catch (error) {
     errorMessage.value = formatOnboardingError(error);
   } finally {
-    isSubmitting.value = false;
+    busyStep.value = null;
   }
 }
 
 async function finalize() {
   errorMessage.value = null;
-  isSubmitting.value = true;
+  busyStep.value = 'finalize';
 
   try {
     await sessionStore.finalizeOnboarding();
     await router.push('/vault');
   } catch (error) {
-    exportedAccountKit.value = null;
-    exportAcknowledged.value = false;
+    accountKit.value = null;
+    acknowledged.value = false;
     errorMessage.value = formatOnboardingError(error);
   } finally {
-    isSubmitting.value = false;
+    busyStep.value = null;
   }
 }
 </script>
 
 <template>
-  <section class="panel">
-    <p class="eyebrow">Onboarding</p>
-    <h1>Create account and initial device</h1>
-    <form v-if="!exportedAccountKit" class="stack" @submit.prevent="prepare">
-      <label>
-        Invite token
-        <input v-model="onboarding.inviteToken" required autocomplete="off" />
-      </label>
-      <label>
-        Username
-        <input v-model="onboarding.username" required autocomplete="username" />
-      </label>
-      <label>
-        Master password
-        <input
+  <section class="public-page public-page--onboarding">
+    <div class="panel-card panel-card--form">
+      <div class="page-header">
+        <p class="eyebrow">ONBOARDING</p>
+        <h1>Create account and initial device</h1>
+      </div>
+
+      <InlineAlert v-if="surfaceError" tone="danger">
+        {{ surfaceError }}
+      </InlineAlert>
+
+      <div class="warning-banner">
+        Forgotten master passwords are not recoverable.
+      </div>
+
+      <form v-if="!accountKit" class="form-stack" @submit.prevent="prepare">
+        <TextField v-model="onboarding.inviteToken" label="Invite token" autocomplete="off" required />
+        <TextField v-model="onboarding.username" label="Username" autocomplete="username" required />
+        <SecretField
           v-model="onboarding.password"
-          type="password"
-          required
+          label="Master password"
           autocomplete="new-password"
+          required
         />
-      </label>
-      <label>
-        Device name
-        <input v-model="onboarding.deviceName" required autocomplete="off" />
-      </label>
-      <button class="button primary" type="submit" :disabled="isSubmitting">
-        Generate Account Kit
-      </button>
-    </form>
+        <TextField v-model="onboarding.deviceName" label="Device name" autocomplete="off" required />
 
-    <div v-else class="stack">
-      <p>
-        Export the signed Account Kit before finalizing onboarding. The deployment metadata below is
-        canonical and comes from the API runtime.
-      </p>
-      <dl class="summary">
-        <div>
-          <dt>Server URL</dt>
-          <dd>{{ exportedAccountKit.payload.serverUrl }}</dd>
+        <div class="form-actions">
+          <PrimaryButton type="submit" :disabled="isBusy">
+            {{ prepareLabel }}
+          </PrimaryButton>
         </div>
-        <div>
-          <dt>Deployment fingerprint</dt>
-          <dd>{{ exportedAccountKit.payload.deploymentFingerprint }}</dd>
+      </form>
+
+      <section v-else class="form-stack">
+        <h2>Account Kit ready</h2>
+        <div class="form-actions form-actions--split">
+          <PrimaryButton type="button" :disabled="isBusy" @click="downloadAccountKit">
+            Download signed Account Kit
+          </PrimaryButton>
         </div>
-      </dl>
-      <textarea class="account-kit" :value="exportedAccountKitJson" readonly />
-      <label class="checkbox-row">
-        <input v-model="exportAcknowledged" type="checkbox" />
-        <span>I exported the Account Kit and understand there is no master password recovery.</span>
-      </label>
-      <button
-        class="button primary"
-        type="button"
-        :disabled="!exportAcknowledged || isSubmitting"
-        @click="finalize"
-      >
-        Finalize onboarding
-      </button>
+        <label class="checkbox-row">
+          <input v-model="acknowledged" type="checkbox" />
+          <span>I stored the Account Kit outside this browser session.</span>
+        </label>
+        <div class="form-actions">
+          <PrimaryButton type="button" :disabled="!acknowledged || isBusy" @click="finalize">
+            {{ finalizeLabel }}
+          </PrimaryButton>
+        </div>
+      </section>
     </div>
-
-    <p class="warning">
-      Forgotten master passwords are not recoverable. Account Kit export must be stored outside this
-      browser session before onboarding is finalized.
-    </p>
-    <p v-if="errorMessage || sessionStore.state.lastError" class="error-banner">
-      {{ errorMessage ?? sessionStore.state.lastError }}
-    </p>
   </section>
 </template>

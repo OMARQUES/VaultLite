@@ -6,6 +6,7 @@ import { createVaultLiteAuthClient } from './lib/auth-client';
 import { createSessionStore } from './lib/session-store';
 import { createTrustedLocalStateStore } from './lib/trusted-local-state';
 import { createVaultLiteRouter } from './router';
+import './styles.css';
 
 const sessionStore = createSessionStore({
   authClient: createVaultLiteAuthClient(),

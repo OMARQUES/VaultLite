@@ -1,18 +1,19 @@
 <script setup lang="ts">
+import { RouterLink } from 'vue-router';
 </script>
 
 <template>
-  <section class="panel hero">
-    <p class="eyebrow">VaultLite V1</p>
-    <h1>Trusted-device shell</h1>
-    <p>
-      This client already separates remote authentication, local unlock, and session restoration.
-      The protected vault UI is still a shell for the next phase.
-    </p>
-    <nav class="actions">
-      <RouterLink class="button primary" to="/onboarding">Start onboarding</RouterLink>
-      <RouterLink class="button" to="/auth">Remote authentication</RouterLink>
-      <RouterLink class="button" to="/vault">Vault shell</RouterLink>
-    </nav>
+  <section class="public-page public-page--home">
+    <div class="hero-card">
+      <p class="eyebrow">VaultLite v1</p>
+      <h1>Direct, calm vault access for trusted groups</h1>
+      <p class="hero-card__body">
+        VaultLite keeps vault access focused for trusted users and devices.
+      </p>
+      <div class="hero-card__actions">
+        <RouterLink class="button button--primary" to="/onboarding">Start onboarding</RouterLink>
+        <RouterLink class="button button--secondary" to="/auth">Remote authentication</RouterLink>
+      </div>
+    </div>
   </section>
 </template>

@@ -4,14 +4,43 @@ import { createRouter, createWebHistory } from 'vue-router';
 import HomePage from './pages/HomePage.vue';
 import OnboardingPage from './pages/OnboardingPage.vue';
 import RemoteAuthenticationPage from './pages/RemoteAuthenticationPage.vue';
+import SettingsPage from './pages/SettingsPage.vue';
 import UnlockPage from './pages/UnlockPage.vue';
 import VaultShellPage from './pages/VaultShellPage.vue';
+
+function isVaultRoute(path: string) {
+  return path === '/vault' || path.startsWith('/vault/');
+}
+
+function isSettingsRoute(path: string) {
+  return path === '/settings';
+}
+
+function isAuthenticatedRoute(path: string) {
+  return isVaultRoute(path) || isSettingsRoute(path);
+}
 
 export function resolveNavigationTarget(input: {
   phase: SessionState['phase'];
   targetPath: string;
 }): string | undefined {
-  if (input.targetPath === '/vault') {
+  if (input.targetPath === '/') {
+    if (input.phase === 'onboarding_export_required') {
+      return '/onboarding';
+    }
+
+    if (input.phase === 'local_unlock_required') {
+      return '/unlock';
+    }
+
+    if (input.phase === 'ready') {
+      return '/vault';
+    }
+
+    return undefined;
+  }
+
+  if (isAuthenticatedRoute(input.targetPath)) {
     if (input.phase === 'onboarding_export_required') {
       return '/onboarding';
     }
@@ -55,15 +84,20 @@ export function createVaultLiteRouter(sessionStore: { state: SessionState }) {
       { path: '/auth', component: RemoteAuthenticationPage },
       { path: '/unlock', component: UnlockPage },
       { path: '/vault', component: VaultShellPage },
+      { path: '/vault/new/login', component: VaultShellPage },
+      { path: '/vault/new/document', component: VaultShellPage },
+      { path: '/vault/item/:itemId', component: VaultShellPage },
+      { path: '/vault/item/:itemId/edit', component: VaultShellPage },
+      { path: '/settings', component: SettingsPage },
     ],
   });
 
-  router.beforeEach((to) => {
-    return resolveNavigationTarget({
+  router.beforeEach((to) =>
+    resolveNavigationTarget({
       phase: sessionStore.state.phase,
       targetPath: to.path,
-    });
-  });
+    }),
+  );
 
   return router;
 }
