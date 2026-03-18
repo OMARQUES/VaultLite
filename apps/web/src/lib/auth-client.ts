@@ -17,7 +17,11 @@ import type {
   BootstrapStateOutput,
   BootstrapVerifyInput,
   BootstrapVerifyOutput,
+  DeviceListOutput,
+  DeviceRevokeOutput,
   OnboardingAccountKitSignInput,
+  PasswordRotationCompleteOutput,
+  PasswordRotationInput,
   RecentReauthInput,
   RecentReauthOutput,
   RemoteAuthenticationChallengeOutput,
@@ -95,6 +99,9 @@ export interface VaultLiteAuthClient {
   suspendAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
   reactivateAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
   deprovisionAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
+  listDevices(): Promise<DeviceListOutput>;
+  revokeDevice(deviceId: string): Promise<DeviceRevokeOutput>;
+  completePasswordRotation(input: PasswordRotationInput): Promise<PasswordRotationCompleteOutput>;
 }
 
 async function requestJson<T>(
@@ -353,6 +360,30 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         `${baseUrl}/api/admin/users/${encodeURIComponent(userId)}/deprovision`,
         withIdempotencyHeader({
           method: 'POST',
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listDevices() {
+      return requestJson<DeviceListOutput>(`${baseUrl}/api/auth/devices`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
+    },
+    revokeDevice(deviceId) {
+      return requestJson<DeviceRevokeOutput>(
+        `${baseUrl}/api/auth/devices/${encodeURIComponent(deviceId)}/revoke`,
+        withIdempotencyHeader({
+          method: 'POST',
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    completePasswordRotation(input) {
+      return requestJson<PasswordRotationCompleteOutput>(
+        `${baseUrl}/api/auth/password-rotation/complete`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
         }),
         { emitUnauthorizedEvent: true },
       );

@@ -70,6 +70,9 @@ describe('domain vault entities', () => {
       ownerUserId: 'user_1',
       itemType: 'login',
       revision: 3,
+      encryptedPayload: 'encrypted_payload_v2',
+      createdAt: '2026-03-15T12:00:00.000Z',
+      updatedAt: '2026-03-15T12:05:00.000Z',
       deletedAt: '2026-03-15T12:10:00.000Z',
     };
 

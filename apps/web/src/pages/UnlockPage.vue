@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 
 import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
+import SecondaryButton from '../components/ui/SecondaryButton.vue';
 import SecretField from '../components/ui/SecretField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import { toHumanErrorMessage } from '../lib/human-error';
@@ -23,7 +24,7 @@ const routeReasonError = computed(() => {
     return 'Your account is suspended. Ask the owner to reactivate access.';
   }
   if (reason === 'session_revoked') {
-    return 'Your account is suspended or your session is no longer valid.';
+    return 'This trusted session was revoked. Add this device again to continue.';
   }
   return null;
 });
@@ -63,6 +64,10 @@ async function submit() {
     isSubmitting.value = false;
   }
 }
+
+async function goToDeviceSetup() {
+  await router.push('/auth');
+}
 </script>
 
 <template>
@@ -100,6 +105,13 @@ async function submit() {
           <PrimaryButton type="submit" :disabled="isSubmitting">
             {{ isSubmitting ? 'Unlocking...' : 'Unlock' }}
           </PrimaryButton>
+          <SecondaryButton
+            v-if="routeReasonError && routeReasonError.includes('Add this device again')"
+            type="button"
+            @click="goToDeviceSetup"
+          >
+            Add this device again
+          </SecondaryButton>
         </div>
       </form>
     </div>

@@ -1,4 +1,9 @@
-import type { RuntimeMetadata } from '@vaultlite/contracts';
+import type {
+  DeviceListOutput,
+  DeviceRevokeOutput,
+  PasswordRotationCompleteOutput,
+  RuntimeMetadata,
+} from '@vaultlite/contracts';
 import { reactive, readonly } from 'vue';
 
 import {
@@ -52,6 +57,7 @@ export interface SessionState {
   deviceId: string | null;
   deviceName: string | null;
   lifecycleState: 'active' | 'suspended' | 'deprovisioned' | null;
+  bundleVersion: number | null;
   lastError: string | null;
   lastActivityAt: number | null;
   autoLockAfterMs: number;
@@ -83,6 +89,17 @@ export interface SessionStore {
     password: string;
   }): Promise<void>;
   reissueAccountKit(): Promise<NonNullable<TrustedLocalStateRecord['accountKit']>>;
+  confirmRecentReauth(input: {
+    password: string;
+  }): Promise<{
+    validUntil: string;
+  }>;
+  listDevices(): Promise<DeviceListOutput>;
+  revokeDevice(deviceId: string): Promise<DeviceRevokeOutput>;
+  rotatePassword(input: {
+    currentPassword: string;
+    nextPassword: string;
+  }): Promise<PasswordRotationCompleteOutput>;
   handleUnauthorized(input?: {
     reasonCode?: string | null;
     message?: string | null;
@@ -162,6 +179,7 @@ export function createSessionStore(input: {
     deviceId: null,
     deviceName: null,
     lifecycleState: null,
+    bundleVersion: null,
     lastError: null,
     lastActivityAt: null,
     autoLockAfterMs: readPersistedAutoLockAfterMs(),
@@ -215,6 +233,7 @@ export function createSessionStore(input: {
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
+          bundleVersion: null,
           lastError: null,
           lastActivityAt: null,
         });
@@ -232,6 +251,7 @@ export function createSessionStore(input: {
           deviceId: null,
           deviceName: null,
           lifecycleState: restored.user?.lifecycleState ?? null,
+          bundleVersion: restored.user?.bundleVersion ?? null,
           lastError: null,
           lastActivityAt: null,
         });
@@ -249,6 +269,7 @@ export function createSessionStore(input: {
           deviceId: restored.device.deviceId,
           deviceName: restored.device.deviceName,
           lifecycleState: restored.user.lifecycleState,
+          bundleVersion: restored.user.bundleVersion,
           lastError: 'This device is no longer trusted for this account. Add the device again.',
           lastActivityAt: null,
         });
@@ -265,6 +286,7 @@ export function createSessionStore(input: {
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
+          bundleVersion: null,
           lastError: 'Deployment initialization in progress.',
           lastActivityAt: null,
         });
@@ -279,6 +301,7 @@ export function createSessionStore(input: {
         deviceId: restored.device.deviceId,
         deviceName: restored.device.deviceName,
         lifecycleState: restored.user.lifecycleState,
+        bundleVersion: restored.user.bundleVersion,
         lastError: null,
         lastActivityAt: null,
       });
@@ -292,6 +315,7 @@ export function createSessionStore(input: {
         deviceId: null,
         deviceName: onboarding.deviceName,
         lifecycleState: null,
+        bundleVersion: null,
         lastError: null,
         lastActivityAt: null,
       });
@@ -349,6 +373,7 @@ export function createSessionStore(input: {
           deviceId,
           deviceName: onboarding.deviceName,
           lifecycleState: null,
+          bundleVersion: null,
           lastError: null,
           lastActivityAt: null,
         });
@@ -364,6 +389,7 @@ export function createSessionStore(input: {
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
+          bundleVersion: null,
           lastError: asErrorMessage(error),
           lastActivityAt: null,
         });
@@ -424,6 +450,7 @@ export function createSessionStore(input: {
           deviceId: session.device.deviceId,
           deviceName: session.device.deviceName,
           lifecycleState: session.user.lifecycleState,
+          bundleVersion: session.user.bundleVersion,
           lastError: null,
           lastActivityAt: Date.now(),
         });
@@ -440,6 +467,7 @@ export function createSessionStore(input: {
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
+          bundleVersion: null,
           lastError: asErrorMessage(error),
           lastActivityAt: null,
         });
@@ -454,6 +482,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: authentication.username,
           role: null,
+          bundleVersion: null,
           lastError: message,
         });
         throw new Error(message);
@@ -475,6 +504,7 @@ export function createSessionStore(input: {
         deviceId: session.device.deviceId,
         deviceName: session.device.deviceName,
         lifecycleState: session.user.lifecycleState,
+        bundleVersion: session.user.bundleVersion,
         lastError: null,
         lastActivityAt: null,
       });
@@ -542,6 +572,7 @@ export function createSessionStore(input: {
         deviceId: response.device.deviceId,
         deviceName: response.device.deviceName,
         lifecycleState: response.user.lifecycleState,
+        bundleVersion: response.user.bundleVersion,
         lastError: null,
         lastActivityAt: null,
       });
@@ -555,6 +586,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: unlock.username,
           role: null,
+          bundleVersion: null,
           lastError: message,
         });
         throw new Error(message);
@@ -583,6 +615,7 @@ export function createSessionStore(input: {
           deviceId: trustedLocalState.deviceId,
           deviceName: trustedLocalState.deviceName,
           lifecycleState: restored.user?.lifecycleState ?? state.lifecycleState,
+          bundleVersion: restored.user?.bundleVersion ?? state.bundleVersion,
           lastError: message,
           lastActivityAt: null,
         });
@@ -603,6 +636,7 @@ export function createSessionStore(input: {
         deviceId: restored.device.deviceId,
         deviceName: restored.device.deviceName,
         lifecycleState: restored.user.lifecycleState,
+        bundleVersion: restored.user.bundleVersion,
         lastError: null,
         lastActivityAt: Date.now(),
       });
@@ -610,8 +644,10 @@ export function createSessionStore(input: {
     handleUnauthorized(inputData) {
       clearReadyState();
       const message = unauthorizedMessage(inputData);
+      const shouldRequireUnlock =
+        inputData?.reasonCode === 'account_suspended' && Boolean(state.username);
       transition({
-        phase: state.username ? 'local_unlock_required' : 'remote_authentication_required',
+        phase: shouldRequireUnlock ? 'local_unlock_required' : 'remote_authentication_required',
         lastError: message,
         lastActivityAt: null,
       });
@@ -636,6 +672,120 @@ export function createSessionStore(input: {
         payload,
         signature: signed.signature,
       };
+    },
+    async confirmRecentReauth(inputData) {
+      if (!state.username) {
+        throw new Error('Recent reauth requires an authenticated user');
+      }
+
+      const trustedLocalState = await input.trustedLocalStateStore.load(state.username);
+      if (!trustedLocalState || (state.deviceId && trustedLocalState.deviceId !== state.deviceId)) {
+        throw new Error('This device is no longer trusted for this account. Add the device again.');
+      }
+
+      const authProof = await deriveAuthProof(inputData.password, trustedLocalState.authSalt);
+      const response = await input.authClient.recentReauth({ authProof });
+      return {
+        validUntil: response.validUntil,
+      };
+    },
+    async listDevices() {
+      if (!state.username || !state.userId) {
+        throw new Error('Device list requires an authenticated user');
+      }
+      return input.authClient.listDevices();
+    },
+    async revokeDevice(deviceId) {
+      if (!state.username || !state.userId) {
+        throw new Error('Device revoke requires an authenticated user');
+      }
+      return input.authClient.revokeDevice(deviceId);
+    },
+    async rotatePassword(rotation) {
+      if (!readyState || !state.username || !state.userId || !state.deviceId || state.phase !== 'ready') {
+        throw new Error('Password rotation requires unlocked state');
+      }
+
+      const trustedLocalState = await input.trustedLocalStateStore.load(state.username);
+      if (!trustedLocalState || trustedLocalState.deviceId !== state.deviceId) {
+        throw new Error('This device is no longer trusted for this account. Add the device again.');
+      }
+
+      const currentAuthProof = await deriveAuthProof(rotation.currentPassword, trustedLocalState.authSalt);
+      await input.authClient.recentReauth({
+        authProof: currentAuthProof,
+      });
+
+      const nextAuthSalt = createRandomBase64Url(16);
+      const nextAuthVerifier = await deriveAuthProof(rotation.nextPassword, nextAuthSalt);
+      const nextEncryptedAccountBundle = trustedLocalState.encryptedAccountBundle;
+      const nextAccountKeyWrapped = trustedLocalState.accountKeyWrapped;
+      const expectedBundleVersion = state.bundleVersion ?? 0;
+      const accountKey = readyState.accountKey;
+      const rotationResponse = await input.authClient.completePasswordRotation({
+        currentAuthProof,
+        nextAuthSalt,
+        nextAuthVerifier,
+        nextEncryptedAccountBundle,
+        nextAccountKeyWrapped,
+        expected_bundle_version: expectedBundleVersion,
+      });
+
+      const nextEnvelope = await createLocalUnlockEnvelope({
+        password: rotation.nextPassword,
+        authSalt: nextAuthSalt,
+        payload: {
+          accountKey,
+          encryptedAccountBundle: nextEncryptedAccountBundle,
+          accountKeyWrapped: nextAccountKeyWrapped,
+        },
+      });
+      const nextUpdatedAt = new Date().toISOString();
+
+      try {
+        await input.trustedLocalStateStore.save({
+          ...trustedLocalState,
+          authSalt: nextAuthSalt,
+          encryptedAccountBundle: nextEncryptedAccountBundle,
+          accountKeyWrapped: nextAccountKeyWrapped,
+          localUnlockEnvelope: nextEnvelope,
+          updatedAt: nextUpdatedAt,
+        });
+      } catch {
+        clearReadyState();
+        transition({
+          phase: 'local_unlock_required',
+          username: rotationResponse.user.username,
+          userId: rotationResponse.user.userId,
+          role: rotationResponse.user.role,
+          deviceId: rotationResponse.device.deviceId,
+          deviceName: rotationResponse.device.deviceName,
+          lifecycleState: rotationResponse.user.lifecycleState,
+          bundleVersion: rotationResponse.bundleVersion,
+          lastError: 'Password rotation finished. Unlock this device again to continue securely.',
+          lastActivityAt: null,
+        });
+        throw new Error('Password rotation finished. Unlock this device again to continue securely.');
+      }
+
+      readyState = {
+        accountKey,
+        encryptedAccountBundle: nextEncryptedAccountBundle,
+      };
+      transition({
+        phase: 'ready',
+        username: rotationResponse.user.username,
+        userId: rotationResponse.user.userId,
+        role: rotationResponse.user.role,
+        deviceId: rotationResponse.device.deviceId,
+        deviceName: rotationResponse.device.deviceName,
+        lifecycleState: rotationResponse.user.lifecycleState,
+        bundleVersion: rotationResponse.bundleVersion,
+        lastError: null,
+        lastActivityAt: Date.now(),
+      });
+
+      return rotationResponse;
     },
     setAutoLockAfterMs(value: number) {
       if (!isValidAutoLockAfterMs(value)) {

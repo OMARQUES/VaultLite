@@ -295,4 +295,184 @@ describe('vault item CRUD API', () => {
       code: 'revision_conflict',
     });
   });
+
+  test('returns item_deleted_conflict when updating an item already tombstoned', async () => {
+    const { app, aliceHeaders } = await createAuthenticatedVaultFixture();
+
+    const createResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_v1',
+      }),
+    });
+    const created = await createResponse.json();
+
+    const deleteResponse = await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'DELETE',
+      headers: aliceHeaders,
+    });
+    expect(deleteResponse.status).toBe(204);
+
+    const updateDeletedResponse = await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'PUT',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_v2',
+        expectedRevision: created.revision + 1,
+      }),
+    });
+    expect(updateDeletedResponse.status).toBe(409);
+    expect(await updateDeletedResponse.json()).toEqual({
+      ok: false,
+      code: 'item_deleted_conflict',
+    });
+  });
+
+  test('treats delete replay on tombstoned item as 204 idempotent no-op', async () => {
+    const { app, aliceHeaders } = await createAuthenticatedVaultFixture();
+
+    const createResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'document',
+        encryptedPayload: 'encrypted_document_payload_v1',
+      }),
+    });
+    const created = await createResponse.json();
+
+    const firstDelete = await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'DELETE',
+      headers: aliceHeaders,
+    });
+    expect(firstDelete.status).toBe(204);
+
+    const secondDelete = await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'DELETE',
+      headers: aliceHeaders,
+    });
+    expect(secondDelete.status).toBe(204);
+  });
+
+  test('restores tombstoned items and treats replay as success_no_op', async () => {
+    const { app, aliceHeaders } = await createAuthenticatedVaultFixture();
+
+    const createResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_v1',
+      }),
+    });
+    const created = await createResponse.json();
+
+    const deleted = await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'DELETE',
+      headers: aliceHeaders,
+    });
+    expect(deleted.status).toBe(204);
+
+    const restored = await app.request(`/api/vault/items/${created.itemId}/restore`, {
+      method: 'POST',
+      headers: aliceHeaders,
+    });
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toEqual({
+      ok: true,
+      result: 'success_changed',
+      item: expect.objectContaining({
+        itemId: created.itemId,
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_v1',
+      }),
+    });
+
+    const replay = await app.request(`/api/vault/items/${created.itemId}/restore`, {
+      method: 'POST',
+      headers: aliceHeaders,
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({
+      ok: true,
+      result: 'success_no_op',
+      item: expect.objectContaining({
+        itemId: created.itemId,
+      }),
+    });
+  });
+
+  test('rejects restore attempts after retention window expiration', async () => {
+    const { app, aliceHeaders, storage } = await createAuthenticatedVaultFixture();
+    await storage.vaultItems.create({
+      itemId: 'item_expired_restore',
+      ownerUserId: 'user_1',
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'encrypted_document_payload',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await storage.vaultItems.delete('item_expired_restore', 'user_1', '2025-12-01T00:00:00.000Z');
+
+    const response = await app.request('/api/vault/items/item_expired_restore/restore', {
+      method: 'POST',
+      headers: aliceHeaders,
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'restore_window_expired',
+    });
+  });
+
+  test('enforces cross-user isolation for restore', async () => {
+    const { app, aliceHeaders, bobHeaders } = await createAuthenticatedVaultFixture();
+
+    const createResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'secure_note',
+        encryptedPayload: 'encrypted_secure_note_payload',
+      }),
+    });
+    const created = await createResponse.json();
+
+    await app.request(`/api/vault/items/${created.itemId}`, {
+      method: 'DELETE',
+      headers: aliceHeaders,
+    });
+
+    const bobRestore = await app.request(`/api/vault/items/${created.itemId}/restore`, {
+      method: 'POST',
+      headers: bobHeaders,
+    });
+    expect(bobRestore.status).toBe(404);
+    expect(await bobRestore.json()).toEqual({
+      ok: false,
+      code: 'not_found',
+    });
+  });
+
+  test('returns vault_item_restore_failed when restore storage throws unexpectedly', async () => {
+    const { app, aliceHeaders, storage } = await createAuthenticatedVaultFixture();
+    const originalRestore = storage.vaultItems.restore.bind(storage.vaultItems);
+    (storage.vaultItems as { restore: typeof originalRestore }).restore = async () => {
+      throw new Error('db_failure');
+    };
+
+    const response = await app.request('/api/vault/items/item_unexpected/restore', {
+      method: 'POST',
+      headers: aliceHeaders,
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'vault_item_restore_failed',
+    });
+  });
 });

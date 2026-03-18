@@ -33,6 +33,8 @@ import {
   MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
   OnboardingAccountKitSignInputSchema,
   OnboardingCompleteInputSchema,
+  PasswordRotationCompleteOutputSchema,
+  PasswordRotationInputSchema,
   RecentReauthInputSchema,
   RecentReauthOutputSchema,
   RemoteAuthenticationChallengeInputSchema,
@@ -40,10 +42,14 @@ import {
   RuntimeMetadataSchema,
   RemoteAuthenticationInputSchema,
   SessionRestoreResponseSchema,
+  SyncSnapshotOutputSchema,
   TrustedSessionResponseSchema,
+  DeviceListOutputSchema,
+  DeviceRevokeOutputSchema,
   VaultItemCreateInputSchema,
   VaultItemListOutputSchema,
   VaultItemRecordSchema,
+  VaultItemRestoreOutputSchema,
   VaultItemUpdateInputSchema,
   type TrustedSessionResponse,
 } from '@vaultlite/contracts';
@@ -105,6 +111,15 @@ const BOOTSTRAP_VERIFY_ATTEMPT_LIMIT = 20;
 const BOOTSTRAP_VERIFY_WINDOW_SECONDS = 5 * 60;
 const AUTH_RATE_LIMIT_ATTEMPT_LIMIT = 5;
 const AUTH_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
+const SYNC_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
+const SYNC_RATE_LIMIT_SESSION_ATTEMPT_LIMIT = 120;
+const SYNC_RATE_LIMIT_USER_ATTEMPT_LIMIT = 300;
+const SYNC_RATE_LIMIT_IP_ATTEMPT_LIMIT = 1000;
+const SYNC_SNAPSHOT_TOKEN_TTL_SECONDS = 5 * 60;
+const SYNC_SNAPSHOT_PAGE_SIZE_DEFAULT = 25;
+const SYNC_SNAPSHOT_PAGE_SIZE_MAX = 100;
+const SYNC_SNAPSHOT_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS = 30;
 const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
 const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
 const ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES = MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES;
@@ -124,6 +139,20 @@ function normalizeIsoTimestamp(value: string): string {
 
 function addMinutes(value: Date, minutes: number): string {
   return new Date(value.getTime() + minutes * 60 * 1000).toISOString();
+}
+
+function isWithinRestoreRetentionWindow(input: {
+  deletedAtIso: string;
+  referenceIso: string;
+  retentionDays: number;
+}): boolean {
+  const deletedAtMillis = Date.parse(input.deletedAtIso);
+  const referenceMillis = Date.parse(input.referenceIso);
+  if (!Number.isFinite(deletedAtMillis) || !Number.isFinite(referenceMillis)) {
+    return false;
+  }
+  const retentionMillis = input.retentionDays * 24 * 60 * 60 * 1000;
+  return deletedAtMillis + retentionMillis >= referenceMillis;
 }
 
 function base64UrlToUtf8(value: string): string {
@@ -367,6 +396,118 @@ function verifyBootstrapVerificationToken(input: {
   }
 }
 
+type SyncSnapshotTokenPayload = {
+  v: 'sync.snapshot.v1';
+  userId: string;
+  snapshotAsOf: string;
+  snapshotDigest: string;
+  pageSize: number;
+  exp: string;
+};
+
+type SyncSnapshotCursorPayload = {
+  v: 'sync.cursor.v1';
+  snapshotDigest: string;
+  offset: number;
+};
+
+function createSyncSnapshotToken(input: {
+  bootstrapSecret: string;
+  payload: SyncSnapshotTokenPayload;
+}): string {
+  const payloadEncoded = utf8ToBase64Url(JSON.stringify(input.payload));
+  const signature = toBase64Url(createHmac('sha256', input.bootstrapSecret).update(payloadEncoded).digest());
+  return `${payloadEncoded}.${signature}`;
+}
+
+function verifySyncSnapshotToken(input: {
+  token: string;
+  bootstrapSecret: string;
+  nowIso: string;
+}): { ok: true; payload: SyncSnapshotTokenPayload } | { ok: false; reason: 'invalid' | 'expired' } {
+  const [payloadEncoded, signature] = input.token.split('.');
+  if (!payloadEncoded || !signature) {
+    return { ok: false, reason: 'invalid' };
+  }
+  const expectedSignature = toBase64Url(createHmac('sha256', input.bootstrapSecret).update(payloadEncoded).digest());
+  if (!timingSafeSecretEquals(signature, expectedSignature)) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  try {
+    const parsed = JSON.parse(base64UrlToUtf8(payloadEncoded)) as Partial<SyncSnapshotTokenPayload>;
+    if (
+      parsed.v !== 'sync.snapshot.v1' ||
+      typeof parsed.userId !== 'string' ||
+      typeof parsed.snapshotAsOf !== 'string' ||
+      typeof parsed.snapshotDigest !== 'string' ||
+      typeof parsed.pageSize !== 'number' ||
+      !Number.isInteger(parsed.pageSize) ||
+      parsed.pageSize <= 0 ||
+      typeof parsed.exp !== 'string'
+    ) {
+      return { ok: false, reason: 'invalid' };
+    }
+    if (parseIsoTimestamp(parsed.exp) <= parseIsoTimestamp(input.nowIso)) {
+      return { ok: false, reason: 'expired' };
+    }
+    return {
+      ok: true,
+      payload: {
+        v: 'sync.snapshot.v1',
+        userId: parsed.userId,
+        snapshotAsOf: parsed.snapshotAsOf,
+        snapshotDigest: parsed.snapshotDigest,
+        pageSize: parsed.pageSize,
+        exp: parsed.exp,
+      },
+    };
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+}
+
+function encodeSyncSnapshotCursor(input: SyncSnapshotCursorPayload): string {
+  return utf8ToBase64Url(JSON.stringify(input));
+}
+
+function decodeSyncSnapshotCursor(cursor: string): SyncSnapshotCursorPayload | null {
+  try {
+    const parsed = JSON.parse(base64UrlToUtf8(cursor)) as Partial<SyncSnapshotCursorPayload>;
+    if (
+      parsed.v !== 'sync.cursor.v1' ||
+      typeof parsed.snapshotDigest !== 'string' ||
+      typeof parsed.offset !== 'number' ||
+      !Number.isInteger(parsed.offset) ||
+      parsed.offset < 0
+    ) {
+      return null;
+    }
+    return {
+      v: 'sync.cursor.v1',
+      snapshotDigest: parsed.snapshotDigest,
+      offset: parsed.offset,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildSyncSnapshotDigest(entries: Array<Record<string, unknown>>): string {
+  return sha256Base64Url(JSON.stringify(entries));
+}
+
+function parseSyncSnapshotPageSize(rawValue: string | undefined): number | null {
+  if (!rawValue) {
+    return SYNC_SNAPSHOT_PAGE_SIZE_DEFAULT;
+  }
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.min(parsed, SYNC_SNAPSHOT_PAGE_SIZE_MAX);
+}
+
 function toPayloadHash(payload: unknown): string {
   return sha256Base64Url(JSON.stringify(payload));
 }
@@ -563,6 +704,7 @@ function buildTrustedSessionResponse(input: {
       userId: input.user.userId,
       username: input.user.username,
       role: input.user.role,
+      bundleVersion: input.user.bundleVersion,
       lifecycleState: input.user.lifecycleState,
     },
     device: {
@@ -1024,6 +1166,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         userId: user.userId,
         username: user.username,
         role: user.role,
+        bundleVersion: user.bundleVersion,
         lifecycleState: user.lifecycleState,
       },
       device: {
@@ -2100,6 +2243,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
           userId: sessionContext.user.userId,
           username: sessionContext.user.username,
           role: sessionContext.user.role,
+          bundleVersion: sessionContext.user.bundleVersion,
           lifecycleState: sessionContext.user.lifecycleState,
         },
         device: {
@@ -2109,6 +2253,560 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         },
       }),
     );
+  });
+
+  app.get('/api/auth/devices', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+
+    const [devices, sessions] = await Promise.all([
+      options.storage.devices.listByUserId(sessionContext.user.userId),
+      options.storage.sessions.listByUserId(sessionContext.user.userId),
+    ]);
+
+    const lastAuthenticatedAtByDevice = new Map<string, string>();
+    for (const session of sessions) {
+      const candidates = [session.createdAt, session.recentReauthAt].filter(
+        (candidate): candidate is string => candidate !== null,
+      );
+      if (candidates.length === 0) {
+        continue;
+      }
+      const latestForSession = candidates.reduce((latest, value) =>
+        parseIsoTimestamp(value) > parseIsoTimestamp(latest) ? value : latest,
+      );
+      const currentLatest = lastAuthenticatedAtByDevice.get(session.deviceId);
+      if (!currentLatest || parseIsoTimestamp(latestForSession) > parseIsoTimestamp(currentLatest)) {
+        lastAuthenticatedAtByDevice.set(session.deviceId, latestForSession);
+      }
+    }
+
+    const body = DeviceListOutputSchema.parse({
+      devices: devices
+        .map((device) => ({
+          deviceId: device.deviceId,
+          deviceName: device.deviceName,
+          platform: device.platform,
+          deviceState: device.deviceState,
+          createdAt: device.createdAt,
+          revokedAt: device.revokedAt,
+          isCurrentDevice: device.deviceId === sessionContext.session.deviceId,
+          lastAuthenticatedAt: lastAuthenticatedAtByDevice.get(device.deviceId) ?? null,
+        }))
+        .sort((left, right) => {
+          if (left.isCurrentDevice !== right.isCurrentDevice) {
+            return left.isCurrentDevice ? -1 : 1;
+          }
+          return right.createdAt.localeCompare(left.createdAt);
+        }),
+    });
+
+    return jsonResponse(200, body);
+  });
+
+  app.post('/api/auth/devices/:deviceId/revoke', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const nowIso = isoNow(options.clock);
+    if (!hasValidRecentReauth({ nowIso, session: sessionContext.session })) {
+      return jsonResponse(403, { ok: false, code: 'recent_reauth_required' });
+    }
+
+    const deploymentState = await options.storage.deploymentState.get();
+    if (deploymentState.bootstrapState !== 'INITIALIZED') {
+      return jsonResponse(409, { ok: false, code: 'initialization_pending' });
+    }
+
+    const idempotencyKey = c.req.header('x-idempotency-key');
+    if (!idempotencyKey) {
+      return jsonResponse(400, { ok: false, code: 'idempotency_key_required' });
+    }
+
+    const targetDeviceId = c.req.param('deviceId');
+    const idempotencyScope = getIdempotencyScope({
+      method: 'POST',
+      routeTemplate: '/api/auth/devices/:deviceId/revoke',
+      actorScope: getActorScope({
+        deploymentFingerprint: options.deploymentFingerprint,
+        userId: sessionContext.user.userId,
+        sessionId: sessionContext.session.sessionId,
+      }),
+      idempotencyKey,
+    });
+    const payloadHash = toPayloadHash({
+      targetDeviceId,
+      sessionId: sessionContext.session.sessionId,
+      deviceId: sessionContext.session.deviceId,
+    });
+    const precheck = await resolveIdempotencyPrecheck({
+      storage: options.storage,
+      clock: options.clock,
+      scope: idempotencyScope,
+      payloadHash,
+    });
+    if (precheck.replayResponse) {
+      return precheck.replayResponse;
+    }
+
+    const targetDevice = await options.storage.devices.findById(targetDeviceId);
+    if (!targetDevice || targetDevice.userId !== sessionContext.user.userId) {
+      const notFoundBody = { ok: false, code: 'device_not_found' };
+      return jsonResponse(404, notFoundBody);
+    }
+
+    let result: CanonicalResult = 'success_changed';
+    let reasonCode: string | null = null;
+    if (targetDevice.deviceId === sessionContext.session.deviceId) {
+      result = 'conflict';
+      reasonCode = 'cannot_revoke_current_device';
+    } else if (targetDevice.deviceState !== 'active' || targetDevice.revokedAt !== null) {
+      result = 'success_no_op';
+      reasonCode = 'device_already_revoked';
+    } else {
+      await options.storage.revokeDeviceAndSessionsAtomic({
+        userId: sessionContext.user.userId,
+        deviceId: targetDevice.deviceId,
+        revokedAtIso: nowIso,
+      });
+    }
+
+    const body = DeviceRevokeOutputSchema.parse({
+      ok: true,
+      result: toCanonicalResult(result),
+      ...(reasonCode ? { reasonCode } : {}),
+    });
+    const statusCode = toStatusFromResult(result);
+    const audit = await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_device_revoke',
+      actorUserId: sessionContext.user.userId,
+      targetType: 'device',
+      targetId: targetDevice.deviceId,
+      result,
+      reasonCode,
+    });
+    await persistIdempotencyResult({
+      storage: options.storage,
+      clock: options.clock,
+      scope: idempotencyScope,
+      payloadHash,
+      statusCode,
+      responseBody: body,
+      result,
+      reasonCode,
+      resourceRefs: `device:${targetDevice.deviceId}`,
+      auditEventId: audit.eventId,
+    });
+    return jsonResponse(statusCode, body);
+  });
+
+  app.post('/api/auth/password-rotation/complete', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+
+    const deploymentState = await options.storage.deploymentState.get();
+    if (deploymentState.bootstrapState !== 'INITIALIZED') {
+      return jsonResponse(409, { ok: false, code: 'initialization_pending' });
+    }
+
+    const nowIso = isoNow(options.clock);
+    if (!hasValidRecentReauth({ nowIso, session: sessionContext.session })) {
+      return jsonResponse(403, { ok: false, code: 'recent_reauth_required' });
+    }
+
+    const idempotencyKey = c.req.header('x-idempotency-key');
+    if (!idempotencyKey) {
+      return jsonResponse(400, { ok: false, code: 'idempotency_key_required' });
+    }
+
+    const input = PasswordRotationInputSchema.parse(await c.req.json());
+    const idempotencyScope = getIdempotencyScope({
+      method: 'POST',
+      routeTemplate: '/api/auth/password-rotation/complete',
+      actorScope: `deployment:${options.deploymentFingerprint}:user:${sessionContext.user.userId}:password-rotation`,
+      idempotencyKey,
+    });
+    const payloadHash = toPayloadHash({
+      input,
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.session.deviceId,
+    });
+    const existingIdempotency = await options.storage.idempotency.get(idempotencyScope, nowIso);
+    if (existingIdempotency) {
+      if (existingIdempotency.payloadHash !== payloadHash) {
+        return jsonResponse(409, { ok: false, code: 'idempotency_key_reuse_conflict' });
+      }
+      return jsonResponse(existingIdempotency.statusCode, JSON.parse(existingIdempotency.responseBody));
+    }
+
+    const rotatedSession = buildTrustedSessionRecord({
+      clock: options.clock,
+      idGenerator: options.idGenerator,
+      user: sessionContext.user,
+      device: sessionContext.device,
+    });
+    const newSession: SessionRecord = {
+      ...rotatedSession,
+      recentReauthAt: nowIso,
+      rotatedFromSessionId: sessionContext.session.sessionId,
+    };
+
+    let rotated;
+    try {
+      rotated = await options.storage.rotatePasswordAtomic({
+        userId: sessionContext.user.userId,
+        currentSessionId: sessionContext.session.sessionId,
+        currentAuthVerifier: input.currentAuthProof,
+        nextAuthSalt: input.nextAuthSalt,
+        nextAuthVerifier: input.nextAuthVerifier,
+        nextEncryptedAccountBundle: input.nextEncryptedAccountBundle,
+        nextAccountKeyWrapped: input.nextAccountKeyWrapped,
+        expectedBundleVersion: input.expected_bundle_version,
+        updatedAtIso: nowIso,
+        revokedAtIso: nowIso,
+        newSession,
+      });
+    } catch (error) {
+      let result: CanonicalResult = 'conflict';
+      let statusCode = 409;
+      let code = 'password_rotation_failed';
+      let reasonCode: string | null = 'password_rotation_failed';
+
+      if (error instanceof Error && error.message === 'invalid_credentials') {
+        result = 'denied';
+        statusCode = 401;
+        code = 'invalid_credentials';
+        reasonCode = 'invalid_credentials';
+      } else if (error instanceof Error && error.message === 'stale_bundle_version') {
+        code = 'stale_bundle_version';
+        reasonCode = 'stale_bundle_version';
+      } else if (
+        error instanceof Error &&
+        (error.message === 'unauthorized' || error.message === 'user_not_found')
+      ) {
+        code = 'rotation_context_invalid';
+        reasonCode = 'rotation_context_invalid';
+      }
+
+      const failureBody = {
+        ok: false,
+        code,
+      };
+      const audit = await createAuditEvent({
+        storage: options.storage,
+        idGenerator: options.idGenerator,
+        clock: options.clock,
+        request: c.req.raw,
+        eventType: 'auth_password_rotation_complete',
+        actorUserId: sessionContext.user.userId,
+        targetType: 'user',
+        targetId: sessionContext.user.userId,
+        result,
+        reasonCode,
+      });
+      await persistIdempotencyResult({
+        storage: options.storage,
+        clock: options.clock,
+        scope: idempotencyScope,
+        payloadHash,
+        statusCode,
+        responseBody: failureBody,
+        result,
+        reasonCode,
+        resourceRefs: `user:${sessionContext.user.userId}`,
+        auditEventId: audit.eventId,
+      });
+      return jsonResponse(statusCode, failureBody);
+    }
+
+    const body = PasswordRotationCompleteOutputSchema.parse({
+      ok: true,
+      result: toCanonicalResult('success_changed'),
+      bundleVersion: rotated.user.bundleVersion,
+      user: {
+        userId: rotated.user.userId,
+        username: rotated.user.username,
+        role: rotated.user.role,
+        bundleVersion: rotated.user.bundleVersion,
+        lifecycleState: rotated.user.lifecycleState,
+      },
+      device: {
+        deviceId: sessionContext.device.deviceId,
+        deviceName: sessionContext.device.deviceName,
+        platform: sessionContext.device.platform,
+      },
+    });
+    const audit = await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_password_rotation_complete',
+      actorUserId: rotated.user.userId,
+      targetType: 'user',
+      targetId: rotated.user.userId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+    await persistIdempotencyResult({
+      storage: options.storage,
+      clock: options.clock,
+      scope: idempotencyScope,
+      payloadHash,
+      statusCode: 200,
+      responseBody: body,
+      result: 'success_changed',
+      reasonCode: null,
+      resourceRefs: `user:${rotated.user.userId}`,
+      auditEventId: audit.eventId,
+    });
+
+    const response = jsonResponse(200, body);
+    addSessionCookies(response, {
+      sessionId: rotated.session.sessionId,
+      csrfToken: rotated.session.csrfToken,
+      secure: options.secureCookies,
+    });
+    return response;
+  });
+
+  app.get('/api/sync/snapshot', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+
+    const nowIso = isoNow(options.clock);
+    const ip = resolveRequestIp(c.req.raw);
+    const [sessionRate, userRate, ipRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: `sync-snapshot:session:${sessionContext.session.sessionId}`,
+        nowIso,
+        windowSeconds: SYNC_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: `sync-snapshot:user:${sessionContext.user.userId}`,
+        nowIso,
+        windowSeconds: SYNC_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: `sync-snapshot:ip:${ip}`,
+        nowIso,
+        windowSeconds: SYNC_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      sessionRate.attemptCount > SYNC_RATE_LIMIT_SESSION_ATTEMPT_LIMIT ||
+      userRate.attemptCount > SYNC_RATE_LIMIT_USER_ATTEMPT_LIMIT ||
+      ipRate.attemptCount > SYNC_RATE_LIMIT_IP_ATTEMPT_LIMIT
+    ) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
+
+    const snapshotTokenQuery = c.req.query('snapshotToken');
+    const cursorQuery = c.req.query('cursor');
+    const pageSizeQuery = parseSyncSnapshotPageSize(c.req.query('pageSize'));
+    if (pageSizeQuery === null) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    if (!snapshotTokenQuery && cursorQuery) {
+      return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+    }
+
+    const buildSnapshotEntries = async (snapshotAsOf: string) => {
+      const [items, tombstones] = await Promise.all([
+        options.storage.vaultItems.listByOwnerUserId(sessionContext.user.userId),
+        options.storage.vaultItems.listTombstonesByOwnerUserId(sessionContext.user.userId),
+      ]);
+
+      const itemEntries = items
+        .filter((item) => item.updatedAt <= snapshotAsOf)
+        .map((item) => ({
+          entryType: 'item' as const,
+          item: {
+            itemId: item.itemId,
+            itemType: item.itemType,
+            revision: item.revision,
+            encryptedPayload: item.encryptedPayload,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+          },
+          _sortAt: item.updatedAt,
+          _sortId: item.itemId,
+        }));
+      const tombstoneEntries = tombstones
+        .filter(
+          (tombstone) =>
+            tombstone.deletedAt <= snapshotAsOf &&
+            isWithinRestoreRetentionWindow({
+              deletedAtIso: tombstone.deletedAt,
+              referenceIso: snapshotAsOf,
+              retentionDays: VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS,
+            }),
+        )
+        .map((tombstone) => ({
+          entryType: 'tombstone' as const,
+          tombstone: {
+            itemId: tombstone.itemId,
+            ownerUserId: tombstone.ownerUserId,
+            itemType: tombstone.itemType,
+            revision: tombstone.revision,
+            deletedAt: tombstone.deletedAt,
+          },
+          _sortAt: tombstone.deletedAt,
+          _sortId: tombstone.itemId,
+        }));
+
+      const merged = [...itemEntries, ...tombstoneEntries]
+        .sort((left, right) => {
+          const byTimestamp = left._sortAt.localeCompare(right._sortAt);
+          if (byTimestamp !== 0) {
+            return byTimestamp;
+          }
+          const byId = left._sortId.localeCompare(right._sortId);
+          if (byId !== 0) {
+            return byId;
+          }
+          return left.entryType.localeCompare(right.entryType);
+        })
+        .map((entry) =>
+          entry.entryType === 'item'
+            ? {
+                entryType: 'item' as const,
+                item: entry.item,
+              }
+            : {
+                entryType: 'tombstone' as const,
+                tombstone: entry.tombstone,
+              },
+        );
+
+      const snapshotDigest = buildSyncSnapshotDigest(merged as Array<Record<string, unknown>>);
+      return {
+        entries: merged,
+        snapshotDigest,
+      };
+    };
+
+    let snapshotAsOf = nowIso;
+    let snapshotDigest = '';
+    let pageSize = pageSizeQuery ?? SYNC_SNAPSHOT_PAGE_SIZE_DEFAULT;
+    let offset = 0;
+    let snapshotToken = snapshotTokenQuery ?? '';
+
+    if (snapshotTokenQuery) {
+      const verified = verifySyncSnapshotToken({
+        token: snapshotTokenQuery,
+        bootstrapSecret: options.bootstrapAdminToken,
+        nowIso,
+      });
+      if (!verified.ok) {
+        return jsonResponse(
+          409,
+          { ok: false, code: verified.reason === 'expired' ? 'snapshot_expired' : 'invalid_snapshot_context' },
+        );
+      }
+      if (verified.payload.userId !== sessionContext.user.userId) {
+        return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+      }
+      if (pageSizeQuery !== null && pageSizeQuery !== undefined && pageSizeQuery !== verified.payload.pageSize) {
+        return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+      }
+
+      snapshotAsOf = verified.payload.snapshotAsOf;
+      snapshotDigest = verified.payload.snapshotDigest;
+      pageSize = verified.payload.pageSize;
+      snapshotToken = snapshotTokenQuery;
+
+      if (cursorQuery) {
+        const cursor = decodeSyncSnapshotCursor(cursorQuery);
+        if (!cursor || cursor.snapshotDigest !== snapshotDigest) {
+          return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+        }
+        offset = cursor.offset;
+      }
+    }
+
+    const snapshot = await buildSnapshotEntries(snapshotAsOf);
+    if (!snapshotTokenQuery) {
+      snapshotDigest = snapshot.snapshotDigest;
+      const ifNoneMatchRaw = c.req.header('if-none-match')?.trim();
+      const ifNoneMatch = ifNoneMatchRaw?.replace(/^W\//, '').replace(/^"|"$/g, '');
+      if (ifNoneMatch && ifNoneMatch === snapshotDigest) {
+        const notModified = new Response(null, { status: 304 });
+        notModified.headers.set('etag', `"${snapshotDigest}"`);
+        return addSecurityHeaders(notModified);
+      }
+      snapshotToken = createSyncSnapshotToken({
+        bootstrapSecret: options.bootstrapAdminToken,
+        payload: {
+          v: 'sync.snapshot.v1',
+          userId: sessionContext.user.userId,
+          snapshotAsOf,
+          snapshotDigest,
+          pageSize,
+          exp: addSeconds(nowIso, SYNC_SNAPSHOT_TOKEN_TTL_SECONDS),
+        },
+      });
+    } else if (snapshot.snapshotDigest !== snapshotDigest) {
+      return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+    }
+
+    if (offset < 0 || offset > snapshot.entries.length) {
+      return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+    }
+
+    let end = Math.min(offset + pageSize, snapshot.entries.length);
+    let pageEntries = snapshot.entries.slice(offset, end);
+    while (
+      pageEntries.length > 1 &&
+      new TextEncoder().encode(JSON.stringify(pageEntries)).length > SYNC_SNAPSHOT_RESPONSE_MAX_BYTES
+    ) {
+      end -= 1;
+      pageEntries = snapshot.entries.slice(offset, end);
+    }
+    if (
+      pageEntries.length === 1 &&
+      new TextEncoder().encode(JSON.stringify(pageEntries)).length > SYNC_SNAPSHOT_RESPONSE_MAX_BYTES
+    ) {
+      return jsonResponse(413, { ok: false, code: 'payload_too_large' });
+    }
+
+    const nextCursor =
+      end < snapshot.entries.length
+        ? encodeSyncSnapshotCursor({
+            v: 'sync.cursor.v1',
+            snapshotDigest,
+            offset: end,
+          })
+        : null;
+
+    const body = SyncSnapshotOutputSchema.parse({
+      snapshotToken,
+      snapshotAsOf,
+      snapshotDigest,
+      pageSize,
+      nextCursor,
+      entries: pageEntries,
+    });
+    const response = jsonResponse(200, body);
+    response.headers.set('etag', `"${snapshotDigest}"`);
+    return response;
   });
 
   app.post('/api/auth/devices/bootstrap', async (c) => {
@@ -2435,6 +3133,12 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       );
     } catch (error) {
       if (error instanceof Error && error.message === 'item_not_found') {
+        const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+          sessionContext.user.userId,
+        );
+        if (tombstones.some((tombstone) => tombstone.itemId === c.req.param('itemId'))) {
+          return jsonResponse(409, { ok: false, code: 'item_deleted_conflict' });
+        }
         return jsonResponse(404, { ok: false, code: 'not_found' });
       }
       if (error instanceof Error && error.message === 'revision_conflict') {
@@ -2454,15 +3158,72 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
+    const deletedAtIso = isoNow(options.clock);
     const deleted = await options.storage.vaultItems.delete(
       c.req.param('itemId'),
       sessionContext.user.userId,
+      deletedAtIso,
     );
     if (!deleted) {
+      const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+        sessionContext.user.userId,
+      );
+      if (tombstones.some((tombstone) => tombstone.itemId === c.req.param('itemId'))) {
+        return emptyResponse(204);
+      }
       return jsonResponse(404, { ok: false, code: 'not_found' });
     }
 
     return emptyResponse(204);
+  });
+
+  app.post('/api/vault/items/:itemId/restore', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+
+    const restoredAtIso = isoNow(options.clock);
+    let restoreResult: Awaited<ReturnType<typeof options.storage.vaultItems.restore>>;
+    try {
+      restoreResult = await options.storage.vaultItems.restore({
+        itemId: c.req.param('itemId'),
+        ownerUserId: sessionContext.user.userId,
+        restoredAtIso,
+        restoreRetentionDays: VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS,
+      });
+    } catch {
+      return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
+    }
+
+    if (restoreResult.status === 'not_found') {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (restoreResult.status === 'restore_window_expired') {
+      return jsonResponse(409, { ok: false, code: 'restore_window_expired' });
+    }
+    if (!restoreResult.item) {
+      return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
+    }
+
+    return jsonResponse(
+      200,
+      VaultItemRestoreOutputSchema.parse({
+        ok: true,
+        result: toCanonicalResult(restoreResult.status),
+        item: VaultItemRecordSchema.parse({
+          itemId: restoreResult.item.itemId,
+          itemType: restoreResult.item.itemType,
+          revision: restoreResult.item.revision,
+          encryptedPayload: restoreResult.item.encryptedPayload,
+          createdAt: restoreResult.item.createdAt,
+          updatedAt: restoreResult.item.updatedAt,
+        }),
+      }),
+    );
   });
 
   app.post('/api/attachments/uploads/init', async (c) => {

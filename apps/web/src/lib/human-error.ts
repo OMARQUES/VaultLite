@@ -21,9 +21,21 @@ const CODE_TO_MESSAGE: Record<string, string> = {
   attachment_too_large: 'This attachment is too large.',
   upload_envelope_too_large: 'This attachment is too large.',
   revision_conflict: 'This item changed in another session. Reload and try again.',
+  item_deleted_conflict: 'This item was deleted in another session. Reload to continue.',
+  restore_window_expired: 'This item can no longer be restored from trash.',
+  vault_item_restore_failed: 'We couldn’t restore this item right now. Try again.',
   bootstrap_already_initialized: 'This deployment is already initialized.',
   trusted_local_state_missing: 'This device is no longer trusted for this account. Add the device again.',
   account_suspended: 'Your account is suspended. Ask the owner to reactivate access.',
+  cannot_revoke_current_device: 'You can’t revoke the device you are using right now.',
+  device_already_revoked: 'This device is already revoked.',
+  device_not_found: 'This device could not be found.',
+  stale_bundle_version: 'Your account changed in another session. Refresh and try again.',
+  rotation_context_invalid: 'Your security context changed. Unlock again and retry.',
+  password_rotation_failed: 'We couldn’t rotate your password right now. Try again.',
+  idempotency_key_reuse_conflict: 'This action was retried with different data. Start it again.',
+  invalid_snapshot_context: 'Sync context expired. Refreshing your vault now.',
+  snapshot_expired: 'Sync token expired. Retrying automatically.',
 };
 
 const STATUS_TO_MESSAGE: Record<number, string> = {

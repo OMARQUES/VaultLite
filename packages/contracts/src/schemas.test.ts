@@ -15,6 +15,7 @@ import {
   RemoteAuthenticationInputSchema,
   VaultItemCreateInputSchema,
   VaultItemRecordSchema,
+  VaultItemRestoreOutputSchema,
   VaultItemTombstoneRecordSchema,
   VaultItemUpdateInputSchema,
   VaultEnvelopeSchema,
@@ -71,8 +72,11 @@ describe('contracts schemas', () => {
 
   it('requires expected_bundle_version for password rotation', () => {
     const result = PasswordRotationInputSchema.safeParse({
-      currentPassword: 'current',
-      nextPassword: 'next',
+      currentAuthProof: 'proof_payload',
+      nextAuthSalt: 'A'.repeat(22),
+      nextAuthVerifier: 'next_verifier_payload',
+      nextEncryptedAccountBundle: 'next_bundle_payload',
+      nextAccountKeyWrapped: 'next_wrapped_key_payload',
     });
 
     expect(result.success).toBe(false);
@@ -155,6 +159,21 @@ describe('contracts schemas', () => {
         encryptedPayload: 'A'.repeat(256 * 1024 + 1),
       }).success,
     ).toBe(false);
+
+    expect(
+      VaultItemRestoreOutputSchema.safeParse({
+        ok: true,
+        result: 'success_no_op',
+        item: {
+          itemId: 'item_1',
+          itemType: 'login',
+          revision: 3,
+          encryptedPayload: 'encrypted_payload_v3',
+          createdAt: '2026-03-15T12:00:00.000Z',
+          updatedAt: '2026-03-15T12:05:00.000Z',
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it('validates attachment upload lifecycle contracts', () => {

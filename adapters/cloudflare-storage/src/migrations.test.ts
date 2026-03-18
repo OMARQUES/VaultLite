@@ -26,6 +26,7 @@ describe('cloudflare migration loading', () => {
       '0004_attachment_upload_pending',
       '0005_bootstrap_admin_foundation',
       '0006_auth_rate_limit_window_end',
+      '0007_vault_tombstone_restore_payload',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

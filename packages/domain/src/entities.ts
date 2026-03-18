@@ -78,6 +78,9 @@ export interface VaultItemTombstoneRecord {
   ownerUserId: string;
   itemType: VaultItemType;
   revision: number;
+  encryptedPayload: string;
+  createdAt: string;
+  updatedAt: string;
   deletedAt: string;
 }
 

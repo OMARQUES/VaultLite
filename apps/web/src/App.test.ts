@@ -29,6 +29,7 @@ function createSessionStore(
       deviceId: phase === 'ready' || phase === 'local_unlock_required' ? 'device_1' : null,
       deviceName: phase === 'ready' || phase === 'local_unlock_required' ? 'Primary Browser' : null,
       lifecycleState: phase === 'ready' ? ('active' as const) : null,
+      bundleVersion: phase === 'ready' || phase === 'local_unlock_required' ? 0 : null,
       lastError: null,
       lastActivityAt: null,
       autoLockAfterMs: 5 * 60 * 1000,
@@ -41,9 +42,20 @@ function createSessionStore(
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
-    handleUnauthorized: vi.fn(function handleUnauthorized(this: { state: { username: string | null; phase: string; lastError: string | null } }, input?: { message?: string | null }) {
-      this.state.phase = this.state.username ? 'local_unlock_required' : 'remote_authentication_required';
-      this.state.lastError = input?.message ?? 'Your account is suspended or your session is no longer valid.';
+    confirmRecentReauth: vi.fn(),
+    listDevices: vi.fn().mockResolvedValue({
+      devices: [],
+    }),
+    revokeDevice: vi.fn(),
+    rotatePassword: vi.fn(),
+    handleUnauthorized: vi.fn(function handleUnauthorized(
+      this: { state: { username: string | null; phase: string; lastError: string | null } },
+      input?: { message?: string | null; reasonCode?: string | null },
+    ) {
+      const shouldRequireUnlock = input?.reasonCode === 'account_suspended' && Boolean(this.state.username);
+      this.state.phase = shouldRequireUnlock ? 'local_unlock_required' : 'remote_authentication_required';
+      this.state.lastError =
+        input?.message ?? 'Your trusted session is no longer valid. Add this device again to continue.';
     }),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
@@ -169,6 +181,16 @@ describe('App shell', () => {
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
   });
 
+  test('does not render authenticated vault shell when session is not ready on /vault', async () => {
+    const { wrapper, sessionStore } = await mountAppAt('/vault', 'anonymous');
+
+    expect(wrapper.find('[data-testid="vault-shell"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="auth-gate"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(true);
+    expect(window.location.pathname).toBe('/auth');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
   test('keeps unlock as single-task by hiding public navigation links', async () => {
     const { wrapper, sessionStore } = await mountAppAt('/unlock', 'local_unlock_required');
 
@@ -200,13 +222,14 @@ describe('App shell', () => {
     expect(wrapper.text()).toContain('Account Kit');
     expect(wrapper.text()).toContain('Auto-lock after');
     expect(wrapper.text()).toContain('Reissue Account Kit');
-    expect(wrapper.text()).not.toContain('Password');
+    expect(wrapper.text()).toContain('Password rotation');
+    expect(wrapper.text()).toContain('Trusted devices');
     expect(wrapper.text()).not.toContain('Onboarding');
     expect(wrapper.text()).not.toContain('Auth');
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
   });
 
-  test('redirects to /unlock when an authenticated surface receives unauthorized event', async () => {
+  test('redirects to /auth when an authenticated surface receives unauthorized event', async () => {
     const { sessionStore } = await mountAppAt('/vault', 'ready');
     window.dispatchEvent(
       new CustomEvent(VAULT_UNAUTHORIZED_EVENT, {
@@ -222,6 +245,26 @@ describe('App shell', () => {
     await flushPromises();
 
     expect(sessionStore.handleUnauthorized).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe('/auth');
+  });
+
+  test('redirects to /unlock when unauthorized event explicitly reports account suspended', async () => {
+    const { sessionStore } = await mountAppAt('/vault', 'ready');
+    window.dispatchEvent(
+      new CustomEvent(VAULT_UNAUTHORIZED_EVENT, {
+        detail: {
+          source: 'vault',
+          status: 401,
+          code: 'account_suspended',
+          message: 'account_suspended',
+          url: '/api/vault/items',
+        },
+      }),
+    );
+    await flushPromises();
+
+    expect(sessionStore.handleUnauthorized).toHaveBeenCalledTimes(1);
     expect(window.location.pathname).toBe('/unlock');
+    expect(window.location.search).toContain('reason=account_suspended');
   });
 });

@@ -5,7 +5,6 @@ export interface VaultFolder {
 
 export interface VaultUiState {
   favorites: string[];
-  trashed: string[];
   folderAssignments: Record<string, string | null>;
   folders: VaultFolder[];
 }
@@ -26,7 +25,6 @@ function getStorageKey(username: string | null | undefined): string {
 function defaultState(): VaultUiState {
   return {
     favorites: [],
-    trashed: [],
     folderAssignments: {},
     folders: DEFAULT_FOLDERS.map((folder) => ({ ...folder })),
   };
@@ -54,7 +52,6 @@ function normalize(input: Partial<VaultUiState> | null | undefined): VaultUiStat
 
   return {
     favorites: Array.isArray(state.favorites) ? [...new Set(state.favorites)] : [],
-    trashed: Array.isArray(state.trashed) ? [...new Set(state.trashed)] : [],
     folderAssignments:
       state.folderAssignments && typeof state.folderAssignments === 'object'
         ? Object.fromEntries(

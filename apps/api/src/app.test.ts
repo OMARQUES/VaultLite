@@ -277,6 +277,7 @@ describe('createVaultLiteApi', () => {
         userId: 'user_2',
         username: 'bob',
         role: 'user',
+        bundleVersion: 0,
         lifecycleState: 'active',
       },
       device: {

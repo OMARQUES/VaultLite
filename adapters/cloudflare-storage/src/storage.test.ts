@@ -68,7 +68,9 @@ describe('cloudflare storage adapter', () => {
       updatedAt: '2026-03-15T00:00:00.000Z',
     });
 
-    await expect(storage.vaultItems.delete('item_1', 'user_1')).resolves.toBe(true);
+    await expect(
+      storage.vaultItems.delete('item_1', 'user_1', '2026-03-15T00:10:00.000Z'),
+    ).resolves.toBe(true);
     await expect(storage.vaultItems.findByItemId('item_1', 'user_1')).resolves.toBeNull();
     await expect(storage.vaultItems.findTombstoneByItemId('item_1', 'user_1')).resolves.toEqual(
       expect.objectContaining({ itemId: 'item_1', revision: 2 }),

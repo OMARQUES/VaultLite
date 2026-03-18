@@ -15,8 +15,15 @@ const route = useRoute();
 const router = useRouter();
 const settingsModalOpen = ref(false);
 const handlingUnauthorized = ref(false);
-const isAuthenticatedShell = computed(
+const sessionRestoreResolved = ref(false);
+const isAuthenticatedRoute = computed(
   () => route.path.startsWith('/vault') || route.path === '/settings' || route.path.startsWith('/admin'),
+);
+const isAuthenticatedShell = computed(
+  () =>
+    isAuthenticatedRoute.value &&
+    sessionRestoreResolved.value &&
+    sessionStore.state.phase === 'ready',
 );
 
 function handleActivity() {
@@ -57,7 +64,7 @@ async function handleUnauthorizedEvent(event: Event) {
   const message =
     reason === 'account_suspended'
       ? 'Your account is suspended. Ask the owner to reactivate access.'
-      : 'Your account is suspended or your session is no longer valid.';
+      : 'Your trusted session is no longer valid. Add this device again to continue.';
 
   sessionStore.handleUnauthorized({
     reasonCode: detail.code,
@@ -65,9 +72,10 @@ async function handleUnauthorizedEvent(event: Event) {
   });
   settingsModalOpen.value = false;
 
-  const destination = sessionStore.state.username
-    ? `/unlock?reason=${encodeURIComponent(reason)}`
-    : '/auth';
+  const destination =
+    sessionStore.state.phase === 'local_unlock_required' && sessionStore.state.username
+      ? `/unlock?reason=${encodeURIComponent(reason)}`
+      : '/auth';
 
   try {
     await router.push(destination);
@@ -80,16 +88,20 @@ let autoLockInterval: number | undefined;
 
 onMounted(() => {
   void (async () => {
-    await router.isReady();
-    await sessionStore.restoreSession();
-    const redirect = resolveNavigationTarget({
-      phase: sessionStore.state.phase,
-      bootstrapState: sessionStore.state.bootstrapState,
-      role: sessionStore.state.role,
-      targetPath: route.path,
-    });
-    if (redirect && redirect !== route.path) {
-      await router.replace(redirect);
+    try {
+      await router.isReady();
+      await sessionStore.restoreSession();
+      const redirect = resolveNavigationTarget({
+        phase: sessionStore.state.phase,
+        bootstrapState: sessionStore.state.bootstrapState,
+        role: sessionStore.state.role,
+        targetPath: route.path,
+      });
+      if (redirect && redirect !== route.path) {
+        await router.replace(redirect);
+      }
+    } finally {
+      sessionRestoreResolved.value = true;
     }
   })();
   window.addEventListener('pointerdown', handleActivity);
@@ -111,7 +123,19 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main v-if="!isAuthenticatedShell" data-testid="public-shell" class="public-shell">
+  <main
+    v-if="isAuthenticatedRoute && !isAuthenticatedShell"
+    data-testid="auth-gate"
+    class="public-shell"
+  >
+    <div class="public-shell__content">
+      <section class="panel-card panel-card--compact panel-card--narrow">
+        <p class="module-empty-hint">Checking your session…</p>
+      </section>
+    </div>
+  </main>
+
+  <main v-else-if="!isAuthenticatedShell" data-testid="public-shell" class="public-shell">
     <PublicTopbar />
     <div class="public-shell__content">
       <RouterView />

@@ -17,6 +17,9 @@ import type {
   IdempotencyRepository,
   SessionRecord,
   SessionRepository,
+  RotatePasswordAtomicInput,
+  RotatePasswordAtomicResult,
+  RevokeDeviceAndSessionsAtomicInput,
   UserAccountRecord,
   UserAccountRepository,
   VaultItemRecord,
@@ -254,6 +257,13 @@ UPDATE auth_rate_limits
 SET window_ends_at = window_started_at
 WHERE window_ends_at IS NULL;`,
   },
+  {
+    id: '0007_vault_tombstone_restore_payload',
+    filename: '0007_vault_tombstone_restore_payload.sql',
+    sql: `ALTER TABLE vault_item_tombstones ADD COLUMN encrypted_payload TEXT;
+ALTER TABLE vault_item_tombstones ADD COLUMN created_at TEXT;
+ALTER TABLE vault_item_tombstones ADD COLUMN updated_at TEXT;`,
+  },
 ];
 
 export function getInfrastructureMigrationDirectory(): URL | string {
@@ -348,6 +358,24 @@ export async function loadCloudflareMigrations(
 
 async function executeOne(db: D1DatabaseLike, query: string, values: unknown[] = []): Promise<void> {
   await db.prepare(query).bind(...values).run();
+}
+
+function extractChangedRows(runResult: unknown): number {
+  if (typeof runResult !== 'object' || runResult === null) {
+    return 0;
+  }
+  const withMeta = runResult as { meta?: { changes?: number } };
+  const changes = withMeta.meta?.changes;
+  return typeof changes === 'number' && Number.isFinite(changes) ? changes : 0;
+}
+
+async function executeOneWithChanges(
+  db: D1DatabaseLike,
+  query: string,
+  values: unknown[] = [],
+): Promise<number> {
+  const result = await db.prepare(query).bind(...values).run();
+  return extractChangedRows(result);
 }
 
 async function selectOne<T>(
@@ -723,6 +751,19 @@ class CloudflareSessionRepository implements SessionRepository {
               rotated_from_session_id AS rotatedFromSessionId
        FROM sessions WHERE session_id = ?`,
       [sessionId],
+    );
+  }
+
+  async listByUserId(userId: string): Promise<SessionRecord[]> {
+    return selectMany<SessionRecord>(
+      this.db,
+      `SELECT session_id AS sessionId, user_id AS userId, device_id AS deviceId, csrf_token AS csrfToken,
+              created_at AS createdAt, expires_at AS expiresAt, recent_reauth_at AS recentReauthAt, revoked_at AS revokedAt,
+              rotated_from_session_id AS rotatedFromSessionId
+       FROM sessions
+       WHERE user_id = ?
+       ORDER BY created_at ASC`,
+      [userId],
     );
   }
 
@@ -1179,7 +1220,11 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
     return selectMany<VaultItemTombstoneRecord>(
       this.db,
       `SELECT item_id AS itemId, owner_user_id AS ownerUserId, item_type AS itemType,
-              revision, deleted_at AS deletedAt
+              revision,
+              COALESCE(encrypted_payload, '') AS encryptedPayload,
+              COALESCE(created_at, deleted_at) AS createdAt,
+              COALESCE(updated_at, deleted_at) AS updatedAt,
+              deleted_at AS deletedAt
        FROM vault_item_tombstones
        WHERE owner_user_id = ?
        ORDER BY deleted_at ASC`,
@@ -1206,7 +1251,11 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
     return selectOne<VaultItemTombstoneRecord>(
       this.db,
       `SELECT item_id AS itemId, owner_user_id AS ownerUserId, item_type AS itemType,
-              revision, deleted_at AS deletedAt
+              revision,
+              COALESCE(encrypted_payload, '') AS encryptedPayload,
+              COALESCE(created_at, deleted_at) AS createdAt,
+              COALESCE(updated_at, deleted_at) AS updatedAt,
+              deleted_at AS deletedAt
        FROM vault_item_tombstones
        WHERE item_id = ? AND owner_user_id = ?`,
       [itemId, ownerUserId],
@@ -1273,23 +1322,31 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
     };
   }
 
-  async delete(itemId: string, ownerUserId: string): Promise<boolean> {
+  async delete(itemId: string, ownerUserId: string, deletedAtIso: string): Promise<boolean> {
     const current = await this.findByItemId(itemId, ownerUserId);
     if (!current) {
       return false;
     }
 
     const tombstoneRevision = current.revision + 1;
-    const deletedAt = new Date().toISOString();
     if (typeof this.db.batch === 'function') {
       await this.db.batch([
         this.db
           .prepare(
             `INSERT OR REPLACE INTO vault_item_tombstones (
-               item_id, owner_user_id, item_type, revision, deleted_at
-             ) VALUES (?, ?, ?, ?, ?)`,
+               item_id, owner_user_id, item_type, revision, encrypted_payload, created_at, updated_at, deleted_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .bind(itemId, ownerUserId, current.itemType, tombstoneRevision, deletedAt),
+          .bind(
+            itemId,
+            ownerUserId,
+            current.itemType,
+            tombstoneRevision,
+            current.encryptedPayload,
+            current.createdAt,
+            current.updatedAt,
+            deletedAtIso,
+          ),
         this.db
           .prepare(`DELETE FROM vault_items WHERE item_id = ? AND owner_user_id = ?`)
           .bind(itemId, ownerUserId),
@@ -1298,9 +1355,18 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
       await executeOne(
         this.db,
         `INSERT OR REPLACE INTO vault_item_tombstones (
-           item_id, owner_user_id, item_type, revision, deleted_at
-         ) VALUES (?, ?, ?, ?, ?)`,
-        [itemId, ownerUserId, current.itemType, tombstoneRevision, deletedAt],
+           item_id, owner_user_id, item_type, revision, encrypted_payload, created_at, updated_at, deleted_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          itemId,
+          ownerUserId,
+          current.itemType,
+          tombstoneRevision,
+          current.encryptedPayload,
+          current.createdAt,
+          current.updatedAt,
+          deletedAtIso,
+        ],
       );
       await executeOne(
         this.db,
@@ -1309,6 +1375,139 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
       );
     }
     return true;
+  }
+
+  async restore(inputRecord: {
+    itemId: string;
+    ownerUserId: string;
+    restoredAtIso: string;
+    restoreRetentionDays: number;
+  }): Promise<{
+    status: 'success_changed' | 'success_no_op' | 'restore_window_expired' | 'not_found';
+    item: VaultItemRecord | null;
+  }> {
+    const restoreWindowMillis = inputRecord.restoreRetentionDays * 24 * 60 * 60 * 1000;
+    const active = await this.findByItemId(inputRecord.itemId, inputRecord.ownerUserId);
+    const tombstone = await this.findTombstoneByItemId(inputRecord.itemId, inputRecord.ownerUserId);
+
+    if (active) {
+      if (tombstone) {
+        if (typeof this.db.batch === 'function') {
+          await this.db.batch([
+            this.db
+              .prepare(`DELETE FROM vault_item_tombstones WHERE item_id = ? AND owner_user_id = ?`)
+              .bind(inputRecord.itemId, inputRecord.ownerUserId),
+          ]);
+        } else {
+          await executeOne(
+            this.db,
+            `DELETE FROM vault_item_tombstones WHERE item_id = ? AND owner_user_id = ?`,
+            [inputRecord.itemId, inputRecord.ownerUserId],
+          );
+        }
+      }
+      return {
+        status: 'success_no_op',
+        item: active,
+      };
+    }
+
+    if (!tombstone) {
+      return {
+        status: 'not_found',
+        item: null,
+      };
+    }
+
+    const deletedAtMillis = Date.parse(tombstone.deletedAt);
+    const restoredAtMillis = Date.parse(inputRecord.restoredAtIso);
+    if (
+      !tombstone.encryptedPayload ||
+      !Number.isFinite(deletedAtMillis) ||
+      !Number.isFinite(restoredAtMillis) ||
+      deletedAtMillis + restoreWindowMillis < restoredAtMillis
+    ) {
+      return {
+        status: 'restore_window_expired',
+        item: null,
+      };
+    }
+
+    const restoredItem: VaultItemRecord = {
+      itemId: tombstone.itemId,
+      ownerUserId: tombstone.ownerUserId,
+      itemType: tombstone.itemType,
+      revision: tombstone.revision + 1,
+      encryptedPayload: tombstone.encryptedPayload,
+      createdAt: tombstone.createdAt,
+      updatedAt: inputRecord.restoredAtIso,
+    };
+
+    if (typeof this.db.batch === 'function') {
+      await this.db.batch([
+        this.db.prepare(
+          `INSERT OR REPLACE INTO vault_items (
+             item_id, owner_user_id, item_type, revision, encrypted_payload, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          restoredItem.itemId,
+          restoredItem.ownerUserId,
+          restoredItem.itemType,
+          restoredItem.revision,
+          restoredItem.encryptedPayload,
+          restoredItem.createdAt,
+          restoredItem.updatedAt,
+        ),
+        this.db
+          .prepare(
+            `DELETE FROM vault_item_tombstones
+             WHERE item_id = ? AND owner_user_id = ?`,
+          )
+          .bind(inputRecord.itemId, inputRecord.ownerUserId),
+      ]);
+      return {
+        status: 'success_changed',
+        item: restoredItem,
+      };
+    }
+
+    await this.db.exec('BEGIN TRANSACTION');
+    try {
+      await executeOne(
+        this.db,
+        `INSERT OR REPLACE INTO vault_items (
+           item_id, owner_user_id, item_type, revision, encrypted_payload, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          restoredItem.itemId,
+          restoredItem.ownerUserId,
+          restoredItem.itemType,
+          restoredItem.revision,
+          restoredItem.encryptedPayload,
+          restoredItem.createdAt,
+          restoredItem.updatedAt,
+        ],
+      );
+      await executeOne(
+        this.db,
+        `DELETE FROM vault_item_tombstones
+         WHERE item_id = ? AND owner_user_id = ?`,
+        [inputRecord.itemId, inputRecord.ownerUserId],
+      );
+
+      await this.db.exec('COMMIT');
+      return {
+        status: 'success_changed',
+        item: restoredItem,
+      };
+    } catch (error) {
+      try {
+        await this.db.exec('ROLLBACK');
+      } catch {
+        // Preserve original error.
+      }
+      throw error;
+    }
   }
 }
 
@@ -1438,6 +1637,219 @@ export function createCloudflareVaultLiteStorage(input: {
         user: record.user,
         device: record.device,
         session: record.session,
+      };
+    },
+    async revokeDeviceAndSessionsAtomic(inputRecord: RevokeDeviceAndSessionsAtomicInput): Promise<void> {
+      const device = await devices.findById(inputRecord.deviceId);
+      if (!device || device.userId !== inputRecord.userId) {
+        return;
+      }
+
+      if (typeof input.db.batch === 'function') {
+        await input.db.batch([
+          input.db.prepare(
+            `UPDATE trusted_devices
+             SET device_state = 'revoked', revoked_at = ?
+             WHERE device_id = ? AND user_id = ?`,
+          ).bind(inputRecord.revokedAtIso, inputRecord.deviceId, inputRecord.userId),
+          input.db.prepare(
+            `UPDATE sessions
+             SET revoked_at = ?
+             WHERE user_id = ? AND device_id = ?`,
+          ).bind(inputRecord.revokedAtIso, inputRecord.userId, inputRecord.deviceId),
+        ]);
+        return;
+      }
+
+      await input.db.exec('BEGIN TRANSACTION');
+      try {
+        await executeOne(
+          input.db,
+          `UPDATE trusted_devices
+           SET device_state = 'revoked', revoked_at = ?
+           WHERE device_id = ? AND user_id = ?`,
+          [inputRecord.revokedAtIso, inputRecord.deviceId, inputRecord.userId],
+        );
+        await executeOne(
+          input.db,
+          `UPDATE sessions
+           SET revoked_at = ?
+           WHERE user_id = ? AND device_id = ?`,
+          [inputRecord.revokedAtIso, inputRecord.userId, inputRecord.deviceId],
+        );
+        await input.db.exec('COMMIT');
+      } catch (error) {
+        try {
+          await input.db.exec('ROLLBACK');
+        } catch {
+          // Preserve original error.
+        }
+        throw error;
+      }
+    },
+    async rotatePasswordAtomic(inputRecord: RotatePasswordAtomicInput): Promise<RotatePasswordAtomicResult> {
+      const currentUser = await users.findByUserId(inputRecord.userId);
+      if (!currentUser) {
+        throw new Error('user_not_found');
+      }
+      if (currentUser.authVerifier !== inputRecord.currentAuthVerifier) {
+        throw new Error('invalid_credentials');
+      }
+      if (currentUser.bundleVersion !== inputRecord.expectedBundleVersion) {
+        throw new Error('stale_bundle_version');
+      }
+      const currentSession = await sessions.findBySessionId(inputRecord.currentSessionId);
+      if (
+        !currentSession ||
+        currentSession.userId !== inputRecord.userId ||
+        currentSession.revokedAt !== null
+      ) {
+        throw new Error('unauthorized');
+      }
+      const currentDevice = await devices.findById(currentSession.deviceId);
+      if (
+        !currentDevice ||
+        currentDevice.userId !== inputRecord.userId ||
+        currentDevice.deviceState !== 'active'
+      ) {
+        throw new Error('unauthorized');
+      }
+
+      const nextBundleVersion = currentUser.bundleVersion + 1;
+      if (typeof input.db.batch === 'function') {
+        const results = (await input.db.batch([
+          input.db.prepare(
+            `UPDATE user_accounts
+             SET auth_salt = ?, auth_verifier = ?, encrypted_account_bundle = ?, account_key_wrapped = ?,
+                 bundle_version = ?, updated_at = ?
+             WHERE user_id = ? AND auth_verifier = ? AND bundle_version = ?`,
+          ).bind(
+            inputRecord.nextAuthSalt,
+            inputRecord.nextAuthVerifier,
+            inputRecord.nextEncryptedAccountBundle,
+            inputRecord.nextAccountKeyWrapped,
+            nextBundleVersion,
+            inputRecord.updatedAtIso,
+            inputRecord.userId,
+            inputRecord.currentAuthVerifier,
+            inputRecord.expectedBundleVersion,
+          ),
+          input.db.prepare(
+            `UPDATE sessions
+             SET revoked_at = ?
+             WHERE user_id = ?
+               AND EXISTS (
+                 SELECT 1
+                 FROM user_accounts
+                 WHERE user_id = ? AND bundle_version = ? AND auth_verifier = ?
+               )`,
+          ).bind(
+            inputRecord.revokedAtIso,
+            inputRecord.userId,
+            inputRecord.userId,
+            nextBundleVersion,
+            inputRecord.nextAuthVerifier,
+          ),
+          input.db.prepare(
+            `INSERT INTO sessions (
+               session_id, user_id, device_id, csrf_token, created_at, expires_at, recent_reauth_at, revoked_at, rotated_from_session_id
+             )
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (
+               SELECT 1
+               FROM user_accounts
+               WHERE user_id = ? AND bundle_version = ? AND auth_verifier = ?
+             )`,
+          ).bind(
+            inputRecord.newSession.sessionId,
+            inputRecord.newSession.userId,
+            inputRecord.newSession.deviceId,
+            inputRecord.newSession.csrfToken,
+            inputRecord.newSession.createdAt,
+            inputRecord.newSession.expiresAt,
+            inputRecord.newSession.recentReauthAt,
+            inputRecord.newSession.revokedAt,
+            inputRecord.newSession.rotatedFromSessionId,
+            inputRecord.userId,
+            nextBundleVersion,
+            inputRecord.nextAuthVerifier,
+          ),
+        ])) as unknown[];
+
+        const updateChanges = extractChangedRows(results[0]);
+        const insertChanges = extractChangedRows(results[2]);
+        if (updateChanges !== 1 || insertChanges !== 1) {
+          throw new Error('stale_bundle_version');
+        }
+      } else {
+        await input.db.exec('BEGIN TRANSACTION');
+        try {
+          const changed = await executeOneWithChanges(
+            input.db,
+            `UPDATE user_accounts
+             SET auth_salt = ?, auth_verifier = ?, encrypted_account_bundle = ?, account_key_wrapped = ?,
+                 bundle_version = ?, updated_at = ?
+             WHERE user_id = ? AND auth_verifier = ? AND bundle_version = ?`,
+            [
+              inputRecord.nextAuthSalt,
+              inputRecord.nextAuthVerifier,
+              inputRecord.nextEncryptedAccountBundle,
+              inputRecord.nextAccountKeyWrapped,
+              nextBundleVersion,
+              inputRecord.updatedAtIso,
+              inputRecord.userId,
+              inputRecord.currentAuthVerifier,
+              inputRecord.expectedBundleVersion,
+            ],
+          );
+          if (changed !== 1) {
+            throw new Error('stale_bundle_version');
+          }
+
+          await executeOne(
+            input.db,
+            `UPDATE sessions
+             SET revoked_at = ?
+             WHERE user_id = ?`,
+            [inputRecord.revokedAtIso, inputRecord.userId],
+          );
+
+          await executeOne(
+            input.db,
+            `INSERT INTO sessions (
+               session_id, user_id, device_id, csrf_token, created_at, expires_at, recent_reauth_at, revoked_at, rotated_from_session_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              inputRecord.newSession.sessionId,
+              inputRecord.newSession.userId,
+              inputRecord.newSession.deviceId,
+              inputRecord.newSession.csrfToken,
+              inputRecord.newSession.createdAt,
+              inputRecord.newSession.expiresAt,
+              inputRecord.newSession.recentReauthAt,
+              inputRecord.newSession.revokedAt,
+              inputRecord.newSession.rotatedFromSessionId,
+            ],
+          );
+
+          await input.db.exec('COMMIT');
+        } catch (error) {
+          try {
+            await input.db.exec('ROLLBACK');
+          } catch {
+            // Preserve original error.
+          }
+          throw error;
+        }
+      }
+
+      const updatedUser = await users.findByUserId(inputRecord.userId);
+      if (!updatedUser) {
+        throw new Error('user_not_found');
+      }
+      return {
+        user: updatedUser,
+        session: inputRecord.newSession,
       };
     },
   };

@@ -61,8 +61,11 @@ export const OnboardingCompleteInputSchema = z
 
 export const PasswordRotationInputSchema = z
   .object({
-    currentPassword: z.string().min(1),
-    nextPassword: z.string().min(1),
+    currentAuthProof: encryptedPayloadSchema,
+    nextAuthSalt: base64UrlSchema,
+    nextAuthVerifier: encryptedPayloadSchema,
+    nextEncryptedAccountBundle: encryptedPayloadSchema,
+    nextAccountKeyWrapped: encryptedPayloadSchema,
     expected_bundle_version: z.number().int().nonnegative(),
   })
   .strict();
@@ -167,6 +170,7 @@ export const BootstrapInitializeOwnerOutputSchema = z
         userId: z.string().min(1),
         username: usernameSchema,
         role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
         lifecycleState: UserLifecycleStateSchema,
       })
       .strict(),
@@ -331,6 +335,95 @@ export const AdminAuditListOutputSchema = z
   })
   .strict();
 
+export const DeviceSummarySchema = z
+  .object({
+    deviceId: z.string().min(1),
+    deviceName: z.string().min(1),
+    platform: DevicePlatformSchema,
+    deviceState: DeviceStateSchema,
+    createdAt: isoDatetimeSchema,
+    revokedAt: isoDatetimeSchema.nullable(),
+    isCurrentDevice: z.boolean(),
+    lastAuthenticatedAt: isoDatetimeSchema.nullable(),
+  })
+  .strict();
+
+export const DeviceListOutputSchema = z
+  .object({
+    devices: z.array(DeviceSummarySchema),
+  })
+  .strict();
+
+export const DeviceRevokeOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const SyncSnapshotQuerySchema = z
+  .object({
+    snapshotToken: z.string().min(1).optional(),
+    cursor: z.string().min(1).optional(),
+    pageSize: z.number().int().positive().max(100).optional(),
+  })
+  .strict();
+
+export const SyncSnapshotItemEntrySchema = z
+  .object({
+    entryType: z.literal('item'),
+    item: z.lazy(() => VaultItemRecordSchema),
+  })
+  .strict();
+
+export const SyncSnapshotTombstoneEntrySchema = z
+  .object({
+    entryType: z.literal('tombstone'),
+    tombstone: z.lazy(() => VaultItemTombstoneRecordSchema),
+  })
+  .strict();
+
+export const SyncSnapshotEntrySchema = z.union([
+  SyncSnapshotItemEntrySchema,
+  SyncSnapshotTombstoneEntrySchema,
+]);
+
+export const SyncSnapshotOutputSchema = z
+  .object({
+    snapshotToken: z.string().min(1),
+    snapshotAsOf: isoDatetimeSchema,
+    snapshotDigest: z.string().min(1),
+    pageSize: z.number().int().positive(),
+    nextCursor: z.string().min(1).nullable(),
+    entries: z.array(SyncSnapshotEntrySchema),
+  })
+  .strict();
+
+export const PasswordRotationCompleteOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    bundleVersion: z.number().int().nonnegative(),
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const VaultItemTypeSchema = z.enum(VAULT_ITEM_TYPES);
 export const VaultItemSummarySchema = z
   .object({
@@ -356,6 +449,14 @@ export const VaultItemTombstoneRecordSchema = z
 export const VaultItemListOutputSchema = z
   .object({
     items: z.array(VaultItemRecordSchema),
+  })
+  .strict();
+export const VaultItemRestoreOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    item: VaultItemRecordSchema,
+    reasonCode: z.string().min(1).optional(),
   })
   .strict();
 export const VaultItemCreateInputSchema = z
@@ -438,6 +539,7 @@ export const TrustedSessionResponseSchema = z
         userId: z.string().min(1),
         username: usernameSchema,
         role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
         lifecycleState: UserLifecycleStateSchema,
       })
       .strict(),
@@ -460,6 +562,7 @@ export const SessionRestoreResponseSchema = z
         userId: z.string().min(1),
         username: usernameSchema,
         role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
         lifecycleState: UserLifecycleStateSchema,
       })
       .strict()
@@ -558,11 +661,15 @@ export type AdminUserListOutput = z.infer<typeof AdminUserListOutputSchema>;
 export type AdminUserLifecycleMutationOutput = z.infer<typeof AdminUserLifecycleMutationOutputSchema>;
 export type AdminAuditEventRecord = z.infer<typeof AdminAuditEventRecordSchema>;
 export type AdminAuditListOutput = z.infer<typeof AdminAuditListOutputSchema>;
+export type DeviceSummary = z.infer<typeof DeviceSummarySchema>;
+export type DeviceListOutput = z.infer<typeof DeviceListOutputSchema>;
+export type DeviceRevokeOutput = z.infer<typeof DeviceRevokeOutputSchema>;
 export type VaultItemType = z.infer<typeof VaultItemTypeSchema>;
 export type VaultItemSummary = z.infer<typeof VaultItemSummarySchema>;
 export type VaultItemRecord = z.infer<typeof VaultItemRecordSchema>;
 export type VaultItemTombstoneRecord = z.infer<typeof VaultItemTombstoneRecordSchema>;
 export type VaultItemListOutput = z.infer<typeof VaultItemListOutputSchema>;
+export type VaultItemRestoreOutput = z.infer<typeof VaultItemRestoreOutputSchema>;
 export type VaultItemCreateInput = z.infer<typeof VaultItemCreateInputSchema>;
 export type VaultItemUpdateInput = z.infer<typeof VaultItemUpdateInputSchema>;
 export type AttachmentUploadInitInput = z.infer<typeof AttachmentUploadInitInputSchema>;
@@ -579,3 +686,7 @@ export type AccountKitSignatureOutput = z.infer<typeof AccountKitSignatureOutput
 export type OnboardingAccountKitSignInput = z.infer<typeof OnboardingAccountKitSignInputSchema>;
 export type AccountKitVerificationInput = z.infer<typeof AccountKitVerificationInputSchema>;
 export type AccountKitVerificationOutput = z.infer<typeof AccountKitVerificationOutputSchema>;
+export type SyncSnapshotQuery = z.infer<typeof SyncSnapshotQuerySchema>;
+export type SyncSnapshotEntry = z.infer<typeof SyncSnapshotEntrySchema>;
+export type SyncSnapshotOutput = z.infer<typeof SyncSnapshotOutputSchema>;
+export type PasswordRotationCompleteOutput = z.infer<typeof PasswordRotationCompleteOutputSchema>;

@@ -180,6 +180,7 @@ export interface DeviceRepository {
 export interface SessionRepository {
   create(record: SessionRecord): Promise<SessionRecord>;
   findBySessionId(sessionId: string): Promise<SessionRecord | null>;
+  listByUserId(userId: string): Promise<SessionRecord[]>;
   updateRecentReauth(sessionId: string, recentReauthAtIso: string): Promise<void>;
   revoke(sessionId: string, revokedAtIso: string): Promise<void>;
   revokeByUserId(userId: string, revokedAtIso: string): Promise<void>;
@@ -256,7 +257,16 @@ export interface VaultItemRepository {
     expectedRevision: number;
     updatedAt: string;
   }): Promise<VaultItemRecord>;
-  delete(itemId: string, ownerUserId: string): Promise<boolean>;
+  delete(itemId: string, ownerUserId: string, deletedAtIso: string): Promise<boolean>;
+  restore(input: {
+    itemId: string;
+    ownerUserId: string;
+    restoredAtIso: string;
+    restoreRetentionDays: number;
+  }): Promise<{
+    status: 'success_changed' | 'success_no_op' | 'restore_window_expired' | 'not_found';
+    item: VaultItemRecord | null;
+  }>;
 }
 
 export interface CompleteOnboardingAtomicInput {
@@ -273,6 +283,31 @@ export interface CompleteOnboardingAtomicResult {
   session: SessionRecord;
 }
 
+export interface RevokeDeviceAndSessionsAtomicInput {
+  userId: string;
+  deviceId: string;
+  revokedAtIso: string;
+}
+
+export interface RotatePasswordAtomicInput {
+  userId: string;
+  currentAuthVerifier: string;
+  nextAuthSalt: string;
+  nextAuthVerifier: string;
+  nextEncryptedAccountBundle: string;
+  nextAccountKeyWrapped: string;
+  expectedBundleVersion: number;
+  currentSessionId: string;
+  newSession: SessionRecord;
+  updatedAtIso: string;
+  revokedAtIso: string;
+}
+
+export interface RotatePasswordAtomicResult {
+  user: UserAccountRecord;
+  session: SessionRecord;
+}
+
 export interface VaultLiteStorage {
   deploymentState: DeploymentStateRepository;
   invites: InviteRepository;
@@ -285,6 +320,8 @@ export interface VaultLiteStorage {
   attachmentBlobs: AttachmentBlobRepository;
   vaultItems: VaultItemRepository;
   completeOnboardingAtomic(input: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult>;
+  revokeDeviceAndSessionsAtomic(input: RevokeDeviceAndSessionsAtomicInput): Promise<void>;
+  rotatePasswordAtomic(input: RotatePasswordAtomicInput): Promise<RotatePasswordAtomicResult>;
 }
 
 function sortDevices(records: DeviceRecord[]): DeviceRecord[] {
@@ -537,6 +574,12 @@ export function createInMemoryVaultLiteStorage(input: {
         const record = sessions.get(sessionId);
         return record ? { ...record } : null;
       },
+      async listByUserId(userId) {
+        return Array.from(sessions.values())
+          .filter((record) => record.userId === userId)
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .map((record) => ({ ...record }));
+      },
       async updateRecentReauth(sessionId, recentReauthAtIso) {
         const record = sessions.get(sessionId);
         if (!record) {
@@ -722,7 +765,7 @@ export function createInMemoryVaultLiteStorage(input: {
         vaultItems.set(updated.itemId, updated);
         return { ...updated };
       },
-      async delete(itemId, ownerUserId) {
+      async delete(itemId, ownerUserId, deletedAtIso) {
         const current = vaultItems.get(itemId);
         if (!current || current.ownerUserId !== ownerUserId) {
           return false;
@@ -733,11 +776,67 @@ export function createInMemoryVaultLiteStorage(input: {
           ownerUserId: current.ownerUserId,
           itemType: current.itemType,
           revision: current.revision + 1,
-          deletedAt: new Date().toISOString(),
+          encryptedPayload: current.encryptedPayload,
+          createdAt: current.createdAt,
+          updatedAt: current.updatedAt,
+          deletedAt: deletedAtIso,
         };
         vaultItemTombstones.set(`${ownerUserId}:${itemId}`, tombstone);
         vaultItems.delete(itemId);
         return true;
+      },
+      async restore(inputRecord) {
+        const key = `${inputRecord.ownerUserId}:${inputRecord.itemId}`;
+        const active = vaultItems.get(inputRecord.itemId);
+        const tombstone = vaultItemTombstones.get(key) ?? null;
+
+        if (active && active.ownerUserId === inputRecord.ownerUserId) {
+          if (tombstone) {
+            vaultItemTombstones.delete(key);
+          }
+          return {
+            status: 'success_no_op' as const,
+            item: { ...active },
+          };
+        }
+
+        if (!tombstone) {
+          return {
+            status: 'not_found' as const,
+            item: null,
+          };
+        }
+
+        const deletedAtMillis = Date.parse(tombstone.deletedAt);
+        const restoredAtMillis = Date.parse(inputRecord.restoredAtIso);
+        const restoreWindowMillis = inputRecord.restoreRetentionDays * 24 * 60 * 60 * 1000;
+        if (
+          !Number.isFinite(deletedAtMillis) ||
+          !Number.isFinite(restoredAtMillis) ||
+          deletedAtMillis + restoreWindowMillis < restoredAtMillis
+        ) {
+          return {
+            status: 'restore_window_expired' as const,
+            item: null,
+          };
+        }
+
+        const restoredItem: VaultItemRecord = {
+          itemId: tombstone.itemId,
+          ownerUserId: tombstone.ownerUserId,
+          itemType: tombstone.itemType,
+          revision: tombstone.revision + 1,
+          encryptedPayload: tombstone.encryptedPayload,
+          createdAt: tombstone.createdAt,
+          updatedAt: inputRecord.restoredAtIso,
+        };
+
+        vaultItems.set(restoredItem.itemId, restoredItem);
+        vaultItemTombstones.delete(key);
+        return {
+          status: 'success_changed' as const,
+          item: { ...restoredItem },
+        };
       },
     },
     async completeOnboardingAtomic(inputRecord) {
@@ -812,6 +911,72 @@ export function createInMemoryVaultLiteStorage(input: {
         sessionsSnapshot.forEach((value, key) => sessions.set(key, value));
         throw error;
       }
+    },
+    async revokeDeviceAndSessionsAtomic(inputRecord) {
+      const device = devices.get(inputRecord.deviceId);
+      if (!device || device.userId !== inputRecord.userId) {
+        return;
+      }
+
+      devices.set(inputRecord.deviceId, {
+        ...device,
+        deviceState: 'revoked',
+        revokedAt: inputRecord.revokedAtIso,
+      });
+      for (const [sessionId, session] of sessions.entries()) {
+        if (session.userId === inputRecord.userId && session.deviceId === inputRecord.deviceId) {
+          sessions.set(sessionId, {
+            ...session,
+            revokedAt: inputRecord.revokedAtIso,
+          });
+        }
+      }
+    },
+    async rotatePasswordAtomic(inputRecord) {
+      const user = usersById.get(inputRecord.userId);
+      if (!user) {
+        throw new Error('user_not_found');
+      }
+      if (user.authVerifier !== inputRecord.currentAuthVerifier) {
+        throw new Error('invalid_credentials');
+      }
+      if (user.bundleVersion !== inputRecord.expectedBundleVersion) {
+        throw new Error('stale_bundle_version');
+      }
+      const currentSession = sessions.get(inputRecord.currentSessionId);
+      if (!currentSession || currentSession.userId !== inputRecord.userId || currentSession.revokedAt !== null) {
+        throw new Error('unauthorized');
+      }
+      const currentDevice = devices.get(currentSession.deviceId);
+      if (!currentDevice || currentDevice.userId !== inputRecord.userId || currentDevice.deviceState !== 'active') {
+        throw new Error('unauthorized');
+      }
+
+      const nextUser: UserAccountRecord = {
+        ...user,
+        authSalt: inputRecord.nextAuthSalt,
+        authVerifier: inputRecord.nextAuthVerifier,
+        encryptedAccountBundle: inputRecord.nextEncryptedAccountBundle,
+        accountKeyWrapped: inputRecord.nextAccountKeyWrapped,
+        bundleVersion: user.bundleVersion + 1,
+        updatedAt: inputRecord.updatedAtIso,
+      };
+      usersById.set(nextUser.userId, nextUser);
+      usersByUsername.set(nextUser.username, nextUser);
+      for (const [sessionId, session] of sessions.entries()) {
+        if (session.userId === inputRecord.userId) {
+          sessions.set(sessionId, {
+            ...session,
+            revokedAt: inputRecord.revokedAtIso,
+          });
+        }
+      }
+      sessions.set(inputRecord.newSession.sessionId, { ...inputRecord.newSession });
+
+      return {
+        user: { ...nextUser },
+        session: { ...inputRecord.newSession },
+      };
     },
   };
 }

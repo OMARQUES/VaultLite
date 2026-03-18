@@ -8,7 +8,6 @@ import {
   useRouter,
 } from 'vue-router';
 
-import DangerZone from '../components/ui/DangerZone.vue';
 import DangerButton from '../components/ui/DangerButton.vue';
 import DialogModal from '../components/ui/DialogModal.vue';
 import DropdownMenu from '../components/ui/DropdownMenu.vue';
@@ -41,6 +40,7 @@ import {
   type SecureNoteVaultItemPayload,
   type VaultCustomField,
   type VaultWorkspaceItem,
+  type VaultWorkspaceTombstone,
 } from '../lib/vault-workspace';
 import { toHumanErrorMessage } from '../lib/human-error';
 
@@ -92,10 +92,12 @@ const searchInputRef = ref<InstanceType<typeof SearchField> | null>(null);
 const searchQuery = ref('');
 const errorMessage = ref<string | null>(null);
 const toastMessage = ref('');
-const busyAction = ref<null | 'load' | 'save' | 'trash' | 'delete-permanent'>(null);
+const busyAction = ref<null | 'load' | 'save' | 'trash'>(null);
 const discardDialogOpen = ref(false);
 const pendingNavigation = ref<string | null>(null);
 const dirty = ref(false);
+const baseRevisionAtEditStart = ref<number | null>(null);
+const hasExternalUpdate = ref(false);
 const activeEditorKey = ref<string | null>(null);
 const loginDraftFolderId = ref('');
 const documentDraftFolderId = ref('');
@@ -221,7 +223,6 @@ const searchFilter = computed(() => normalizeSearch(route.query.q));
 function cloneUiState(state: VaultUiState): VaultUiState {
   return {
     favorites: [...state.favorites],
-    trashed: [...state.trashed],
     folderAssignments: { ...state.folderAssignments },
     folders: state.folders.map((folder) => ({ ...folder })),
   };
@@ -242,8 +243,12 @@ function isFavorite(itemId: string): boolean {
   return uiState.value.favorites.includes(itemId);
 }
 
+function currentTombstones(): VaultWorkspaceTombstone[] {
+  return workspace.state.tombstones ?? [];
+}
+
 function isTrashed(itemId: string): boolean {
-  return uiState.value.trashed.includes(itemId);
+  return currentTombstones().some((entry) => entry.itemId === itemId);
 }
 
 function folderFor(itemId: string): string | null {
@@ -261,21 +266,16 @@ function folderName(folderId: string | null): string {
 const folders = computed(() => uiState.value.folders);
 
 const allItems = computed(() => workspace.state.items);
-const activeItems = computed(() => allItems.value.filter((item) => !isTrashed(item.itemId)));
+const activeItems = computed(() => allItems.value);
+const allTombstones = computed(() => currentTombstones());
 
 function itemMatchesCurrentContext(item: VaultWorkspaceItem): boolean {
   if (scope.value === 'trash') {
-    if (!isTrashed(item.itemId)) {
-      return false;
-    }
-  } else {
-    if (isTrashed(item.itemId)) {
-      return false;
-    }
+    return false;
+  }
 
-    if (scope.value === 'favorites' && !isFavorite(item.itemId)) {
-      return false;
-    }
+  if (scope.value === 'favorites' && !isFavorite(item.itemId)) {
+    return false;
   }
 
   if (typeFilter.value !== 'all' && item.itemType !== typeFilter.value) {
@@ -290,6 +290,21 @@ function itemMatchesCurrentContext(item: VaultWorkspaceItem): boolean {
 }
 
 const filteredItems = computed(() => workspace.filteredItems.value.filter(itemMatchesCurrentContext));
+const filteredTrashEntries = computed(() =>
+  allTombstones.value.filter((entry) => {
+    if (typeFilter.value !== 'all' && entry.itemType !== typeFilter.value) {
+      return false;
+    }
+    if (searchQuery.value.trim().length === 0) {
+      return true;
+    }
+    const needle = searchQuery.value.trim().toLowerCase();
+    return (
+      entry.itemId.toLowerCase().includes(needle) ||
+      entry.itemType.toLowerCase().includes(needle)
+    );
+  }),
+);
 
 const selectedItemId = computed(() => {
   const raw = route.params.itemId;
@@ -298,6 +313,9 @@ const selectedItemId = computed(() => {
 
 const selectedItem = computed(
   () => allItems.value.find((item) => item.itemId === selectedItemId.value) ?? null,
+);
+const selectedTrashEntry = computed(
+  () => allTombstones.value.find((entry) => entry.itemId === selectedItemId.value) ?? null,
 );
 
 const selectedItemInContext = computed(() => {
@@ -333,7 +351,11 @@ const isDetailRoute = computed(
 );
 const surfaceError = computed(() => errorMessage.value ?? workspace.state.lastError);
 const emptyVault = computed(() => !workspace.state.isLoading && activeItems.value.length === 0);
-const listPaneEmpty = computed(() => !workspace.state.isLoading && filteredItems.value.length === 0);
+const listPaneEmpty = computed(
+  () =>
+    !workspace.state.isLoading &&
+    (scope.value === 'trash' ? filteredTrashEntries.value.length === 0 : filteredItems.value.length === 0),
+);
 const contextualCreateOptions = computed(() => {
   if (typeFilter.value === 'all') {
     return createOptions;
@@ -941,6 +963,8 @@ function syncDraftFromRoute() {
       pendingDraftAttachments.value = [];
       attachmentError.value = null;
       dirty.value = false;
+      baseRevisionAtEditStart.value = null;
+      hasExternalUpdate.value = false;
       activeEditorKey.value = key;
     }
     return;
@@ -954,6 +978,8 @@ function syncDraftFromRoute() {
       pendingDraftAttachments.value = [];
       attachmentError.value = null;
       dirty.value = false;
+      baseRevisionAtEditStart.value = null;
+      hasExternalUpdate.value = false;
       activeEditorKey.value = key;
     }
     return;
@@ -967,6 +993,8 @@ function syncDraftFromRoute() {
       pendingDraftAttachments.value = [];
       attachmentError.value = null;
       dirty.value = false;
+      baseRevisionAtEditStart.value = null;
+      hasExternalUpdate.value = false;
       activeEditorKey.value = key;
     }
     return;
@@ -980,13 +1008,15 @@ function syncDraftFromRoute() {
       pendingDraftAttachments.value = [];
       attachmentError.value = null;
       dirty.value = false;
+      baseRevisionAtEditStart.value = null;
+      hasExternalUpdate.value = false;
       activeEditorKey.value = key;
     }
     return;
   }
 
   if (isEditing.value && selectedItem.value) {
-    const key = `edit:${selectedItem.value.itemId}:${selectedItem.value.revision}`;
+    const key = `edit:${selectedItem.value.itemId}`;
     if (activeEditorKey.value !== key) {
       if (selectedItem.value.itemType === 'login') {
         assignLoginDraft(selectedItem.value.payload);
@@ -1004,13 +1034,49 @@ function syncDraftFromRoute() {
       pendingDraftAttachments.value = [];
       attachmentError.value = null;
       dirty.value = false;
+      baseRevisionAtEditStart.value = selectedItem.value.revision;
+      hasExternalUpdate.value = false;
       activeEditorKey.value = key;
+      return;
     }
+
+    if (
+      baseRevisionAtEditStart.value !== null &&
+      baseRevisionAtEditStart.value !== selectedItem.value.revision
+    ) {
+      if (dirty.value) {
+        hasExternalUpdate.value = true;
+        return;
+      }
+
+      if (selectedItem.value.itemType === 'login') {
+        assignLoginDraft(selectedItem.value.payload);
+        loginDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+      } else if (selectedItem.value.itemType === 'document') {
+        assignDocumentDraft(selectedItem.value.payload);
+        documentDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+      } else if (selectedItem.value.itemType === 'card') {
+        assignCardDraft(selectedItem.value.payload);
+        cardDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+      } else {
+        assignSecureNoteDraft(selectedItem.value.payload);
+        secureNoteDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+      }
+      baseRevisionAtEditStart.value = selectedItem.value.revision;
+      hasExternalUpdate.value = false;
+    }
+    return;
+  }
+
+  if (isEditing.value && !selectedItem.value && dirty.value) {
+    hasExternalUpdate.value = true;
     return;
   }
 
   activeEditorKey.value = null;
   dirty.value = false;
+  baseRevisionAtEditStart.value = null;
+  hasExternalUpdate.value = false;
 }
 
 watch(
@@ -1067,6 +1133,29 @@ function setDirty() {
   }
 }
 
+function reloadLatestAfterConflict() {
+  if (!isEditing.value || !selectedItem.value) {
+    return;
+  }
+  if (selectedItem.value.itemType === 'login') {
+    assignLoginDraft(selectedItem.value.payload);
+    loginDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+  } else if (selectedItem.value.itemType === 'document') {
+    assignDocumentDraft(selectedItem.value.payload);
+    documentDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+  } else if (selectedItem.value.itemType === 'card') {
+    assignCardDraft(selectedItem.value.payload);
+    cardDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+  } else {
+    assignSecureNoteDraft(selectedItem.value.payload);
+    secureNoteDraftFolderId.value = resolveDraftFolder(selectedItem.value.itemId);
+  }
+  dirty.value = false;
+  hasExternalUpdate.value = false;
+  baseRevisionAtEditStart.value = selectedItem.value.revision;
+  errorMessage.value = null;
+}
+
 function setSearchQuery(value: string) {
   searchQuery.value = value;
   workspace.setSearchQuery(value);
@@ -1119,24 +1208,8 @@ function assignItemFolder(itemId: string, folderId: string | null) {
   });
 }
 
-function moveToTrash(itemId: string) {
-  commitUiState((draft) => {
-    if (!draft.trashed.includes(itemId)) {
-      draft.trashed.push(itemId);
-    }
-  });
-  showToast('Moved to Trash');
-}
-
-function restoreFromTrash(itemId: string) {
-  commitUiState((draft) => {
-    draft.trashed = draft.trashed.filter((current) => current !== itemId);
-  });
-}
-
 function clearItemFromUiState(itemId: string) {
   commitUiState((draft) => {
-    draft.trashed = draft.trashed.filter((current) => current !== itemId);
     draft.favorites = draft.favorites.filter((current) => current !== itemId);
     delete draft.folderAssignments[itemId];
   });
@@ -1233,13 +1306,6 @@ function onDropdownSelect(value: string) {
 }
 
 function metaLine(item: VaultWorkspaceItem) {
-  if (scope.value === 'trash') {
-    if (item.itemType === 'login') return 'Deleted login';
-    if (item.itemType === 'document') return 'Deleted document';
-    if (item.itemType === 'card') return 'Deleted card';
-    return 'Deleted secure note';
-  }
-
   if (item.itemType === 'login') {
     return item.payload.username || item.payload.urls[0] || 'Login';
   }
@@ -1256,6 +1322,42 @@ function metaLine(item: VaultWorkspaceItem) {
   return preview.length > 44 ? `${preview.slice(0, 44)}...` : preview;
 }
 
+function trashTitle(itemType: VaultWorkspaceTombstone['itemType']): string {
+  if (itemType === 'login') return 'Deleted login item';
+  if (itemType === 'document') return 'Deleted document';
+  if (itemType === 'card') return 'Deleted card';
+  return 'Deleted secure note';
+}
+
+function trashMonogram(itemType: VaultWorkspaceTombstone['itemType']): string {
+  if (itemType === 'login') return 'L';
+  if (itemType === 'document') return 'D';
+  if (itemType === 'card') return 'C';
+  return 'S';
+}
+
+function trashMetaLine(input: {
+  itemType: VaultWorkspaceTombstone['itemType'];
+  itemId: string;
+  deletedAt: string;
+}): string {
+  const deletedLabel = trashDeletedAtLabel(input.deletedAt);
+  return `${input.itemId} · Deleted ${deletedLabel}`;
+}
+
+function trashDeletedAtLabel(deletedAtIso: string): string {
+  const deletedAt = new Date(deletedAtIso);
+  return Number.isNaN(deletedAt.getTime())
+    ? deletedAtIso
+    : deletedAt.toLocaleString(undefined, {
+        month: 'short',
+        day: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+}
+
 function rowRoute(itemId: string) {
   return vaultRoute(`/vault/item/${itemId}`);
 }
@@ -1267,6 +1369,15 @@ function onItemRowClick(itemId: string) {
   }
 
   void navigateTo(rowRoute(itemId));
+}
+
+function onTrashRowClick(itemId: string) {
+  if (isDetailRoute.value && selectedItemId.value === itemId) {
+    void navigateTo(vaultRoute('/vault', { scope: 'trash' }));
+    return;
+  }
+
+  void navigateTo(vaultRoute(`/vault/item/${itemId}`, { scope: 'trash' }));
 }
 
 function itemMonogram(item: VaultWorkspaceItem): string {
@@ -1498,29 +1609,34 @@ async function saveCurrent() {
     }
 
     if (isEditing.value && selectedItem.value) {
+      const expectedRevision = baseRevisionAtEditStart.value ?? selectedItem.value.revision;
       let nextItem: VaultWorkspaceItem;
       let targetFolder: string | null = null;
       if (selectedItem.value.itemType === 'login') {
         nextItem = {
           ...selectedItem.value,
+          revision: expectedRevision,
           payload: buildLoginPayloadForSave(),
         };
         targetFolder = loginDraftFolderId.value || null;
       } else if (selectedItem.value.itemType === 'document') {
         nextItem = {
           ...selectedItem.value,
+          revision: expectedRevision,
           payload: buildDocumentPayloadForSave(),
         };
         targetFolder = documentDraftFolderId.value || null;
       } else if (selectedItem.value.itemType === 'card') {
         nextItem = {
           ...selectedItem.value,
+          revision: expectedRevision,
           payload: buildCardPayloadForSave(),
         };
         targetFolder = cardDraftFolderId.value || null;
       } else {
         nextItem = {
           ...selectedItem.value,
+          revision: expectedRevision,
           payload: buildSecureNotePayloadForSave(),
         };
         targetFolder = secureNoteDraftFolderId.value || null;
@@ -1535,6 +1651,16 @@ async function saveCurrent() {
     }
   } catch (error) {
     errorMessage.value = toHumanErrorMessage(error);
+    const message = errorMessage.value.toLowerCase();
+    if (message.includes('revision_conflict')) {
+      hasExternalUpdate.value = true;
+      void workspace.triggerSync('conflict_reconcile').catch(() => undefined);
+    }
+    if (message.includes('item_deleted_conflict')) {
+      hasExternalUpdate.value = true;
+      void workspace.triggerSync('conflict_reconcile').catch(() => undefined);
+      void router.push(vaultRoute('/vault', { scope: 'trash' }));
+    }
   } finally {
     busyAction.value = null;
   }
@@ -1548,50 +1674,43 @@ async function moveCurrentToTrash() {
   busyAction.value = 'trash';
 
   try {
-    moveToTrash(selectedItem.value.itemId);
+    await workspace.deleteItem(selectedItem.value.itemId);
+    clearItemFromUiState(selectedItem.value.itemId);
+    showToast('Moved to Trash');
     dirty.value = false;
     await router.push(vaultRoute('/vault', { scope: 'trash' }));
+  } catch (error) {
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyAction.value = null;
   }
 }
 
 async function restoreCurrentItem() {
-  if (!selectedItemInContext.value) {
+  if (!selectedTrashEntry.value) {
     return;
   }
 
-  restoreFromTrash(selectedItemInContext.value.itemId);
-  await router.push(
-    vaultRoute(`/vault/item/${selectedItemInContext.value.itemId}`, {
-      scope: 'all',
-    }),
-  );
+  busyAction.value = 'trash';
+  try {
+    await workspace.restoreItem(selectedTrashEntry.value.itemId);
+    showToast('Restored');
+    await router.push(vaultRoute(`/vault/item/${selectedTrashEntry.value.itemId}`, { scope: 'all' }));
+  } catch (error) {
+    errorMessage.value = toHumanErrorMessage(error);
+  } finally {
+    busyAction.value = null;
+  }
 }
 
 async function restoreFromRow(itemId: string) {
-  restoreFromTrash(itemId);
-
-  if (selectedItemId.value === itemId) {
-    await router.push(
-      vaultRoute(`/vault/item/${itemId}`, {
-        scope: 'all',
-      }),
-    );
-  }
-}
-
-async function deleteCurrentPermanently() {
-  if (!selectedItemInContext.value) {
-    return;
-  }
-
-  busyAction.value = 'delete-permanent';
-
+  busyAction.value = 'trash';
   try {
-    await workspace.deleteItem(selectedItemInContext.value.itemId);
-    clearItemFromUiState(selectedItemInContext.value.itemId);
-    await router.push(vaultRoute('/vault', { scope: 'trash' }));
+    await workspace.restoreItem(itemId);
+    showToast('Restored');
+    if (selectedItemId.value === itemId) {
+      await router.push(vaultRoute(`/vault/item/${itemId}`, { scope: 'all' }));
+    }
   } catch (error) {
     errorMessage.value = toHumanErrorMessage(error);
   } finally {
@@ -1779,9 +1898,11 @@ onMounted(async () => {
 
   window.addEventListener('keydown', handleGlobalKeydown);
   await loadVault();
+  workspace.startSync();
 });
 
 onBeforeUnmount(() => {
+  workspace.stopSync();
   unsubscribeUiState?.();
   unsubscribeUiState = null;
   mobileQuery?.removeEventListener('change', syncViewport);
@@ -1885,6 +2006,32 @@ onBeforeUnmount(() => {
         </template>
       </EmptyState>
 
+      <div v-else-if="isTrashContext" class="vault-list">
+        <article
+          v-for="entry in filteredTrashEntries"
+          :key="entry.itemId"
+          class="vault-list-row is-trash-row"
+          :class="{ 'is-active': entry.itemId === selectedItemId }"
+        >
+          <button class="vault-list-row__main" type="button" @click="onTrashRowClick(entry.itemId)">
+            <span class="vault-list-row__avatar" aria-hidden="true">
+              {{ trashMonogram(entry.itemType) }}
+            </span>
+            <span class="vault-list-row__content">
+              <span class="vault-list-row__title-line">
+                <span class="vault-list-row__title">{{ trashTitle(entry.itemType) }}</span>
+              </span>
+              <span class="vault-list-row__meta">
+                {{ trashMetaLine({ itemType: entry.itemType, itemId: entry.itemId, deletedAt: entry.deletedAt }) }}
+              </span>
+            </span>
+          </button>
+          <SecondaryButton type="button" :disabled="busyAction === 'trash'" @click="restoreFromRow(entry.itemId)">
+            Restore
+          </SecondaryButton>
+        </article>
+      </div>
+
       <div v-else class="vault-list">
         <article
           v-for="item in filteredItems"
@@ -1892,7 +2039,6 @@ onBeforeUnmount(() => {
           class="vault-list-row"
           :class="{
             'is-active': item.itemId === selectedItemId,
-            'is-trash-row': isTrashContext,
             'is-document-row': item.itemType === 'document',
           }"
         >
@@ -1911,7 +2057,7 @@ onBeforeUnmount(() => {
               <span class="vault-list-row__title-line">
                 <span class="vault-list-row__title">{{ item.payload.title }}</span>
                 <span
-                  v-if="isMobileViewport && !isTrashContext && isFavorite(item.itemId)"
+                  v-if="isMobileViewport && isFavorite(item.itemId)"
                   :data-testid="`vault-mobile-favorite-indicator-${item.itemId}`"
                   class="vault-list-row__favorite-indicator"
                   aria-label="Favorite item"
@@ -1923,7 +2069,6 @@ onBeforeUnmount(() => {
             </span>
           </button>
           <IconButton
-            v-if="!isTrashContext"
             class="vault-list-row__favorite"
             :class="{ 'is-favorited': isFavorite(item.itemId) }"
             type="button"
@@ -1932,7 +2077,6 @@ onBeforeUnmount(() => {
           >
             <AppIcon name="favorites" :size="18" />
           </IconButton>
-          <SecondaryButton v-else type="button" @click="restoreFromRow(item.itemId)">Restore</SecondaryButton>
         </article>
       </div>
     </section>
@@ -2053,6 +2197,13 @@ onBeforeUnmount(() => {
             </IconButton>
           </div>
         </div>
+
+        <InlineAlert v-if="isEditing && hasExternalUpdate" tone="danger">
+          <span>This item changed in another tab or device. Reload latest to continue safely.</span>
+          <SecondaryButton type="button" @click="reloadLatestAfterConflict">
+            Reload latest
+          </SecondaryButton>
+        </InlineAlert>
 
         <form class="form-stack" @submit.prevent="saveCurrent">
           <template v-if="isCreateLogin || (isEditing && selectedItem?.itemType === 'login')">
@@ -2412,6 +2563,51 @@ onBeforeUnmount(() => {
         </form>
 
       </section>
+
+      <article v-else-if="isTrashContext && selectedTrashEntry" class="detail-card">
+        <div class="detail-card__header detail-card__header--split">
+          <div class="detail-card__identity">
+            <span class="detail-card__avatar" aria-hidden="true">
+              {{ trashMonogram(selectedTrashEntry.itemType) }}
+            </span>
+            <div>
+              <p class="eyebrow">Trash</p>
+              <h2>{{ trashTitle(selectedTrashEntry.itemType) }}</h2>
+            </div>
+          </div>
+          <div v-if="showCompactBackToList && !isMobileViewport" class="detail-card__actions-layout">
+            <IconButton
+              data-testid="vault-compact-back-button"
+              class="detail-card__close-action"
+              type="button"
+              label="Close item"
+              @click="navigateTo(vaultRoute('/vault', { scope: 'trash' }))"
+            >
+              <AppIcon name="close" :size="17" />
+            </IconButton>
+          </div>
+        </div>
+
+        <KeyValueList>
+          <div class="key-value-row">
+            <dt>Item type</dt>
+            <dd>{{ trashTitle(selectedTrashEntry.itemType) }}</dd>
+          </div>
+          <div class="key-value-row">
+            <dt>Item ID</dt>
+            <dd>{{ selectedTrashEntry.itemId }}</dd>
+          </div>
+          <div class="key-value-row">
+            <dt>Deleted at</dt>
+            <dd>{{ trashDeletedAtLabel(selectedTrashEntry.deletedAt) }}</dd>
+          </div>
+        </KeyValueList>
+
+        <section class="detail-trash-actions">
+          <PrimaryButton type="button" :disabled="busyAction === 'trash'" @click="restoreCurrentItem">Restore</PrimaryButton>
+          <p class="module-empty-hint">Permanent delete is not available in V1.</p>
+        </section>
+      </article>
 
       <article v-else-if="selectedItemInContext" class="detail-card">
         <div class="detail-card__header detail-card__header--split">
@@ -2787,17 +2983,7 @@ onBeforeUnmount(() => {
 
         <section v-if="isTrashContext" class="detail-trash-actions">
           <PrimaryButton type="button" @click="restoreCurrentItem">Restore</PrimaryButton>
-          <DangerZone>
-            <div class="form-actions">
-              <DangerButton
-                type="button"
-                :disabled="busyAction === 'delete-permanent'"
-                @click="deleteCurrentPermanently"
-              >
-                {{ busyAction === 'delete-permanent' ? 'Deleting...' : 'Delete permanently' }}
-              </DangerButton>
-            </div>
-          </DangerZone>
+          <p class="module-empty-hint">Permanent delete is not available in V1.</p>
         </section>
       </article>
 

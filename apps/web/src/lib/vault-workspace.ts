@@ -68,10 +68,18 @@ export type VaultWorkspaceItem =
   | VaultWorkspaceItemByType<'card'>
   | VaultWorkspaceItemByType<'secure_note'>;
 
+export interface VaultWorkspaceTombstone {
+  itemId: string;
+  itemType: VaultItemType;
+  revision: number;
+  deletedAt: string;
+}
+
 export interface VaultWorkspaceState {
   isLoading: boolean;
   lastError: string | null;
   items: VaultWorkspaceItem[];
+  tombstones: VaultWorkspaceTombstone[];
 }
 
 export interface VaultWorkspace {
@@ -79,14 +87,23 @@ export interface VaultWorkspace {
   searchQuery: Readonly<{ value: string }>;
   filteredItems: Readonly<{ value: VaultWorkspaceItem[] }>;
   load(): Promise<void>;
+  startSync(): void;
+  stopSync(): void;
+  triggerSync(reason?: string): Promise<void>;
   createLogin(payload: LoginVaultItemPayload): Promise<void>;
   createDocument(payload: DocumentVaultItemPayload): Promise<void>;
   createCard(payload: CardVaultItemPayload): Promise<void>;
   createSecureNote(payload: SecureNoteVaultItemPayload): Promise<void>;
   updateItem(item: VaultWorkspaceItem): Promise<void>;
   deleteItem(itemId: string): Promise<void>;
+  restoreItem(itemId: string): Promise<void>;
   setSearchQuery(query: string): void;
 }
+
+const SYNC_PAGE_SIZE = 25;
+const SYNC_INTERVAL_MS = 30_000;
+const SYNC_INTERVAL_JITTER_RATIO = 0.2;
+const SYNC_ERROR_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 60_000] as const;
 
 function normalizeCustomFields(fields: unknown): VaultCustomField[] {
   if (!Array.isArray(fields)) {
@@ -214,8 +231,27 @@ export function createVaultWorkspace(input: {
     isLoading: false,
     lastError: null,
     items: [],
+    tombstones: [],
   });
   const searchIndex = ref(buildVaultSearchIndex([]));
+  let lastSnapshotEtag: string | null = null;
+  let pullGeneration = 0;
+  let activePullGeneration: number | null = null;
+  let activePullAbortController: AbortController | null = null;
+  let activePullPromise: Promise<void> | null = null;
+  let pendingPull = false;
+  let syncStarted = false;
+  let syncTimer: ReturnType<typeof setTimeout> | null = null;
+  let syncBackoffIndex = 0;
+
+  const onWindowFocus = () => {
+    void triggerSync('focus').catch(() => undefined);
+  };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      void triggerSync('visibility').catch(() => undefined);
+    }
+  };
 
   function rebuildIndex() {
     searchIndex.value = buildVaultSearchIndex(state.items);
@@ -226,15 +262,193 @@ export function createVaultWorkspace(input: {
     return state.items.filter((item) => matchingIds.has(item.itemId));
   });
 
+  function isSessionReady(): boolean {
+    return input.sessionStore.state.phase === 'ready';
+  }
+
+  function withIntervalJitter(baseMs: number): number {
+    const jitter = 1 + (Math.random() * 2 - 1) * SYNC_INTERVAL_JITTER_RATIO;
+    return Math.max(1_000, Math.round(baseMs * jitter));
+  }
+
+  function scheduleNextSync(delayMs: number) {
+    if (!syncStarted) {
+      return;
+    }
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    syncTimer = setTimeout(() => {
+      void triggerSync('interval').catch(() => undefined);
+    }, delayMs);
+  }
+
+  async function applySnapshotEntries(entries: Array<{
+    entryType: 'item' | 'tombstone';
+    item?: {
+      itemId: string;
+      itemType: VaultItemType;
+      revision: number;
+      encryptedPayload: string;
+      createdAt: string;
+      updatedAt: string;
+    };
+    tombstone?: {
+      itemId: string;
+      itemType: VaultItemType;
+      revision: number;
+      deletedAt: string;
+    };
+  }>) {
+    const { accountKey } = input.sessionStore.getUnlockedVaultContext();
+    const itemEntries = entries
+      .filter((entry): entry is { entryType: 'item'; item: NonNullable<typeof entry.item> } =>
+        entry.entryType === 'item' && Boolean(entry.item),
+      )
+      .map((entry) => entry.item);
+    const tombstoneEntries = entries
+      .filter(
+        (
+          entry,
+        ): entry is { entryType: 'tombstone'; tombstone: NonNullable<typeof entry.tombstone> } =>
+          entry.entryType === 'tombstone' && Boolean(entry.tombstone),
+      )
+      .map((entry) => entry.tombstone)
+      .sort((left, right) => right.deletedAt.localeCompare(left.deletedAt));
+    state.items = await Promise.all(itemEntries.map((item) => decryptRecord(accountKey, item)));
+    state.tombstones = tombstoneEntries.map((entry) => ({ ...entry }));
+    rebuildIndex();
+  }
+
+  async function runSnapshotPull(reason: string): Promise<boolean> {
+    if (!isSessionReady()) {
+      return false;
+    }
+
+    const generation = ++pullGeneration;
+    activePullGeneration = generation;
+    const abortController = new AbortController();
+    activePullAbortController = abortController;
+    let didApply = false;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let snapshotToken: string | undefined;
+      let cursor: string | undefined;
+      const mergedEntries: Array<{
+        entryType: 'item' | 'tombstone';
+        item?: {
+          itemId: string;
+          itemType: VaultItemType;
+          revision: number;
+          encryptedPayload: string;
+          createdAt: string;
+          updatedAt: string;
+        };
+        tombstone?: {
+          itemId: string;
+          itemType: VaultItemType;
+          revision: number;
+          deletedAt: string;
+        };
+      }> = [];
+
+      try {
+        while (true) {
+          if (!isSessionReady() || abortController.signal.aborted || activePullGeneration !== generation) {
+            return false;
+          }
+
+          const page = await input.vaultClient.pullSyncSnapshot({
+            snapshotToken,
+            cursor,
+            pageSize: SYNC_PAGE_SIZE,
+            etag: snapshotToken ? undefined : lastSnapshotEtag ?? undefined,
+            signal: abortController.signal,
+          });
+
+          if (page.status === 'not_modified') {
+            lastSnapshotEtag = page.etag ?? lastSnapshotEtag;
+            return true;
+          }
+
+          if (!snapshotToken) {
+            snapshotToken = page.payload.snapshotToken;
+          }
+          mergedEntries.push(...page.payload.entries);
+          cursor = page.payload.nextCursor ?? undefined;
+          if (!cursor) {
+            if (!isSessionReady() || abortController.signal.aborted || activePullGeneration !== generation) {
+              return false;
+            }
+            await applySnapshotEntries(mergedEntries);
+            lastSnapshotEtag = page.etag ?? `"${page.payload.snapshotDigest}"`;
+            didApply = true;
+            return true;
+          }
+        }
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          return false;
+        }
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        const isSnapshotExpired = rawMessage.includes('snapshot_expired');
+        if (isSnapshotExpired && attempt === 0) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return didApply;
+  }
+
+  async function triggerSync(reason = 'manual'): Promise<void> {
+    if (!isSessionReady()) {
+      return;
+    }
+
+    if (activePullPromise) {
+      pendingPull = true;
+      activePullAbortController?.abort();
+      return;
+    }
+
+    state.lastError = null;
+    activePullPromise = (async () => {
+      try {
+        const ok = await runSnapshotPull(reason);
+        if (ok) {
+          syncBackoffIndex = 0;
+          scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
+        } else if (syncStarted) {
+          scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
+        }
+      } catch (error) {
+        state.lastError = toHumanErrorMessage(error);
+        syncBackoffIndex = Math.min(syncBackoffIndex + 1, SYNC_ERROR_BACKOFF_MS.length - 1);
+        scheduleNextSync(SYNC_ERROR_BACKOFF_MS[syncBackoffIndex] ?? SYNC_ERROR_BACKOFF_MS.at(-1) ?? 60_000);
+        throw error;
+      } finally {
+        activePullPromise = null;
+        activePullAbortController = null;
+        activePullGeneration = null;
+        if (pendingPull) {
+          pendingPull = false;
+          void triggerSync('pending_pull').catch(() => undefined);
+        }
+      }
+    })();
+
+    await activePullPromise;
+  }
+
   async function load() {
     state.isLoading = true;
     state.lastError = null;
 
     try {
-      const { accountKey } = input.sessionStore.getUnlockedVaultContext();
-      const response = await input.vaultClient.listItems();
-      state.items = await Promise.all(response.items.map((item) => decryptRecord(accountKey, item)));
-      rebuildIndex();
+      await triggerSync('load');
     } catch (error) {
       state.lastError = toHumanErrorMessage(error);
       throw error;
@@ -259,7 +473,11 @@ export function createVaultWorkspace(input: {
       encryptedPayload,
     });
     state.items = [...state.items, await decryptRecord(accountKey, created)];
+    state.tombstones = state.tombstones.filter((entry) => entry.itemId !== created.itemId);
     rebuildIndex();
+    if (syncStarted) {
+      void triggerSync('post_mutation').catch(() => undefined);
+    }
   }
 
   return {
@@ -300,18 +518,85 @@ export function createVaultWorkspace(input: {
         state.items = state.items.map((current) =>
           current.itemId === decrypted.itemId ? decrypted : current,
         );
+        state.tombstones = state.tombstones.filter((entry) => entry.itemId !== decrypted.itemId);
         rebuildIndex();
       } catch (error) {
         state.lastError = toHumanErrorMessage(error);
         throw error;
       }
+      if (syncStarted) {
+        void triggerSync('post_mutation').catch(() => undefined);
+      }
     },
     async deleteItem(itemId) {
       state.lastError = null;
+      const current = state.items.find((item) => item.itemId === itemId) ?? null;
       await input.vaultClient.deleteItem(itemId);
       state.items = state.items.filter((item) => item.itemId !== itemId);
+      if (current) {
+        const tombstone: VaultWorkspaceTombstone = {
+          itemId,
+          itemType: current.itemType,
+          revision: current.revision + 1,
+          deletedAt: new Date().toISOString(),
+        };
+        state.tombstones = [tombstone, ...state.tombstones.filter((entry) => entry.itemId !== itemId)];
+      }
       rebuildIndex();
+      if (syncStarted) {
+        void triggerSync('post_mutation').catch(() => undefined);
+      }
     },
+    async restoreItem(itemId) {
+      state.lastError = null;
+      const restoreOutput = await input.vaultClient.restoreItem(itemId);
+      const { accountKey } = input.sessionStore.getUnlockedVaultContext();
+      const decrypted = await decryptRecord(accountKey, restoreOutput.item);
+      const existingIndex = state.items.findIndex((item) => item.itemId === decrypted.itemId);
+      if (existingIndex >= 0) {
+        state.items = state.items.map((item) => (item.itemId === decrypted.itemId ? decrypted : item));
+      } else {
+        state.items = [...state.items, decrypted];
+      }
+      state.tombstones = state.tombstones.filter((entry) => entry.itemId !== decrypted.itemId);
+      rebuildIndex();
+      if (syncStarted) {
+        void triggerSync('post_mutation').catch(() => undefined);
+      }
+    },
+    startSync() {
+      if (syncStarted) {
+        return;
+      }
+      syncStarted = true;
+      if (typeof window !== 'undefined') {
+        window.addEventListener('focus', onWindowFocus);
+      }
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', onVisibilityChange);
+      }
+      scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
+      void triggerSync('start').catch(() => undefined);
+    },
+    stopSync() {
+      syncStarted = false;
+      if (syncTimer) {
+        clearTimeout(syncTimer);
+        syncTimer = null;
+      }
+      activePullAbortController?.abort();
+      activePullAbortController = null;
+      activePullPromise = null;
+      activePullGeneration = null;
+      pendingPull = false;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', onWindowFocus);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+    },
+    triggerSync,
     searchQuery: readonly(searchQuery),
     filteredItems,
     setSearchQuery(query) {

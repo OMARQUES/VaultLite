@@ -78,6 +78,13 @@ type WorkspaceItem =
       };
     };
 
+interface WorkspaceTombstone {
+  itemId: string;
+  itemType: 'login' | 'document' | 'card' | 'secure_note';
+  revision: number;
+  deletedAt: string;
+}
+
 let currentWorkspace: ReturnType<typeof createWorkspace>;
 let mediaQueryMatches = false;
 let compactDesktopQueryMatches = false;
@@ -95,11 +102,12 @@ vi.mock('../lib/vault-workspace', () => ({
   createVaultWorkspace: () => currentWorkspace,
 }));
 
-function createWorkspace(items: WorkspaceItem[]) {
+function createWorkspace(items: WorkspaceItem[], tombstones: WorkspaceTombstone[] = []) {
   const state = reactive({
     isLoading: false,
     lastError: null as string | null,
     items: [...items],
+    tombstones: [...tombstones],
   });
   const searchQuery = ref('');
   const filteredItems = computed(() => {
@@ -130,12 +138,16 @@ function createWorkspace(items: WorkspaceItem[]) {
     searchQuery,
     filteredItems,
     load: vi.fn().mockResolvedValue(undefined),
+    startSync: vi.fn(),
+    stopSync: vi.fn(),
+    triggerSync: vi.fn().mockResolvedValue(undefined),
     createLogin: vi.fn(),
     createDocument: vi.fn(),
     createCard: vi.fn(),
     createSecureNote: vi.fn(),
     updateItem: vi.fn(),
     deleteItem: vi.fn(),
+    restoreItem: vi.fn(),
     setSearchQuery(query: string) {
       searchQuery.value = query;
     },
@@ -194,8 +206,15 @@ function createSessionStore(role: 'owner' | 'user' = 'user') {
   };
 }
 
-async function mountVaultAt(path: string, items: WorkspaceItem[], options: { role?: 'owner' | 'user' } = {}) {
-  currentWorkspace = createWorkspace(items);
+async function mountVaultAt(
+  path: string,
+  items: WorkspaceItem[],
+  options: {
+    role?: 'owner' | 'user';
+    tombstones?: WorkspaceTombstone[];
+  } = {},
+) {
+  currentWorkspace = createWorkspace(items, options.tombstones ?? []);
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -805,39 +824,19 @@ describe('VaultShellPage', () => {
   });
 
   test('renders trash context as read-only with restore as the primary action', async () => {
-    window.localStorage.setItem(
-      'vaultlite:vault-ui:alice',
-      JSON.stringify({
-        favorites: [],
-        trashed: ['item_1'],
-        folderAssignments: {},
-        folders: [
-          { id: 'work', name: 'Work' },
-          { id: 'personal', name: 'Personal' },
-          { id: 'family', name: 'Family' },
-        ],
-      }),
-    );
-
-    const { wrapper } = await mountVaultAt('/vault/item/item_1?scope=trash', [
-      {
-        itemId: 'item_1',
-        itemType: 'login',
-        revision: 3,
-        createdAt: '2026-03-15T10:00:00.000Z',
-        updatedAt: '2026-03-15T10:00:00.000Z',
-        payload: {
-          title: 'GitHub',
-          username: 'alice',
-          password: 'secret',
-          urls: ['https://github.com'],
-          notes: '',
+    const { wrapper } = await mountVaultAt('/vault/item/item_1?scope=trash', [], {
+      tombstones: [
+        {
+          itemId: 'item_1',
+          itemType: 'login',
+          revision: 3,
+          deletedAt: '2026-03-15T10:00:00.000Z',
         },
-      },
-    ]);
+      ],
+    });
 
     expect(wrapper.text()).toContain('Restore');
-    expect(wrapper.text()).toContain('Delete permanently');
+    expect(wrapper.text()).toContain('Permanent delete is not available in V1.');
     expect(wrapper.text()).not.toContain('Edit');
   });
 

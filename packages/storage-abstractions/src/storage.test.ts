@@ -120,7 +120,9 @@ describe('createInMemoryVaultLiteStorage', () => {
       updatedAt: '2026-03-15T00:00:00.000Z',
     });
 
-    await expect(storage.vaultItems.delete('item_1', 'user_1')).resolves.toBe(true);
+    await expect(
+      storage.vaultItems.delete('item_1', 'user_1', '2026-03-15T00:10:00.000Z'),
+    ).resolves.toBe(true);
     await expect(storage.vaultItems.findByItemId('item_1', 'user_1')).resolves.toBeNull();
     await expect(storage.vaultItems.listByOwnerUserId('user_1')).resolves.toEqual([]);
     await expect(storage.vaultItems.findTombstoneByItemId('item_1', 'user_1')).resolves.toEqual(
@@ -129,6 +131,7 @@ describe('createInMemoryVaultLiteStorage', () => {
         ownerUserId: 'user_1',
         itemType: 'login',
         revision: 2,
+        encryptedPayload: 'encrypted_payload_v1',
       }),
     );
     await expect(storage.vaultItems.listTombstonesByOwnerUserId('user_1')).resolves.toEqual([
@@ -136,6 +139,44 @@ describe('createInMemoryVaultLiteStorage', () => {
         itemId: 'item_1',
       }),
     ]);
+  });
+
+  test('restores tombstoned items within retention window and is idempotent when already active', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.vaultItems.create({
+      itemId: 'item_1',
+      ownerUserId: 'user_1',
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'encrypted_payload_v1',
+      createdAt: '2026-03-15T00:00:00.000Z',
+      updatedAt: '2026-03-15T00:00:00.000Z',
+    });
+
+    await storage.vaultItems.delete('item_1', 'user_1', '2026-03-15T00:10:00.000Z');
+    const restored = await storage.vaultItems.restore({
+      itemId: 'item_1',
+      ownerUserId: 'user_1',
+      restoredAtIso: '2026-03-15T00:20:00.000Z',
+      restoreRetentionDays: 30,
+    });
+    expect(restored.status).toBe('success_changed');
+    expect(restored.item).toEqual(
+      expect.objectContaining({
+        itemId: 'item_1',
+        revision: 3,
+        encryptedPayload: 'encrypted_payload_v1',
+      }),
+    );
+
+    const replay = await storage.vaultItems.restore({
+      itemId: 'item_1',
+      ownerUserId: 'user_1',
+      restoredAtIso: '2026-03-15T00:21:00.000Z',
+      restoreRetentionDays: 30,
+    });
+    expect(replay.status).toBe('success_no_op');
+    expect(replay.item?.itemId).toBe('item_1');
   });
 
   test('supports pending attachment records, idempotency lookup, and uploaded transition', async () => {

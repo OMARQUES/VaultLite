@@ -54,6 +54,9 @@ import { createVaultWorkspace } from './vault-workspace';
 function createDependencies() {
   return {
     sessionStore: {
+      state: {
+        phase: 'ready',
+      },
       getUnlockedVaultContext: vi.fn().mockReturnValue({
         username: 'alice',
         accountKey: 'A'.repeat(43),
@@ -62,6 +65,18 @@ function createDependencies() {
     vaultClient: {
       listItems: vi.fn().mockResolvedValue({
         items: [],
+      }),
+      pullSyncSnapshot: vi.fn().mockResolvedValue({
+        status: 'ok',
+        etag: '"digest_1"',
+        payload: {
+          snapshotToken: 'snapshot_token_1',
+          snapshotAsOf: '2026-03-15T12:00:00.000Z',
+          snapshotDigest: 'digest_1',
+          pageSize: 25,
+          nextCursor: null,
+          entries: [],
+        },
       }),
       createItem: vi.fn().mockResolvedValue({
         itemId: 'item_1',
@@ -87,23 +102,35 @@ function createDependencies() {
 describe('createVaultWorkspace', () => {
   test('loads encrypted records and exposes decrypted items for the unlocked user', async () => {
     const dependencies = createDependencies();
-    dependencies.vaultClient.listItems.mockResolvedValue({
-      items: [
-        {
-          itemId: 'item_1',
-          itemType: 'login',
-          revision: 1,
-          encryptedPayload: 'encrypted_payload_v1',
-          createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:00.000Z',
-        },
-      ],
+    dependencies.vaultClient.pullSyncSnapshot.mockResolvedValue({
+      status: 'ok',
+      etag: '"digest_1"',
+      payload: {
+        snapshotToken: 'snapshot_token_1',
+        snapshotAsOf: '2026-03-15T12:00:00.000Z',
+        snapshotDigest: 'digest_1',
+        pageSize: 25,
+        nextCursor: null,
+        entries: [
+          {
+            entryType: 'item',
+            item: {
+              itemId: 'item_1',
+              itemType: 'login',
+              revision: 1,
+              encryptedPayload: 'encrypted_payload_v1',
+              createdAt: '2026-03-15T12:00:00.000Z',
+              updatedAt: '2026-03-15T12:00:00.000Z',
+            },
+          },
+        ],
+      },
     });
     const workspace = createVaultWorkspace(dependencies as never);
 
     await workspace.load();
 
-    expect(dependencies.vaultClient.listItems).toHaveBeenCalledTimes(1);
+    expect(dependencies.vaultClient.pullSyncSnapshot).toHaveBeenCalledTimes(1);
     expect(workspace.state.items).toEqual([
       expect.objectContaining({
         itemId: 'item_1',
@@ -216,17 +243,29 @@ describe('createVaultWorkspace', () => {
 
   test('builds and updates an in-memory search index for approved fields only', async () => {
     const dependencies = createDependencies();
-    dependencies.vaultClient.listItems.mockResolvedValue({
-      items: [
-        {
-          itemId: 'item_1',
-          itemType: 'login',
-          revision: 1,
-          encryptedPayload: 'encrypted_payload_v1',
-          createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:00.000Z',
-        },
-      ],
+    dependencies.vaultClient.pullSyncSnapshot.mockResolvedValue({
+      status: 'ok',
+      etag: '"digest_1"',
+      payload: {
+        snapshotToken: 'snapshot_token_1',
+        snapshotAsOf: '2026-03-15T12:00:00.000Z',
+        snapshotDigest: 'digest_1',
+        pageSize: 25,
+        nextCursor: null,
+        entries: [
+          {
+            entryType: 'item',
+            item: {
+              itemId: 'item_1',
+              itemType: 'login',
+              revision: 1,
+              encryptedPayload: 'encrypted_payload_v1',
+              createdAt: '2026-03-15T12:00:00.000Z',
+              updatedAt: '2026-03-15T12:00:00.000Z',
+            },
+          },
+        ],
+      },
     });
     const workspace = createVaultWorkspace(dependencies as never);
 
@@ -293,5 +332,69 @@ describe('createVaultWorkspace', () => {
     expect(workspace.state.items).toHaveLength(2);
     expect(workspace.state.items[0]?.itemType).toBe('card');
     expect(workspace.state.items[1]?.itemType).toBe('secure_note');
+  });
+
+  test('retries once from scratch when snapshot token expires mid-pagination', async () => {
+    const dependencies = createDependencies();
+    dependencies.vaultClient.pullSyncSnapshot
+      .mockResolvedValueOnce({
+        status: 'ok',
+        etag: '"digest_old"',
+        payload: {
+          snapshotToken: 'snapshot_old',
+          snapshotAsOf: '2026-03-15T12:00:00.000Z',
+          snapshotDigest: 'digest_old',
+          pageSize: 25,
+          nextCursor: 'cursor_old',
+          entries: [
+            {
+              entryType: 'item',
+              item: {
+                itemId: 'item_old',
+                itemType: 'document',
+                revision: 1,
+                encryptedPayload: 'encrypted_document_payload',
+                createdAt: '2026-03-15T12:00:00.000Z',
+                updatedAt: '2026-03-15T12:00:00.000Z',
+              },
+            },
+          ],
+        },
+      })
+      .mockRejectedValueOnce(new Error('Request failed with status 409 (snapshot_expired)'))
+      .mockResolvedValueOnce({
+        status: 'ok',
+        etag: '"digest_new"',
+        payload: {
+          snapshotToken: 'snapshot_new',
+          snapshotAsOf: '2026-03-15T12:01:00.000Z',
+          snapshotDigest: 'digest_new',
+          pageSize: 25,
+          nextCursor: null,
+          entries: [
+            {
+              entryType: 'item',
+              item: {
+                itemId: 'item_new',
+                itemType: 'document',
+                revision: 1,
+                encryptedPayload: 'encrypted_document_payload',
+                createdAt: '2026-03-15T12:01:00.000Z',
+                updatedAt: '2026-03-15T12:01:00.000Z',
+              },
+            },
+          ],
+        },
+      });
+
+    const workspace = createVaultWorkspace(dependencies as never);
+    await workspace.load();
+
+    expect(dependencies.vaultClient.pullSyncSnapshot).toHaveBeenCalledTimes(3);
+    expect(workspace.state.items).toEqual([
+      expect.objectContaining({
+        itemId: 'item_new',
+      }),
+    ]);
   });
 });
