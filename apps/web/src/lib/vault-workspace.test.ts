@@ -9,17 +9,44 @@ vi.mock('./browser-crypto', () => ({
         password: 'super-secret',
         urls: ['https://mail.example.com'],
         notes: '',
+        customFields: [],
+      };
+    }
+
+    if (encryptedPayload === 'encrypted_card_payload_v1') {
+      return {
+        title: 'Corporate card',
+        cardholderName: 'Alice',
+        brand: 'Visa',
+        number: '4111111111111111',
+        expiryMonth: '12',
+        expiryYear: '2030',
+        securityCode: '123',
+        notes: '',
+        customFields: [],
+      };
+    }
+
+    if (encryptedPayload === 'encrypted_secure_note_payload_v1') {
+      return {
+        title: 'Incident note',
+        content: 'Escalation contacts',
+        customFields: [],
       };
     }
 
     return {
       title: 'Secure note',
       content: 'hello',
+      customFields: [],
     };
   }),
-  encryptVaultItemPayload: vi.fn(async ({ itemType }: { itemType: 'login' | 'document' }) =>
-    itemType === 'login' ? 'encrypted_login_payload' : 'encrypted_document_payload',
-  ),
+  encryptVaultItemPayload: vi.fn(async ({ itemType }: { itemType: 'login' | 'document' | 'card' | 'secure_note' }) => {
+    if (itemType === 'login') return 'encrypted_login_payload';
+    if (itemType === 'card') return 'encrypted_card_payload';
+    if (itemType === 'secure_note') return 'encrypted_secure_note_payload';
+    return 'encrypted_document_payload';
+  }),
 }));
 
 import { createVaultWorkspace } from './vault-workspace';
@@ -95,6 +122,7 @@ describe('createVaultWorkspace', () => {
       password: 'super-secret',
       urls: ['https://mail.example.com'],
       notes: '',
+      customFields: [],
     });
 
     expect(dependencies.vaultClient.createItem).toHaveBeenCalledWith({
@@ -115,6 +143,7 @@ describe('createVaultWorkspace', () => {
           password: 'super-secret',
           urls: ['https://mail.example.com'],
           notes: '',
+          customFields: [],
         },
       },
     ];
@@ -131,6 +160,7 @@ describe('createVaultWorkspace', () => {
         password: 'rotated-secret',
         urls: ['https://mail.example.com'],
         notes: '',
+        customFields: [],
       },
     });
 
@@ -159,6 +189,7 @@ describe('createVaultWorkspace', () => {
         payload: {
           title: 'Secure note',
           content: 'hello',
+          customFields: [],
         },
       },
     ];
@@ -173,6 +204,7 @@ describe('createVaultWorkspace', () => {
         payload: {
           title: 'Secure note',
           content: 'updated',
+          customFields: [],
         },
       }),
     ).rejects.toThrow('Request failed with status 409 (revision_conflict)');
@@ -208,5 +240,58 @@ describe('createVaultWorkspace', () => {
     await workspace.deleteItem('item_1');
     workspace.setSearchQuery('alice');
     expect(workspace.filteredItems.value).toEqual([]);
+  });
+
+  test('creates card and secure note items', async () => {
+    const dependencies = createDependencies();
+    const workspace = createVaultWorkspace(dependencies as never);
+
+    dependencies.vaultClient.createItem
+      .mockResolvedValueOnce({
+        itemId: 'item_card_1',
+        itemType: 'card',
+        revision: 1,
+        encryptedPayload: 'encrypted_card_payload_v1',
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:00.000Z',
+      })
+      .mockResolvedValueOnce({
+        itemId: 'item_note_1',
+        itemType: 'secure_note',
+        revision: 1,
+        encryptedPayload: 'encrypted_secure_note_payload_v1',
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:00.000Z',
+      });
+
+    await workspace.createCard({
+      title: 'Corporate card',
+      cardholderName: 'Alice',
+      brand: 'Visa',
+      number: '4111111111111111',
+      expiryMonth: '12',
+      expiryYear: '2030',
+      securityCode: '123',
+      notes: '',
+      customFields: [],
+    });
+
+    await workspace.createSecureNote({
+      title: 'Incident note',
+      content: 'Escalation contacts',
+      customFields: [],
+    });
+
+    expect(dependencies.vaultClient.createItem).toHaveBeenNthCalledWith(1, {
+      itemType: 'card',
+      encryptedPayload: expect.any(String),
+    });
+    expect(dependencies.vaultClient.createItem).toHaveBeenNthCalledWith(2, {
+      itemType: 'secure_note',
+      encryptedPayload: expect.any(String),
+    });
+    expect(workspace.state.items).toHaveLength(2);
+    expect(workspace.state.items[0]?.itemType).toBe('card');
+    expect(workspace.state.items[1]?.itemType).toBe('secure_note');
   });
 });

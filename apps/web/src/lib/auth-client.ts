@@ -1,7 +1,25 @@
 import type {
+  AdminAuditListOutput,
+  AdminInviteCreateInput,
+  AdminInviteCreateOutput,
+  AdminInviteListOutput,
+  AdminInviteRevokeOutput,
+  AdminUserLifecycleMutationOutput,
+  AdminUserListOutput,
   AccountKitSignatureInput,
   AccountKitSignatureOutput,
+  BootstrapCheckpointCompleteInput,
+  BootstrapCheckpointCompleteOutput,
+  BootstrapCheckpointDownloadInput,
+  BootstrapCheckpointDownloadOutput,
+  BootstrapInitializeOwnerInput,
+  BootstrapInitializeOwnerOutput,
+  BootstrapStateOutput,
+  BootstrapVerifyInput,
+  BootstrapVerifyOutput,
   OnboardingAccountKitSignInput,
+  RecentReauthInput,
+  RecentReauthOutput,
   RemoteAuthenticationChallengeOutput,
   RuntimeMetadata,
   SessionRestoreResponse,
@@ -19,6 +37,15 @@ function readCookie(name: string): string | null {
 }
 
 export interface VaultLiteAuthClient {
+  getBootstrapState(): Promise<BootstrapStateOutput>;
+  bootstrapVerify(input: BootstrapVerifyInput): Promise<BootstrapVerifyOutput>;
+  bootstrapInitializeOwner(input: BootstrapInitializeOwnerInput): Promise<BootstrapInitializeOwnerOutput>;
+  bootstrapCheckpointDownload(
+    input: BootstrapCheckpointDownloadInput,
+  ): Promise<BootstrapCheckpointDownloadOutput>;
+  bootstrapCheckpointComplete(
+    input: BootstrapCheckpointCompleteInput,
+  ): Promise<BootstrapCheckpointCompleteOutput>;
   getRuntimeMetadata(): Promise<RuntimeMetadata>;
   restoreSession(): Promise<SessionRestoreResponse>;
   requestRemoteAuthenticationChallenge(username: string): Promise<RemoteAuthenticationChallengeOutput>;
@@ -58,6 +85,15 @@ export interface VaultLiteAuthClient {
   }): Promise<{
     status: 'valid' | 'invalid';
   }>;
+  recentReauth(input: RecentReauthInput): Promise<RecentReauthOutput>;
+  createAdminInvite(input: AdminInviteCreateInput): Promise<AdminInviteCreateOutput>;
+  listAdminInvites(): Promise<AdminInviteListOutput>;
+  revokeAdminInvite(inviteId: string): Promise<AdminInviteRevokeOutput>;
+  listAdminUsers(): Promise<AdminUserListOutput>;
+  listAdminAudit(limit?: number): Promise<AdminAuditListOutput>;
+  suspendAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
+  reactivateAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
+  deprovisionAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
 }
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
@@ -76,16 +112,25 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
   if (!response.ok) {
     let responseCode = '';
     let responseMessage = '';
+    let responseReasonCode = '';
+    let responseResult = '';
 
     try {
-      const errorBody = await response.clone().json() as { code?: string; message?: string };
+      const errorBody = await response.clone().json() as {
+        code?: string;
+        message?: string;
+        reasonCode?: string;
+        result?: string;
+      };
       responseCode = typeof errorBody.code === 'string' ? errorBody.code : '';
       responseMessage = typeof errorBody.message === 'string' ? errorBody.message : '';
+      responseReasonCode = typeof errorBody.reasonCode === 'string' ? errorBody.reasonCode : '';
+      responseResult = typeof errorBody.result === 'string' ? errorBody.result : '';
     } catch {
       // Response was not JSON, preserve status-only error below.
     }
 
-    const details = responseMessage || responseCode;
+    const details = responseMessage || responseCode || responseReasonCode || responseResult;
     throw new Error(
       details
         ? `Request failed with status ${response.status} (${details})`
@@ -96,8 +141,61 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
   return response.json() as Promise<T>;
 }
 
+function nextIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `idem_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+}
+
+function withIdempotencyHeader(init: RequestInit, key?: string): RequestInit {
+  return {
+    ...init,
+    headers: {
+      ...(init.headers ?? {}),
+      'x-idempotency-key': key ?? nextIdempotencyKey(),
+    },
+  };
+}
+
 export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
   return {
+    getBootstrapState() {
+      return requestJson<BootstrapStateOutput>(`${baseUrl}/api/bootstrap/state`);
+    },
+    bootstrapVerify(input) {
+      return requestJson<BootstrapVerifyOutput>(`${baseUrl}/api/bootstrap/verify`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    },
+    bootstrapInitializeOwner(input) {
+      return requestJson<BootstrapInitializeOwnerOutput>(
+        `${baseUrl}/api/bootstrap/initialize-owner`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+      );
+    },
+    bootstrapCheckpointDownload(input) {
+      return requestJson<BootstrapCheckpointDownloadOutput>(
+        `${baseUrl}/api/bootstrap/checkpoint/download-account-kit`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      );
+    },
+    bootstrapCheckpointComplete(input) {
+      return requestJson<BootstrapCheckpointCompleteOutput>(
+        `${baseUrl}/api/bootstrap/checkpoint/complete`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+      );
+    },
     getRuntimeMetadata() {
       return requestJson<RuntimeMetadata>(`${baseUrl}/api/runtime/metadata`);
     },
@@ -171,6 +269,64 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         method: 'POST',
         body: JSON.stringify(input),
       });
+    },
+    recentReauth(input) {
+      return requestJson<RecentReauthOutput>(`${baseUrl}/api/auth/recent-reauth`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    },
+    createAdminInvite(input) {
+      return requestJson<AdminInviteCreateOutput>(
+        `${baseUrl}/api/admin/invites`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+      );
+    },
+    listAdminInvites() {
+      return requestJson<AdminInviteListOutput>(`${baseUrl}/api/admin/invites`);
+    },
+    revokeAdminInvite(inviteId) {
+      return requestJson<AdminInviteRevokeOutput>(
+        `${baseUrl}/api/admin/invites/${encodeURIComponent(inviteId)}/revoke`,
+        withIdempotencyHeader({
+          method: 'POST',
+        }),
+      );
+    },
+    listAdminUsers() {
+      return requestJson<AdminUserListOutput>(`${baseUrl}/api/admin/users`);
+    },
+    listAdminAudit(limit = 250) {
+      return requestJson<AdminAuditListOutput>(
+        `${baseUrl}/api/admin/audit?limit=${encodeURIComponent(String(limit))}`,
+      );
+    },
+    suspendAdminUser(userId) {
+      return requestJson<AdminUserLifecycleMutationOutput>(
+        `${baseUrl}/api/admin/users/${encodeURIComponent(userId)}/suspend`,
+        withIdempotencyHeader({
+          method: 'POST',
+        }),
+      );
+    },
+    reactivateAdminUser(userId) {
+      return requestJson<AdminUserLifecycleMutationOutput>(
+        `${baseUrl}/api/admin/users/${encodeURIComponent(userId)}/reactivate`,
+        withIdempotencyHeader({
+          method: 'POST',
+        }),
+      );
+    },
+    deprovisionAdminUser(userId) {
+      return requestJson<AdminUserLifecycleMutationOutput>(
+        `${baseUrl}/api/admin/users/${encodeURIComponent(userId)}/deprovision`,
+        withIdempotencyHeader({
+          method: 'POST',
+        }),
+      );
     },
   };
 }

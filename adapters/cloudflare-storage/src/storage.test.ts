@@ -38,15 +38,19 @@ describe('cloudflare storage adapter', () => {
     const storage = createFallbackCloudflareStorage();
     await storage.invites.create({
       inviteId: 'invite_1',
-      inviteToken: 'token_1',
+      tokenHash: 'token_hash_1',
+      tokenPreview: 'tok...001',
       createdByUserId: 'owner_1',
       expiresAt: '2026-03-20T00:00:00.000Z',
       consumedAt: null,
+      consumedByUserId: null,
+      revokedAt: null,
+      revokedByUserId: null,
       createdAt: '2026-03-15T00:00:00.000Z',
     });
 
-    const invite = await storage.invites.findUsableByToken(
-      'token_1',
+    const invite = await storage.invites.findUsableByTokenHash(
+      'token_hash_1',
       '2026-03-16T00:00:00.000Z',
     );
     expect(invite?.inviteId).toBe('invite_1');

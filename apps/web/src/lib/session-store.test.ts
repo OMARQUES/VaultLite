@@ -23,12 +23,16 @@ import { createSessionStore } from './session-store';
 function createMockDependencies() {
   return {
     authClient: {
+      getBootstrapState: vi.fn().mockResolvedValue({
+        bootstrapState: 'INITIALIZED',
+      }),
       restoreSession: vi.fn().mockResolvedValue({
         ok: true,
         sessionState: 'local_unlock_required',
         user: {
           userId: 'user_1',
           username: 'alice',
+          role: 'user',
           lifecycleState: 'active',
         },
         device: {
@@ -48,6 +52,7 @@ function createMockDependencies() {
         user: {
           userId: 'user_1',
           username: 'alice',
+          role: 'user',
           lifecycleState: 'active',
         },
         device: {
@@ -94,6 +99,7 @@ function createMockDependencies() {
 describe('createSessionStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    globalThis.localStorage?.removeItem('vaultlite:auto-lock-after-ms');
   });
 
   test('restores a valid server session into local unlock state', async () => {
@@ -120,6 +126,64 @@ describe('createSessionStore', () => {
 
         expect(store.state.phase).toBe('local_unlock_required');
       });
+  });
+
+  test('uses default auto-lock configuration when no persisted value exists', () => {
+    const dependencies = createMockDependencies();
+    const store = createSessionStore(dependencies as never);
+
+    expect(store.state.autoLockAfterMs).toBe(5 * 60 * 1000);
+  });
+
+  test('updates and persists auto-lock configuration and enforces with the configured value', async () => {
+    const dependencies = createMockDependencies();
+    const store = createSessionStore(dependencies as never);
+
+    await store.localUnlock({
+      username: 'alice',
+      password: 'correct-password',
+    });
+
+    store.setAutoLockAfterMs(60 * 1000);
+    expect(store.state.autoLockAfterMs).toBe(60 * 1000);
+    expect(globalThis.localStorage?.getItem('vaultlite:auto-lock-after-ms')).toBe(String(60 * 1000));
+
+    store.markActivity(0);
+    store.enforceAutoLock(60 * 1000 + 1);
+    expect(store.state.phase).toBe('local_unlock_required');
+  });
+
+  test('localUnlock fails closed when trusted local state is missing', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.trustedLocalStateStore.load.mockResolvedValueOnce(null);
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.localUnlock({
+        username: 'alice',
+        password: 'correct-password',
+      }),
+    ).rejects.toThrow('Trusted local state not found for this username');
+
+    expect(store.state.phase).toBe('remote_authentication_required');
+    expect(store.state.lastError).toBe('Trusted local state not found for this username');
+  });
+
+  test('remoteAuthenticate fails closed when trusted local state is missing', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.trustedLocalStateStore.load.mockResolvedValueOnce(null);
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.remoteAuthenticate({
+        username: 'alice',
+        password: 'correct-password',
+      }),
+    ).rejects.toThrow('Trusted local state not found for this username');
+
+    expect(store.state.phase).toBe('remote_authentication_required');
+    expect(store.state.lastError).toBe('Trusted local state not found for this username');
+    expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
   });
 
   test('prepareOnboarding uses canonical runtime metadata and does not persist trusted local state', async () => {
@@ -184,6 +248,7 @@ describe('createSessionStore', () => {
       user: {
         userId: 'user_1',
         username: 'alice',
+        role: 'user',
         lifecycleState: 'active',
       },
       device: {

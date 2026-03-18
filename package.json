@@ -4,7 +4,9 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:api": "wrangler dev --config wrangler.toml",
     "dev:web": "npm run dev --workspace @vaultlite/web -- --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:local": "node infrastructure/scripts/dev-local.mjs",
     "local:invite": "node infrastructure/scripts/local-issue-invite.mjs",
+    "reset:local-state": "node infrastructure/scripts/reset-local-state.mjs",
     "validate:migrations": "node infrastructure/scripts/validate-migrations.mjs",
     "smoke:local-flow": "node infrastructure/scripts/smoke-local-flow.mjs",
     "test": "npm run test --workspaces --if-present"

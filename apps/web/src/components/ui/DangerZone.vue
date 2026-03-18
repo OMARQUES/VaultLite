@@ -6,7 +6,7 @@ defineProps<{
 
 <template>
   <section class="danger-zone">
-    <div class="danger-zone__header">
+    <div v-if="title" class="danger-zone__header">
       <h2>{{ title ?? 'DangerZone' }}</h2>
     </div>
     <div class="danger-zone__body">

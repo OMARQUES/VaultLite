@@ -1,6 +1,9 @@
 import type {
   AttachmentLifecycleState,
+  BootstrapDeploymentState,
+  DeviceState,
   TrustedDevice,
+  UserRole,
   UserLifecycleState,
   VaultItemTombstoneRecord,
   VaultItemType,
@@ -10,16 +13,21 @@ export type { VaultItemTombstoneRecord } from '@vaultlite/domain';
 
 export interface InviteRecord {
   inviteId: string;
-  inviteToken: string;
+  tokenHash: string;
+  tokenPreview: string;
   createdByUserId: string;
   expiresAt: string;
   consumedAt: string | null;
+  consumedByUserId: string | null;
+  revokedAt: string | null;
+  revokedByUserId: string | null;
   createdAt: string;
 }
 
 export interface UserAccountRecord {
   userId: string;
   username: string;
+  role: UserRole;
   authSalt: string;
   authVerifier: string;
   encryptedAccountBundle: string;
@@ -32,6 +40,7 @@ export interface UserAccountRecord {
 
 export interface DeviceRecord extends TrustedDevice {
   userId: string;
+  deviceState: DeviceState;
   revokedAt: string | null;
 }
 
@@ -42,6 +51,7 @@ export interface SessionRecord {
   csrfToken: string;
   createdAt: string;
   expiresAt: string;
+  recentReauthAt: string | null;
   revokedAt: string | null;
   rotatedFromSessionId: string | null;
 }
@@ -60,6 +70,10 @@ export interface AttachmentBlobRecord {
   envelope: string;
   contentType: string;
   size: number;
+  idempotencyKey: string | null;
+  uploadToken: string | null;
+  expiresAt: string | null;
+  uploadedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,16 +88,68 @@ export interface VaultItemRecord {
   updatedAt: string;
 }
 
+export interface DeploymentStateRecord {
+  bootstrapState: BootstrapDeploymentState;
+  ownerUserId: string | null;
+  ownerCreatedAt: string | null;
+  bootstrapPublicClosedAt: string | null;
+  initialCheckpointCompletedAt: string | null;
+  initializedAt: string | null;
+  checkpointDownloadAttemptCount: number;
+  checkpointLastDownloadAt: string | null;
+  checkpointLastDownloadRequestId: string | null;
+}
+
+export interface IdempotencyRecord {
+  scope: string;
+  payloadHash: string;
+  statusCode: number;
+  responseBody: string;
+  result: 'success_changed' | 'success_no_op' | 'conflict' | 'denied';
+  reasonCode: string | null;
+  resourceRefs: string;
+  auditEventId: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface AuditEventRecord {
+  eventId: string;
+  eventType: string;
+  actorUserId: string | null;
+  targetType: string;
+  targetId: string | null;
+  result: 'success_changed' | 'success_no_op' | 'conflict' | 'denied';
+  reasonCode: string | null;
+  requestId: string | null;
+  createdAt: string;
+  ipHash: string | null;
+  userAgentHash: string | null;
+}
+
 export interface InviteRepository {
   create(record: InviteRecord): Promise<InviteRecord>;
-  findUsableByToken(inviteToken: string, nowIso: string): Promise<InviteRecord | null>;
-  consume(inviteId: string, consumedAtIso: string): Promise<void>;
+  findById(inviteId: string): Promise<InviteRecord | null>;
+  list(): Promise<InviteRecord[]>;
+  findUsableByTokenHash(tokenHash: string, nowIso: string): Promise<InviteRecord | null>;
+  markConsumed(input: {
+    inviteId: string;
+    consumedByUserId: string;
+    consumedAtIso: string;
+  }): Promise<void>;
+  markRevoked(input: {
+    inviteId: string;
+    revokedByUserId: string;
+    revokedAtIso: string;
+  }): Promise<void>;
 }
 
 export interface UserAccountRepository {
   create(record: UserAccountRecord): Promise<UserAccountRecord>;
+  list(): Promise<UserAccountRecord[]>;
   findByUsername(username: string): Promise<UserAccountRecord | null>;
   findByUserId(userId: string): Promise<UserAccountRecord | null>;
+  countActiveOwners(): Promise<number>;
   updateLifecycle(userId: string, lifecycleState: UserLifecycleState, updatedAtIso: string): Promise<void>;
   replaceAuthBundle(input: {
     userId: string;
@@ -100,6 +166,12 @@ export interface DeviceRepository {
   register(record: DeviceRecord): Promise<DeviceRecord>;
   listByUserId(userId: string): Promise<DeviceRecord[]>;
   findById(deviceId: string): Promise<DeviceRecord | null>;
+  countActiveByUserId(userId: string): Promise<number>;
+  setDeviceStateByUserId(
+    userId: string,
+    deviceState: DeviceState,
+    changedAtIso: string,
+  ): Promise<void>;
   revokeByUserId(userId: string, revokedAtIso: string): Promise<void>;
   revokeByDeviceId(deviceId: string, revokedAtIso: string): Promise<void>;
 }
@@ -107,6 +179,7 @@ export interface DeviceRepository {
 export interface SessionRepository {
   create(record: SessionRecord): Promise<SessionRecord>;
   findBySessionId(sessionId: string): Promise<SessionRecord | null>;
+  updateRecentReauth(sessionId: string, recentReauthAtIso: string): Promise<void>;
   revoke(sessionId: string, revokedAtIso: string): Promise<void>;
   revokeByUserId(userId: string, revokedAtIso: string): Promise<void>;
   revokeByDeviceId(deviceId: string, revokedAtIso: string): Promise<void>;
@@ -121,7 +194,47 @@ export interface AuthRateLimitRepository {
 export interface AttachmentBlobRepository {
   put(record: AttachmentBlobRecord): Promise<AttachmentBlobRecord>;
   get(key: string): Promise<AttachmentBlobRecord | null>;
+  listByOwnerAndItem(ownerUserId: string, itemId: string): Promise<AttachmentBlobRecord[]>;
+  findByOwnerItemAndIdempotency(
+    ownerUserId: string,
+    itemId: string,
+    idempotencyKey: string,
+  ): Promise<AttachmentBlobRecord | null>;
+  markUploaded(input: {
+    key: string;
+    ownerUserId: string;
+    envelope: string;
+    updatedAt: string;
+    uploadedAt: string;
+  }): Promise<AttachmentBlobRecord>;
   delete(key: string): Promise<void>;
+}
+
+export interface DeploymentStateRepository {
+  get(): Promise<DeploymentStateRecord>;
+  transitionToOwnerCreatedCheckpointPending(input: {
+    ownerUserId: string;
+    ownerCreatedAt: string;
+    bootstrapPublicClosedAt: string;
+  }): Promise<{ changed: boolean; state: DeploymentStateRecord }>;
+  recordCheckpointDownloadAttempt(input: {
+    ownerUserId: string;
+    requestId: string;
+    attemptedAt: string;
+  }): Promise<DeploymentStateRecord>;
+  completeInitialization(input: {
+    completedAt: string;
+  }): Promise<{ changed: boolean; state: DeploymentStateRecord }>;
+}
+
+export interface IdempotencyRepository {
+  get(scope: string, nowIso: string): Promise<IdempotencyRecord | null>;
+  put(record: IdempotencyRecord): Promise<IdempotencyRecord>;
+}
+
+export interface AuditEventRepository {
+  create(record: AuditEventRecord): Promise<AuditEventRecord>;
+  listRecent(limit?: number): Promise<AuditEventRecord[]>;
 }
 
 export interface VaultItemRepository {
@@ -143,7 +256,7 @@ export interface VaultItemRepository {
 
 export interface CompleteOnboardingAtomicInput {
   nowIso: string;
-  inviteToken: string;
+  inviteTokenHash: string;
   user: UserAccountRecord;
   device: DeviceRecord;
   session: SessionRecord;
@@ -156,11 +269,14 @@ export interface CompleteOnboardingAtomicResult {
 }
 
 export interface VaultLiteStorage {
+  deploymentState: DeploymentStateRepository;
   invites: InviteRepository;
   users: UserAccountRepository;
   devices: DeviceRepository;
   sessions: SessionRepository;
   authRateLimits: AuthRateLimitRepository;
+  idempotency: IdempotencyRepository;
+  auditEvents: AuditEventRepository;
   attachmentBlobs: AttachmentBlobRepository;
   vaultItems: VaultItemRepository;
   completeOnboardingAtomic(input: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult>;
@@ -182,19 +298,93 @@ export function createInMemoryVaultLiteStorage(input: {
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
   const vaultItemTombstones = new Map<string, VaultItemTombstoneRecord>();
+  const idempotencyRecords = new Map<string, IdempotencyRecord>();
+  const auditEvents = new Map<string, AuditEventRecord>();
+  let deploymentState: DeploymentStateRecord = {
+    bootstrapState: 'UNINITIALIZED_PUBLIC_OPEN',
+    ownerUserId: null,
+    ownerCreatedAt: null,
+    bootstrapPublicClosedAt: null,
+    initialCheckpointCompletedAt: null,
+    initializedAt: null,
+    checkpointDownloadAttemptCount: 0,
+    checkpointLastDownloadAt: null,
+    checkpointLastDownloadRequestId: null,
+  };
 
   return {
+    deploymentState: {
+      async get() {
+        return { ...deploymentState };
+      },
+      async transitionToOwnerCreatedCheckpointPending(inputRecord) {
+        if (deploymentState.bootstrapState !== 'UNINITIALIZED_PUBLIC_OPEN') {
+          return { changed: false, state: { ...deploymentState } };
+        }
+
+        deploymentState = {
+          ...deploymentState,
+          bootstrapState: 'OWNER_CREATED_CHECKPOINT_PENDING',
+          ownerUserId: inputRecord.ownerUserId,
+          ownerCreatedAt: inputRecord.ownerCreatedAt,
+          bootstrapPublicClosedAt: inputRecord.bootstrapPublicClosedAt,
+        };
+        return { changed: true, state: { ...deploymentState } };
+      },
+      async recordCheckpointDownloadAttempt(inputRecord) {
+        if (
+          deploymentState.bootstrapState !== 'OWNER_CREATED_CHECKPOINT_PENDING' ||
+          deploymentState.ownerUserId !== inputRecord.ownerUserId
+        ) {
+          return { ...deploymentState };
+        }
+
+        deploymentState = {
+          ...deploymentState,
+          checkpointDownloadAttemptCount: deploymentState.checkpointDownloadAttemptCount + 1,
+          checkpointLastDownloadAt: inputRecord.attemptedAt,
+          checkpointLastDownloadRequestId: inputRecord.requestId,
+        };
+        return { ...deploymentState };
+      },
+      async completeInitialization(inputRecord) {
+        if (deploymentState.bootstrapState === 'INITIALIZED') {
+          return { changed: false, state: { ...deploymentState } };
+        }
+        if (deploymentState.bootstrapState !== 'OWNER_CREATED_CHECKPOINT_PENDING') {
+          return { changed: false, state: { ...deploymentState } };
+        }
+
+        deploymentState = {
+          ...deploymentState,
+          bootstrapState: 'INITIALIZED',
+          initialCheckpointCompletedAt: inputRecord.completedAt,
+          initializedAt: inputRecord.completedAt,
+        };
+        return { changed: true, state: { ...deploymentState } };
+      },
+    },
     invites: {
       async create(record) {
         invites.set(record.inviteId, { ...record });
         return { ...record };
       },
-      async findUsableByToken(inviteToken, nowIso) {
+      async findById(inviteId) {
+        const invite = invites.get(inviteId);
+        return invite ? { ...invite } : null;
+      },
+      async list() {
+        return Array.from(invites.values())
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .map((record) => ({ ...record }));
+      },
+      async findUsableByTokenHash(tokenHash, nowIso) {
         const now = nowIso;
         for (const invite of invites.values()) {
           if (
-            invite.inviteToken === inviteToken &&
+            invite.tokenHash === tokenHash &&
             invite.consumedAt === null &&
+            invite.revokedAt === null &&
             invite.expiresAt > now
           ) {
             return { ...invite };
@@ -203,13 +393,29 @@ export function createInMemoryVaultLiteStorage(input: {
 
         return null;
       },
-      async consume(inviteId, consumedAtIso) {
-        const invite = invites.get(inviteId);
+      async markConsumed(inputRecord) {
+        const invite = invites.get(inputRecord.inviteId);
         if (!invite) {
           return;
         }
 
-        invites.set(inviteId, { ...invite, consumedAt: consumedAtIso });
+        invites.set(inputRecord.inviteId, {
+          ...invite,
+          consumedAt: inputRecord.consumedAtIso,
+          consumedByUserId: inputRecord.consumedByUserId,
+        });
+      },
+      async markRevoked(inputRecord) {
+        const invite = invites.get(inputRecord.inviteId);
+        if (!invite) {
+          return;
+        }
+
+        invites.set(inputRecord.inviteId, {
+          ...invite,
+          revokedAt: inputRecord.revokedAtIso,
+          revokedByUserId: inputRecord.revokedByUserId,
+        });
       },
     },
     users: {
@@ -219,6 +425,11 @@ export function createInMemoryVaultLiteStorage(input: {
         usersByUsername.set(clone.username, clone);
         return { ...clone };
       },
+      async list() {
+        return Array.from(usersById.values())
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .map((record) => ({ ...record }));
+      },
       async findByUsername(username) {
         const record = usersByUsername.get(username);
         return record ? { ...record } : null;
@@ -226,6 +437,11 @@ export function createInMemoryVaultLiteStorage(input: {
       async findByUserId(userId) {
         const record = usersById.get(userId);
         return record ? { ...record } : null;
+      },
+      async countActiveOwners() {
+        return Array.from(usersById.values()).filter(
+          (record) => record.role === 'owner' && record.lifecycleState === 'active',
+        ).length;
       },
       async updateLifecycle(userId, lifecycleState, updatedAtIso) {
         const record = usersById.get(userId);
@@ -275,10 +491,26 @@ export function createInMemoryVaultLiteStorage(input: {
         const record = devices.get(deviceId);
         return record ? { ...record } : null;
       },
+      async countActiveByUserId(userId) {
+        return Array.from(devices.values()).filter(
+          (device) => device.userId === userId && device.deviceState === 'active',
+        ).length;
+      },
+      async setDeviceStateByUserId(userId, deviceState, changedAtIso) {
+        for (const [deviceId, device] of devices.entries()) {
+          if (device.userId === userId) {
+            devices.set(deviceId, {
+              ...device,
+              deviceState,
+              revokedAt: deviceState === 'active' ? null : changedAtIso,
+            });
+          }
+        }
+      },
       async revokeByUserId(userId, revokedAtIso) {
         for (const [deviceId, device] of devices.entries()) {
           if (device.userId === userId) {
-            devices.set(deviceId, { ...device, revokedAt: revokedAtIso });
+            devices.set(deviceId, { ...device, deviceState: 'revoked', revokedAt: revokedAtIso });
           }
         }
       },
@@ -288,7 +520,7 @@ export function createInMemoryVaultLiteStorage(input: {
           return;
         }
 
-        devices.set(deviceId, { ...device, revokedAt: revokedAtIso });
+        devices.set(deviceId, { ...device, deviceState: 'revoked', revokedAt: revokedAtIso });
       },
     },
     sessions: {
@@ -299,6 +531,16 @@ export function createInMemoryVaultLiteStorage(input: {
       async findBySessionId(sessionId) {
         const record = sessions.get(sessionId);
         return record ? { ...record } : null;
+      },
+      async updateRecentReauth(sessionId, recentReauthAtIso) {
+        const record = sessions.get(sessionId);
+        if (!record) {
+          return;
+        }
+        sessions.set(sessionId, {
+          ...record,
+          recentReauthAt: recentReauthAtIso,
+        });
       },
       async revoke(sessionId, revokedAtIso) {
         const record = sessions.get(sessionId);
@@ -340,6 +582,35 @@ export function createInMemoryVaultLiteStorage(input: {
         rateLimits.delete(key);
       },
     },
+    idempotency: {
+      async get(scope, nowIso) {
+        const record = idempotencyRecords.get(scope);
+        if (!record) {
+          return null;
+        }
+        if (record.expiresAt <= nowIso) {
+          idempotencyRecords.delete(scope);
+          return null;
+        }
+        return { ...record };
+      },
+      async put(record) {
+        idempotencyRecords.set(record.scope, { ...record });
+        return { ...record };
+      },
+    },
+    auditEvents: {
+      async create(record) {
+        auditEvents.set(record.eventId, { ...record });
+        return { ...record };
+      },
+      async listRecent(limit = 200) {
+        return Array.from(auditEvents.values())
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+          .slice(0, Math.max(1, limit))
+          .map((record) => ({ ...record }));
+      },
+    },
     attachmentBlobs: {
       async put(record) {
         attachmentBlobs.set(record.key, { ...record });
@@ -348,6 +619,36 @@ export function createInMemoryVaultLiteStorage(input: {
       async get(key) {
         const record = attachmentBlobs.get(key);
         return record ? { ...record } : null;
+      },
+      async listByOwnerAndItem(ownerUserId, itemId) {
+        return Array.from(attachmentBlobs.values())
+          .filter((record) => record.ownerUserId === ownerUserId && record.itemId === itemId)
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .map((record) => ({ ...record }));
+      },
+      async findByOwnerItemAndIdempotency(ownerUserId, itemId, idempotencyKey) {
+        const record = Array.from(attachmentBlobs.values()).find(
+          (current) =>
+            current.ownerUserId === ownerUserId &&
+            current.itemId === itemId &&
+            current.idempotencyKey === idempotencyKey,
+        );
+        return record ? { ...record } : null;
+      },
+      async markUploaded(input) {
+        const record = attachmentBlobs.get(input.key);
+        if (!record || record.ownerUserId !== input.ownerUserId) {
+          throw new Error('attachment_not_found');
+        }
+        const updated: AttachmentBlobRecord = {
+          ...record,
+          lifecycleState: 'uploaded',
+          envelope: input.envelope,
+          uploadedAt: input.uploadedAt,
+          updatedAt: input.updatedAt,
+        };
+        attachmentBlobs.set(updated.key, updated);
+        return { ...updated };
       },
       async delete(key) {
         attachmentBlobs.delete(key);
@@ -427,8 +728,9 @@ export function createInMemoryVaultLiteStorage(input: {
       let usableInvite: InviteRecord | null = null;
       for (const invite of invites.values()) {
         if (
-          invite.inviteToken === inputRecord.inviteToken &&
+          invite.tokenHash === inputRecord.inviteTokenHash &&
           invite.consumedAt === null &&
+          invite.revokedAt === null &&
           invite.expiresAt > inputRecord.nowIso
         ) {
           usableInvite = { ...invite };
@@ -463,6 +765,7 @@ export function createInMemoryVaultLiteStorage(input: {
         invites.set(usableInvite.inviteId, {
           ...usableInvite,
           consumedAt: inputRecord.nowIso,
+          consumedByUserId: inputRecord.user.userId,
         });
 
         if (input.failOnCompleteOnboardingAtomicStep === 'device') {

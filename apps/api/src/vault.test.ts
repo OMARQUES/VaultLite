@@ -15,10 +15,19 @@ async function createAuthenticatedVaultFixture() {
     'item_5',
   ]);
   const accountKitKeys = generateAccountKitKeyPair();
+  await storage.deploymentState.transitionToOwnerCreatedCheckpointPending({
+    ownerUserId: 'user_1',
+    ownerCreatedAt: '2026-03-15T12:00:00.000Z',
+    bootstrapPublicClosedAt: '2026-03-15T12:00:00.000Z',
+  });
+  await storage.deploymentState.completeInitialization({
+    completedAt: '2026-03-15T12:00:00.000Z',
+  });
 
   await storage.users.create({
     userId: 'user_1',
     username: 'alice',
+    role: 'owner',
     authSalt: 'A'.repeat(22),
     authVerifier: 'proof_payload',
     encryptedAccountBundle: 'bundle_payload',
@@ -31,6 +40,7 @@ async function createAuthenticatedVaultFixture() {
   await storage.users.create({
     userId: 'user_2',
     username: 'bob',
+    role: 'user',
     authSalt: 'B'.repeat(22),
     authVerifier: 'proof_payload_bob',
     encryptedAccountBundle: 'bundle_payload_bob',
@@ -45,6 +55,7 @@ async function createAuthenticatedVaultFixture() {
     userId: 'user_1',
     deviceName: 'Alice Browser',
     platform: 'web',
+    deviceState: 'active',
     createdAt: '2026-03-15T12:00:00.000Z',
     revokedAt: null,
   });
@@ -53,6 +64,7 @@ async function createAuthenticatedVaultFixture() {
     userId: 'user_2',
     deviceName: 'Bob Browser',
     platform: 'web',
+    deviceState: 'active',
     createdAt: '2026-03-15T12:00:00.000Z',
     revokedAt: null,
   });
@@ -63,6 +75,7 @@ async function createAuthenticatedVaultFixture() {
     csrfToken: 'csrf_1',
     createdAt: '2026-03-15T12:00:00.000Z',
     expiresAt: '2026-03-15T18:00:00.000Z',
+    recentReauthAt: '2026-03-15T12:00:00.000Z',
     revokedAt: null,
     rotatedFromSessionId: null,
   });
@@ -73,6 +86,7 @@ async function createAuthenticatedVaultFixture() {
     csrfToken: 'csrf_2',
     createdAt: '2026-03-15T12:00:00.000Z',
     expiresAt: '2026-03-15T18:00:00.000Z',
+    recentReauthAt: null,
     revokedAt: null,
     rotatedFromSessionId: null,
   });
@@ -223,6 +237,32 @@ describe('vault item CRUD API', () => {
     });
     expect(bobDeleteResponse.status).toBe(404);
     await expect(storage.vaultItems.findTombstoneByItemId(created.itemId, 'user_1')).resolves.toBeNull();
+  });
+
+  test('supports card and secure note item types', async () => {
+    const { app, aliceHeaders } = await createAuthenticatedVaultFixture();
+
+    const cardResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'card',
+        encryptedPayload: 'encrypted_card_payload_v1',
+      }),
+    });
+    expect(cardResponse.status).toBe(201);
+    expect((await cardResponse.json()).itemType).toBe('card');
+
+    const noteResponse = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'secure_note',
+        encryptedPayload: 'encrypted_secure_note_payload_v1',
+      }),
+    });
+    expect(noteResponse.status).toBe(201);
+    expect((await noteResponse.json()).itemType).toBe('secure_note');
   });
 
   test('rejects stale expectedRevision updates with 409 conflicts', async () => {

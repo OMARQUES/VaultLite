@@ -1,4 +1,9 @@
 import type {
+  AttachmentUploadContentInput,
+  AttachmentUploadInitInput,
+  AttachmentUploadInitOutput,
+  AttachmentUploadListOutput,
+  AttachmentUploadRecord,
   VaultItemCreateInput,
   VaultItemListOutput,
   VaultItemRecord,
@@ -31,16 +36,25 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
   if (!response.ok) {
     let responseCode = '';
     let responseMessage = '';
+    let responseReasonCode = '';
+    let responseResult = '';
 
     try {
-      const errorBody = (await response.clone().json()) as { code?: string; message?: string };
+      const errorBody = (await response.clone().json()) as {
+        code?: string;
+        message?: string;
+        reasonCode?: string;
+        result?: string;
+      };
       responseCode = typeof errorBody.code === 'string' ? errorBody.code : '';
       responseMessage = typeof errorBody.message === 'string' ? errorBody.message : '';
+      responseReasonCode = typeof errorBody.reasonCode === 'string' ? errorBody.reasonCode : '';
+      responseResult = typeof errorBody.result === 'string' ? errorBody.result : '';
     } catch {
       // Preserve status-only error below.
     }
 
-    const details = responseMessage || responseCode;
+    const details = responseMessage || responseCode || responseReasonCode || responseResult;
     throw new Error(
       details
         ? `Request failed with status ${response.status} (${details})`
@@ -61,6 +75,12 @@ export interface VaultLiteVaultClient {
   createItem(input: VaultItemCreateInput): Promise<VaultItemRecord>;
   updateItem(input: VaultItemUpdateInput & { itemId: string }): Promise<VaultItemRecord>;
   deleteItem(itemId: string): Promise<void>;
+  initAttachmentUpload(input: AttachmentUploadInitInput): Promise<AttachmentUploadInitOutput>;
+  uploadAttachmentContent(
+    uploadId: string,
+    input: AttachmentUploadContentInput,
+  ): Promise<AttachmentUploadRecord>;
+  listAttachmentUploads(itemId: string): Promise<AttachmentUploadListOutput>;
 }
 
 export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
@@ -91,6 +111,23 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
       return requestJson<void>(`${baseUrl}/api/vault/items/${itemId}`, {
         method: 'DELETE',
       });
+    },
+    initAttachmentUpload(input) {
+      return requestJson<AttachmentUploadInitOutput>(`${baseUrl}/api/attachments/uploads/init`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+    },
+    uploadAttachmentContent(uploadId, input) {
+      return requestJson<AttachmentUploadRecord>(`${baseUrl}/api/attachments/uploads/${uploadId}/content`, {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      });
+    },
+    listAttachmentUploads(itemId) {
+      return requestJson<AttachmentUploadListOutput>(
+        `${baseUrl}/api/attachments?itemId=${encodeURIComponent(itemId)}`,
+      );
     },
   };
 }

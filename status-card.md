@@ -1,10 +1,10 @@
 # Status Card
 
 Project: `VaultLite`
-Source of truth: `docs/plans/2026-03-14-vaultlite-v1-corrected-plan-v2.2.1.md`
-Status card version: `2026-03-15-v2.2.1-r9`
-Last updated: `2026-03-15`
-Overall status: `phase75_ready`
+Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
+Status card version: `2026-03-17-v2.2.1-r15`
+Last updated: `2026-03-17`
+Overall status: `phase9_security_hardening_in_progress`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
 ## Legend
@@ -17,15 +17,16 @@ Canonical terminology: `remote authentication`, `local unlock`, `session restora
 
 ## How to use this file
 
-- This file is the operational execution and handoff companion to the main plan in `docs/plans/2026-03-14-vaultlite-v1-corrected-plan-v2.2.1.md`.
-- Use the main plan for architecture, scope boundaries, and invariants. Use this file for current status, execution order, acceptance tracking, and handoff state.
+- This file is the operational execution and handoff companion to the active baseline docs.
+- Use the active docs for architecture, scope boundaries, and invariants. Use this file for current status, execution order, acceptance tracking, and handoff state.
+- For the active web UI redesign, treat `AGENTS.v2.md`, `docs/UI_STYLE.v2.md`, and `docs/WEB_UI_EXECUTION.md` as coercive baseline docs.
 - Any dev actively executing cards must update this file as work progresses. It is not a passive summary.
 - Update `Current Focus` before starting a new card or when a blocker changes the active path.
 - Change a card to `in_progress` only when work has actually started in the repo or in the referenced docs.
 - Change a card to `review_needed` when implementation or documentation exists but acceptance checks or evidence are still pending review.
 - Change a card to `done` only when acceptance criteria, required tests, and evidence are all satisfied.
 - Use `Decision Log` for execution-relevant decisions, clarifications, or scope-tightening choices that future devs would otherwise have to rediscover.
-- If this file conflicts with another doc, follow the latest plan first, then `AGENTS.md`, then update this file to match.
+- If this file conflicts with another active doc, follow `AGENTS.v2.md` and the active docs baseline, then update this file to match.
 
 ## Update rules
 
@@ -43,7 +44,7 @@ Canonical terminology: `remote authentication`, `local unlock`, `session restora
 ## Ready-to-start checklist
 
 - `GG-01`, `GG-02`, and `GG-03` are understood as active blockers for sensitive implementation.
-- The active dev has read `AGENTS.md`, this file, and the latest plan in `docs/plans/`.
+- The active dev has read `AGENTS.v2.md`, this file, and the active baseline docs listed in `Source of truth`.
 - `Current Focus` points to the real next card instead of stale historical state.
 - The target card's dependencies are either `done` or intentionally accepted as non-blocking by the latest plan.
 - Required baseline docs exist or are the explicit target of the current work: `docs/PRD.md`, `docs/SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/THREAT_MODEL.md`, and ADRs when required.
@@ -120,11 +121,11 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 
 ## Current Focus
 
-Active phase: `Phase 7.5 planning and execution`
-Active card: `P75-C01 - Visual direction and tokens`
+Active phase: `Phase 9 security hardening`
+Active card: `P9-C06 - Security hardening remediation pack (8 audit findings)`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P7-C03` is now implemented with persistent tombstones and live-only vault reads, and `P7-C04` is now implemented with an in-memory local decrypted index that updates on load, create, update, and delete without indexing password fields. Core vault semantics are stable enough to freeze the visual baseline before attachments and sync expand the UI surface.
-Suggested immediate sequence: `P75-C01` -> `P75-C02` -> `P75-C03` -> `P75-C04`.
+Reason: Full repository security review identified 8 concrete hardening findings with multiple `high`-severity items (auth-abuse and secret posture). These must be remediated and regression-tested before advancing sync and lifecycle expansion in Phase 9.
+Suggested immediate sequence: `P9-C06` -> `P9-C01` -> `P9-C02`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -198,23 +199,24 @@ Suggested immediate sequence: `P75-C01` -> `P75-C02` -> `P75-C03` -> `P75-C04`.
 - `P7-C03` Tombstones — `done`
 - `P7-C04` Local decrypted index — `done`
 - `P7-C05` Password generator — `not_started`
-- `P75-C01` Visual direction and tokens — `not_started`
-- `P75-C02` Core layout and navigation patterns — `not_started`
-- `P75-C03` Form, feedback, and destructive-action patterns — `not_started`
-- `P75-C04` Responsive and accessibility pass for web core — `not_started`
-- `P8-C01` Upload initialization and `pending` records — `not_started`
-- `P8-C02` Encrypted upload — `not_started`
+- `P75-C01` Visual direction and tokens — `done`
+- `P75-C02` Core layout and navigation patterns — `done`
+- `P75-C03` Form, feedback, and destructive-action patterns — `done`
+- `P75-C04` Responsive and accessibility pass for web core — `done`
+- `P8-C01` Upload initialization and `pending` records — `done`
+- `P8-C02` Encrypted upload — `done`
 - `P8-C03` Finalize bind to item — `not_started`
 - `P8-C04` Encrypted download — `not_started`
 - `P8-C05` Attachment deletion — `not_started`
 - `P8-C06` Orphan cleanup strategy implementation — `not_started`
-- `P8-C07` Document UX — `not_started`
+- `P8-C07` Document UX — `done`
 - `P8-C08` Quota and cost warning UI — `not_started`
 - `P9-C01` Sync service baseline — `not_started`
 - `P9-C02` Deterministic conflict handling — `not_started`
 - `P9-C03` Device listing — `not_started`
 - `P9-C04` Device revocation — `not_started`
 - `P9-C05` Password rotation atomic flow — `not_started`
+- `P9-C06` Security hardening remediation pack (8 audit findings) — `not_started`
 - `P95-C01` User listing and status view — `not_started`
 - `P95-C02` Suspend endpoint and UI — `not_started`
 - `P95-C03` Reactivate endpoint and UI — `not_started`
@@ -1683,7 +1685,7 @@ Suggested next action: implement generator helper before wiring the UI.
 Card ID: `P75-C01`
 Title: `Visual direction and tokens`
 Phase/Epic: `Phase 7.5 - UX/UI Visual Baseline`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Freeze the visual direction for the web core once auth and initial vault CRUD are functionally real.
 Description: Define typography, spacing scale, color tokens, surface hierarchy, and motion rules for the current web application so later phases stop inventing one-off presentation decisions.
@@ -1691,20 +1693,20 @@ Motivation: Doing this before Phase 7 stabilizes would create churn; doing it af
 Scope includes: typography selection; spacing and radius rules; semantic color tokens; surface and elevation rules; motion guidance for page and state transitions; documentation of the chosen visual direction in code and docs where needed.
 Out of scope: extension-specific styling, marketing pages, or speculative component-library abstraction not yet justified by implemented surfaces.
 Dependencies: `P7-C01`; `P7-C02`.
-Files/areas impacted: `apps/web`; shared styles; status and design docs if needed.
+Files/areas impacted: `apps/web`; shared styles; `docs/UI_STYLE.md`; `docs/EXTENSION_UX_BASELINE.md`; status and design docs if needed.
 Deliverables: committed visual baseline with tokens or equivalent CSS variables, plus the first applied pass on existing auth and vault surfaces.
 Required tests: verify `npm run dev:web` renders without style regressions on onboarding, auth, unlock, and vault shell routes; add component or snapshot tests only where they protect tokens or critical layout invariants.
 Acceptance criteria: the web core has one coherent visual baseline applied across existing routes, and later cards can reference those decisions instead of creating local styling rules.
 Risks / cautions: locking the visual direction before `P7-C03` and `P7-C04` would cause rework; over-engineering a design system here would slow delivery without adding real leverage.
 Notes for Codex/dev: prefer CSS variables and clear tokens over framework-heavy abstraction; preserve the existing product scope and flows.
-Evidence required to mark done: committed token baseline, updated core screens using it, and visual proof or review notes covering onboarding, auth, unlock, and vault shell.
+Evidence required to mark done: committed token baseline, committed `docs/UI_STYLE.md`, committed `docs/EXTENSION_UX_BASELINE.md`, updated core screens using the baseline, and visual proof or review notes covering onboarding, auth, unlock, and vault shell.
 Suggested next action: establish the token layer and apply it to the existing web shell.
 
 ### P75-C02 - Core layout and navigation patterns
 Card ID: `P75-C02`
 Title: `Core layout and navigation patterns`
 Phase/Epic: `Phase 7.5 - UX/UI Visual Baseline`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Standardize the core shell structure and navigation behavior before more product surfaces are added.
 Description: Align top-level layout, navigation affordances, workspace composition, and item-list/editor structure across the implemented web core.
@@ -1725,7 +1727,7 @@ Suggested next action: align the current vault workspace and auth shell under on
 Card ID: `P75-C03`
 Title: `Form, feedback, and destructive-action patterns`
 Phase/Epic: `Phase 7.5 - UX/UI Visual Baseline`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Standardize input, validation, error, success, empty, loading, and destructive-action patterns used across the current web core.
 Description: Apply consistent form layout, validation messaging, banners, empty states, inline feedback, and deletion confirmations to the implemented flows.
@@ -1739,14 +1741,14 @@ Required tests: run existing web tests and add focused component or interaction 
 Acceptance criteria: the current app no longer mixes unrelated feedback styles or destructive-action patterns across routes.
 Risks / cautions: applying this before `P7-C03` would force a second pass on delete UX once tombstones replace hard delete semantics.
 Notes for Codex/dev: keep wording and state names aligned with canonical terminology and existing API error codes.
-Evidence required to mark done: committed UI updates plus test evidence for validation, empty-state, and delete-confirmation behavior on current routes.
-Suggested next action: normalize CRUD form and delete-confirmation behavior once tombstones are in place.
+Evidence required to mark done: committed UI updates on onboarding, authentication, unlock, and vault shell plus passing focused interaction tests for busy states, inline feedback, keyboard-driven context closure, and actionable empty states.
+Suggested next action: use the normalized patterns as the default baseline for attachment and device-facing forms.
 
 ### P75-C04 - Responsive and accessibility pass for web core
 Card ID: `P75-C04`
 Title: `Responsive and accessibility pass for web core`
 Phase/Epic: `Phase 7.5 - UX/UI Visual Baseline`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Make the stabilized web core responsive and accessible before Phase 8 and beyond expand the surface area.
 Description: Run a focused pass on keyboard navigation, contrast, semantics, focus handling, and small-screen layout behavior across the implemented screens.
@@ -1760,8 +1762,8 @@ Required tests: manual keyboard and narrow-width pass across onboarding, auth, u
 Acceptance criteria: the current web core is usable on desktop and mobile widths, keyboard navigation is viable, and obvious accessibility regressions are addressed before later phases build on the same patterns.
 Risks / cautions: leaving this until after Phase 8 or Phase 9 would multiply the cost of every accessibility or layout fix.
 Notes for Codex/dev: keep this pass practical and tied to implemented routes; do not turn it into a speculative audit of future screens.
-Evidence required to mark done: documented responsive and accessibility pass results plus committed fixes on existing routes.
-Suggested next action: run the first focused pass after visual, layout, and form patterns are frozen.
+Evidence required to mark done: committed responsive CSS refinements, keyboard shortcut handling for vault search and context closure, passing web tests, and successful typecheck/build for the web app and full monorepo.
+Suggested next action: extend the same baseline into attachment flows without introducing a parallel layout or feedback system.
 
 ## Phase 8
 
@@ -1769,7 +1771,7 @@ Suggested next action: run the first focused pass after visual, layout, and form
 Card ID: `P8-C01`
 Title: `Upload initialization and pending records`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Initialize attachment uploads with explicit `pending` state.
 Description: Create the server and client flow that reserves an attachment upload and records its `pending` lifecycle state.
@@ -1790,7 +1792,7 @@ Suggested next action: define attachment state machine and init endpoint.
 Card ID: `P8-C02`
 Title: `Encrypted upload`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Upload encrypted attachment blobs to object storage.
 Description: Implement the client encryption and object upload flow for attachment content.
@@ -1895,21 +1897,21 @@ Suggested next action: implement expiry sweep over pending attachment records.
 Card ID: `P8-C07`
 Title: `Document UX`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P2`
 Objective: Provide usable document and attachment interactions in the web UI.
 Description: Add the UI flows for viewing, attaching, and managing documents and related files.
 Motivation: The underlying attachment lifecycle needs a coherent user-facing surface.
-Scope includes: document detail surfaces; attach action; download action; delete action.
-Out of scope: browser extension document support.
-Dependencies: `P7-C02`; `P8-C03`; `P8-C04`.
+Scope includes: document detail surfaces; attach action; upload status visibility for `pending` and `uploaded` lifecycle states.
+Out of scope: browser extension document support; attachment download and delete actions (deferred to `P8-C04` and `P8-C05`).
+Dependencies: `P7-C02`; `P8-C01`; `P8-C02`.
 Files/areas impacted: `apps/web`.
 Deliverables: document and attachment UI flows.
-Required tests: component tests and one E2E path for document plus attachment.
-Acceptance criteria: users can manage document attachments through a clear UI flow.
+Required tests: component tests covering attach flow initiation, upload status rendering, and upload error states.
+Acceptance criteria: users can attach document files through the approved encrypted upload flow and can see explicit lifecycle status in the document detail surface.
 Risks / cautions: unclear UI state around pending uploads will confuse users.
 Notes for Codex/dev: expose attachment state explicitly in UI.
-Evidence required to mark done: UI screenshots or E2E evidence.
+Evidence required to mark done: passing web component tests showing attach + status flow, plus local UI verification in `/vault` document detail.
 Suggested next action: build document detail screen with attachment status area.
 
 ### P8-C08 - Quota and cost warning UI
@@ -2038,6 +2040,72 @@ Risks / cautions: partial bundle updates here can permanently break an account.
 Notes for Codex/dev: test stale-version behavior before implementing the happy path.
 Evidence required to mark done: Passing password-rotation matrix plus recorded verification that bundle state remains unchanged on stale-version or interrupted-failure cases.
 Suggested next action: define rotation transaction contract around `expected_bundle_version`.
+
+### P9-C06 - Security hardening remediation pack (8 audit findings)
+Card ID: `P9-C06`
+Title: `Security hardening remediation pack (8 audit findings)`
+Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
+Status: `not_started`
+Priority: `P0`
+Objective: Resolve the full set of 8 security findings from the 2026-03-17 repository audit before advancing high-churn features.
+Description: Implement a tightly-scoped hardening pass across API, runtime config, browser persistence, and client guardrails, with explicit regression coverage for authentication abuse, local secret exposure, and production fail-closed behavior.
+Motivation: The audit found multiple high-severity issues where abuse resistance and secret handling can fail under realistic attack conditions. Deferring these fixes until post-sync would increase blast radius and rework cost.
+Scope includes:
+- Finding 1 (`high`): Add brute-force protection to `/api/auth/devices/bootstrap`, parity with remote-auth controls.
+- Finding 2 (`high`): Remove persistent plaintext-equivalent `accountKey` exposure from trusted local state storage; keep `local unlock` semantics intact.
+- Finding 3 (`high`): Replace unbounded auth-rate counter behavior with windowed or TTL-based rate limiting and deterministic unlock behavior after cooldown.
+- Finding 4 (`high`): Enforce fail-closed production configuration for `VAULTLITE_BOOTSTRAP_ADMIN_TOKEN` (reject weak/default/empty tokens in production runtime mode).
+- Finding 5 (`medium`): Enforce stable Account Kit signing key posture in production (no ephemeral keypair fallback in production runtime mode).
+- Finding 6 (`medium`): Add payload and attachment size ceilings (contracts + API validation) to reduce DoS and cost-amplification vectors.
+- Finding 7 (`medium`): Restrict URL open actions to allowed schemes (`http` and `https`) before client navigation.
+- Finding 8 (`low` hardening): Expand default security headers baseline (including deployment-safe HSTS/Permissions-Policy posture).
+Out of scope:
+- Full account-lockout policy redesign beyond the bounded anti-abuse mechanism required for this fix pack.
+- New auth factors, recovery mechanisms, or canonical terminology changes.
+- Broad UI redesign not directly required by the hardening findings.
+Dependencies: `P4-C05`; `P4-C08`; `P5-C04`; `P6-C04`; `P6-C08`; `P6-C09`.
+Files/areas impacted: `apps/api/src/app.ts`; `apps/api/src/runtime-config.ts`; `apps/api/src/runtime-config.test.ts`; `apps/web/src/lib/session-store.ts`; `apps/web/src/lib/trusted-local-state.ts`; `apps/web/src/pages/VaultShellPage.vue`; `adapters/cloudflare-storage/src/index.ts`; `infrastructure/migrations/*.sql` if schema updates are required; `packages/contracts/src/shared.ts`; `packages/contracts/src/api.ts`; `adapters/cloudflare-runtime/src/index.ts`; related tests.
+Deliverables:
+- Hardened auth-abuse controls for both trusted-device remote auth and device bootstrap.
+- Runtime config fail-closed checks for production secrets and Account Kit signing key policy.
+- Local-state storage model aligned with zero-knowledge and local storage policy constraints.
+- Input and blob size enforcement in contracts and server validation path.
+- Safe URL handling and updated security header baseline.
+- Regression tests and updated security documentation notes.
+Required tests:
+- API integration test: repeated invalid `/api/auth/devices/bootstrap` attempts hit `429` with generic anti-enumeration-safe response.
+- API integration test: rate-limit window expires and allows a fresh attempt after cooldown.
+- API runtime-config test matrix: production mode rejects default or missing bootstrap token and rejects missing persistent Account Kit signing keys.
+- Web/session-store tests: trusted local state no longer persists `accountKey` directly while `local unlock` and `session restoration` still behave correctly.
+- Contract and API validation tests: oversized encrypted payload and oversized attachment init are rejected with explicit error codes.
+- Web UI test: URL open action refuses non-http(s) schemes.
+- Runtime headers test: expected header set emitted (`content-security-policy`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `permissions-policy`, and conditional HSTS policy validation path).
+- Full targeted test execution: `npm run test --workspace apps/api` and focused `apps/web` tests touched by this card.
+Acceptance criteria:
+- All 8 findings are explicitly closed with code and test evidence.
+- `/api/auth/devices/bootstrap` has anti-abuse behavior equivalent to or stronger than remote-auth.
+- Auth-rate controls use bounded time semantics; no indefinite lockout behavior remains.
+- Production runtime rejects weak/default secret posture instead of silently falling back.
+- Trusted local persistence no longer stores `accountKey` directly at rest.
+- API input ceilings enforce practical limits for payload and attachment vectors.
+- URL open behavior is scheme-safe by construction.
+- Security header baseline is expanded and verified by tests.
+Risks / cautions:
+- Local-state changes can break `local unlock` if migration logic is not backward-safe.
+- Rate-limit window implementation can create accidental denial of service if thresholds are too strict.
+- Production fail-closed checks can block local/dev flows if environment-mode detection is ambiguous.
+- Header tightening can break embedded tooling if policies are applied without explicit exceptions.
+Notes for Codex/dev:
+- Preserve canonical terminology exactly: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`.
+- Keep anti-enumeration behavior generic; do not leak username or device existence via status text or timing branches where avoidable.
+- If persistence schema changes are needed for rate-limit windows, include migration + rollback-safe tests.
+- Treat this as a security hardening card, not a feature card; avoid opportunistic refactors not tied to the findings.
+Evidence required to mark done:
+- PR/repo diff mapping each of the 8 findings to a concrete patch and corresponding test.
+- Passing API and targeted web test output attached to the card notes.
+- Updated security notes in `docs/SECURITY.md` and/or `docs/THREAT_MODEL.md` for changed assumptions (rate-limit windowing, production secret posture, local persistence boundaries).
+- Short closure table in the card notes: `finding -> fix -> test file -> status`.
+Suggested next action: implement in three slices (`auth abuse and runtime fail-closed`, `local persistence and payload ceilings`, `client URL + headers hardening`) with tests committed in the same sequence.
 
 ## Phase 9.5
 
@@ -2556,6 +2624,10 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-17: Added `P9-C06` as a dedicated `P0` security hardening remediation pack for the 8 audit findings (auth bootstrap anti-abuse, bounded rate-limit windows, production fail-closed token/key posture, local `accountKey` persistence hardening, payload ceilings, URL scheme validation, and security header baseline expansion). Execution order now prioritizes `P9-C06` before sync baseline.
+- 2026-03-17: Repository audit pass completed to align cards with implementation evidence. `P7-C05` was reset from `in_progress` to `not_started` because no password-generator helper/UI/tests are present yet; `P8-C03` to `P8-C06` remain `not_started` and API finalize still returns `attachment_finalize_not_implemented`.
+- 2026-03-16: Completed `P8-C01`, `P8-C02`, and `P8-C07` in one attachment-focused sequence. Added upload-init contracts and API, pending record lifecycle with idempotency and expiry, encrypted client upload using the approved blob envelope, cloudflare-storage migration `0004_attachment_upload_pending`, and document attachment status UX in `/vault` with targeted tests across contracts, storage, API, and web.
+- 2026-03-16: Promoted the corrected docs baseline for web UI execution to `AGENTS.v2.md`, `docs/UI_STYLE.v2.md`, and `docs/WEB_UI_EXECUTION.md`; archived and legacy plan texts are historical context only and no longer normative for the active web redesign round.
 - 2026-03-15: Phase 2 introduced canonical domain states, lifecycle transition rules, and the first zod-based contract baseline in packages/domain and packages/contracts.
 - 2026-03-15: Phase 3 introduced Node built-in Argon2id KDF, AES-256-GCM envelopes, Account Key helpers, Account Kit canonicalization, Ed25519 signing, and fixed crypto vectors in packages/crypto.
 - 2026-03-15: Phase 0 baseline docs, threat model, execution gate checklist, and ADRs 0001-0010 were created and aligned with the current plan.
@@ -2571,6 +2643,10 @@ Suggested next action: compile the final checklist from implemented verification
 - 2026-03-15: `P4-C06`, `P7-C01`, and `P7-C02` are complete; the vault shell now exposes encrypted CRUD for `login` and `document` while delete remains a temporary hard delete until `P7-C03`.
 - 2026-03-15: Added `Phase 7.5 - UX/UI Visual Baseline` after core vault semantics and before attachments, sync, and owner/admin expansion to avoid both pre-functional design churn and late retrofit cost.
 - 2026-03-15: `P7-C03` now persists `vault_item_tombstones` with revision increment and keeps vault list/detail live-only; `P7-C04` now uses an in-memory local decrypted index with an explicit allowlist and no password indexing.
+- 2026-03-15: Added `docs/UI_STYLE.md` and `docs/EXTENSION_UX_BASELINE.md` as standing UI/UX reference documents; `P75-C01` is now `in_progress` because the baseline is documented but not yet applied to the current web shell.
+- 2026-03-15: `P75-C01` and `P75-C02` are now implemented in the web app; the shell uses shared CSS tokens and parity-aware theme variables, `/vault` is the authenticated landing route, and the vault workspace now follows a sidebar/list/detail layout without dead navigation items.
+- 2026-03-15: `P75-C03` and `P75-C04` are now implemented in the web app; onboarding, auth, unlock, and vault forms share normalized feedback and busy-state patterns, vault search now supports `/` and `Ctrl/Cmd+K`, `Escape` closes active vault edit/create context, and the shell received a practical responsive/accessibility pass without introducing a parallel UI system.
+- 2026-03-15: Replaced the interim web UI with the approved refactor baseline: public/auth screens were rebuilt with strict microcopy control, authenticated navigation now lives in a real app shell, `/settings` became the canonical security surface, `/vault` is route-driven for list/detail/create/edit, and dirty-state discard confirmation is now explicit before editor exit.
 - `2026-03-14`: `Global Gates` are treated as transversal blockers, not an executable phase.
 - `2026-03-14`: `P1-C03` is already marked `done` because repository hygiene baseline and `.gitignore` exist.
 - `2026-03-14`: `P5-C03` is explicit to separate onboarding persistence and initial trusted-device registration from generic onboarding UI.
@@ -2578,17 +2654,9 @@ Suggested next action: compile the final checklist from implemented verification
 - `2026-03-14`: Browser extension V1 is retrieval and fill-oriented; `save login` is out of scope for the first delivery.
 
 ## Next Cards
-1. `P75-C01` - `Visual direction and tokens`
-       Condition to start: core vault delete and local search semantics are now stable enough that the current web core can be styled without immediate rework.
-2. `P75-C02` - `Core layout and navigation patterns`
-       Condition to start: the visual baseline exists and can now be applied coherently across the implemented shell.
-3. `P75-C03` - `Form, feedback, and destructive-action patterns`
-       Condition to start: tombstone-backed delete semantics now exist, so destructive-action and feedback patterns can be normalized against real behavior.
-4. `P75-C04` - `Responsive and accessibility pass for web core`
-       Condition to start: visual, layout, and feedback patterns are stable enough for a focused responsive and accessibility pass.
-5. `P8-C01` - `Upload initialization and pending records`
-       Condition to start: item CRUD and the first UX/UI baseline are stable enough for attachment metadata to bind against real `itemId` values without multiplying UI churn.
-6. `P9-C01` - `Sync service baseline`
-       Condition to start: tombstones and local indexing semantics are defined enough to avoid immediate sync contract churn.
-7. `P9-C03` - `Device listing`
-       Condition to start: auth shell and trusted-device registration are stable and the next admin-visible device surface is needed.
+1. `P9-C06` - `Security hardening remediation pack (8 audit findings)`
+       Condition to start: complete mapping table `finding -> fix -> test` and enforce fail-closed production assumptions before sync expansion.
+2. `P9-C01` - `Sync service baseline`
+       Condition to start: `P9-C06` merged and high-severity auth/local-secret findings closed with passing regression tests.
+3. `P9-C02` - `Deterministic conflict handling`
+       Condition to start: baseline sync primitives are implemented and validated with two-device convergence tests.

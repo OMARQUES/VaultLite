@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { ATTACHMENT_LIFECYCLE_STATES, USER_LIFECYCLE_STATES, VAULT_ITEM_TYPES } from '@vaultlite/domain';
+import {
+  ATTACHMENT_LIFECYCLE_STATES,
+  BOOTSTRAP_DEPLOYMENT_STATES,
+  DEVICE_STATES,
+  USER_LIFECYCLE_STATES,
+  USER_ROLES,
+  VAULT_ITEM_TYPES,
+} from '@vaultlite/domain';
 import {
   accountKeySchema,
   base64UrlSchema,
@@ -10,6 +17,9 @@ import {
 } from './shared';
 
 export const UserLifecycleStateSchema = z.enum(USER_LIFECYCLE_STATES);
+export const UserRoleSchema = z.enum(USER_ROLES);
+export const BootstrapDeploymentStateSchema = z.enum(BOOTSTRAP_DEPLOYMENT_STATES);
+export const DeviceStateSchema = z.enum(DEVICE_STATES);
 export const AttachmentLifecycleStateSchema = z.enum(ATTACHMENT_LIFECYCLE_STATES);
 export const DevicePlatformSchema = z.enum(['web', 'extension']);
 export const SessionStateSchema = z.enum([
@@ -104,6 +114,220 @@ export const RuntimeMetadataSchema = z
   })
   .strict();
 
+export const CanonicalResultSchema = z.enum([
+  'success_changed',
+  'success_no_op',
+  'conflict',
+  'denied',
+]);
+
+export const BootstrapStateOutputSchema = z
+  .object({
+    bootstrapState: BootstrapDeploymentStateSchema,
+  })
+  .strict();
+
+export const BootstrapVerifyInputSchema = z
+  .object({
+    bootstrapToken: z.string().min(1),
+  })
+  .strict();
+
+export const BootstrapVerifyOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    verificationToken: z.string().min(1),
+    validUntil: isoDatetimeSchema,
+  })
+  .strict();
+
+export const BootstrapInitializeOwnerInputSchema = z
+  .object({
+    verificationToken: z.string().min(1),
+    username: usernameSchema,
+    authSalt: base64UrlSchema,
+    authVerifier: encryptedPayloadSchema,
+    encryptedAccountBundle: encryptedPayloadSchema,
+    accountKeyWrapped: encryptedPayloadSchema,
+    initialDeviceName: z.string().min(1),
+    initialDevicePlatform: DevicePlatformSchema,
+  })
+  .strict();
+
+export const BootstrapInitializeOwnerOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    bootstrapState: BootstrapDeploymentStateSchema,
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const BootstrapCheckpointDownloadInputSchema = z
+  .object({
+    payload: z.object({
+      version: z.literal('account-kit.v1'),
+      serverUrl: z.string().url(),
+      username: usernameSchema,
+      accountKey: accountKeySchema,
+      deploymentFingerprint: z.string().min(1),
+      issuedAt: isoDatetimeSchema,
+    }),
+    signature: base64UrlSchema,
+  })
+  .strict();
+
+export const BootstrapCheckpointDownloadOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    downloadAttemptCount: z.number().int().positive(),
+    accountKit: z.object({
+      payload: BootstrapCheckpointDownloadInputSchema.shape.payload,
+      signature: base64UrlSchema,
+    }),
+  })
+  .strict();
+
+export const BootstrapCheckpointCompleteInputSchema = z
+  .object({
+    confirmSavedOutsideBrowser: z.literal(true),
+  })
+  .strict();
+
+export const BootstrapCheckpointCompleteOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    bootstrapState: BootstrapDeploymentStateSchema,
+  })
+  .strict();
+
+export const RecentReauthInputSchema = z
+  .object({
+    authProof: encryptedPayloadSchema,
+  })
+  .strict();
+
+export const RecentReauthOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    validUntil: isoDatetimeSchema,
+  })
+  .strict();
+
+export const AdminInviteCreateInputSchema = z
+  .object({
+    expiresAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const AdminInviteCreateOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    inviteId: z.string().min(1),
+    expiresAt: isoDatetimeSchema,
+    tokenPreview: z.string().min(1),
+    inviteLink: z.string().url().optional(),
+    tokenDelivery: z.enum(['delivered_once', 'not_available_on_replay']).optional(),
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const AdminInviteStatusSchema = z.enum(['active', 'used', 'expired', 'revoked']);
+
+export const AdminInviteRecordSchema = z
+  .object({
+    inviteId: z.string().min(1),
+    tokenPreview: z.string().min(1),
+    status: AdminInviteStatusSchema,
+    createdByUserId: z.string().min(1),
+    expiresAt: isoDatetimeSchema,
+    consumedAt: isoDatetimeSchema.nullable(),
+    consumedByUserId: z.string().min(1).nullable(),
+    revokedAt: isoDatetimeSchema.nullable(),
+    revokedByUserId: z.string().min(1).nullable(),
+    createdAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const AdminInviteListOutputSchema = z
+  .object({
+    invites: z.array(AdminInviteRecordSchema),
+  })
+  .strict();
+
+export const AdminInviteRevokeOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const AdminUserRecordSchema = z
+  .object({
+    userId: z.string().min(1),
+    username: usernameSchema,
+    role: UserRoleSchema,
+    lifecycleState: UserLifecycleStateSchema,
+    createdAt: isoDatetimeSchema,
+    trustedDevicesCount: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const AdminUserListOutputSchema = z
+  .object({
+    users: z.array(AdminUserRecordSchema),
+  })
+  .strict();
+
+export const AdminUserLifecycleMutationOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+    user: AdminUserRecordSchema,
+  })
+  .strict();
+
+export const AdminAuditEventRecordSchema = z
+  .object({
+    eventId: z.string().min(1),
+    eventType: z.string().min(1),
+    actorUserId: z.string().min(1).nullable(),
+    targetType: z.string().min(1),
+    targetId: z.string().min(1).nullable(),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).nullable(),
+    requestId: z.string().min(1).nullable(),
+    createdAt: isoDatetimeSchema,
+    ipHash: z.string().min(1).nullable(),
+    userAgentHash: z.string().min(1).nullable(),
+  })
+  .strict();
+
+export const AdminAuditListOutputSchema = z
+  .object({
+    events: z.array(AdminAuditEventRecordSchema),
+  })
+  .strict();
+
 export const VaultItemTypeSchema = z.enum(VAULT_ITEM_TYPES);
 export const VaultItemSummarySchema = z
   .object({
@@ -145,6 +369,53 @@ export const VaultItemUpdateInputSchema = z
   })
   .strict();
 
+export const AttachmentUploadInitInputSchema = z
+  .object({
+    itemId: z.string().min(1),
+    contentType: z.string().min(1),
+    size: z.number().int().positive(),
+    idempotencyKey: z.string().min(1),
+  })
+  .strict();
+
+export const AttachmentUploadContentInputSchema = z
+  .object({
+    uploadToken: z.string().min(1),
+    encryptedEnvelope: encryptedPayloadSchema,
+  })
+  .strict();
+
+export const AttachmentUploadFinalizeInputSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    itemId: z.string().min(1),
+  })
+  .strict();
+
+export const AttachmentUploadRecordSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    itemId: z.string().min(1),
+    lifecycleState: AttachmentLifecycleStateSchema,
+    contentType: z.string().min(1),
+    size: z.number().int().positive(),
+    expiresAt: isoDatetimeSchema,
+    uploadedAt: isoDatetimeSchema.nullable(),
+    createdAt: isoDatetimeSchema,
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const AttachmentUploadInitOutputSchema = AttachmentUploadRecordSchema.extend({
+  uploadToken: z.string().min(1),
+}).strict();
+
+export const AttachmentUploadListOutputSchema = z
+  .object({
+    uploads: z.array(AttachmentUploadRecordSchema),
+  })
+  .strict();
+
 export const TrustedSessionResponseSchema = z
   .object({
     ok: z.literal(true),
@@ -154,6 +425,7 @@ export const TrustedSessionResponseSchema = z
       .object({
         userId: z.string().min(1),
         username: usernameSchema,
+        role: UserRoleSchema,
         lifecycleState: UserLifecycleStateSchema,
       })
       .strict(),
@@ -175,6 +447,7 @@ export const SessionRestoreResponseSchema = z
       .object({
         userId: z.string().min(1),
         username: usernameSchema,
+        role: UserRoleSchema,
         lifecycleState: UserLifecycleStateSchema,
       })
       .strict()
@@ -251,6 +524,28 @@ export type NewDeviceBootstrapInput = z.infer<typeof NewDeviceBootstrapInputSche
 export type InviteCreateInput = z.infer<typeof InviteCreateInputSchema>;
 export type InviteCreateOutput = z.infer<typeof InviteCreateOutputSchema>;
 export type RuntimeMetadata = z.infer<typeof RuntimeMetadataSchema>;
+export type CanonicalResult = z.infer<typeof CanonicalResultSchema>;
+export type BootstrapStateOutput = z.infer<typeof BootstrapStateOutputSchema>;
+export type BootstrapVerifyInput = z.infer<typeof BootstrapVerifyInputSchema>;
+export type BootstrapVerifyOutput = z.infer<typeof BootstrapVerifyOutputSchema>;
+export type BootstrapInitializeOwnerInput = z.infer<typeof BootstrapInitializeOwnerInputSchema>;
+export type BootstrapInitializeOwnerOutput = z.infer<typeof BootstrapInitializeOwnerOutputSchema>;
+export type BootstrapCheckpointDownloadInput = z.infer<typeof BootstrapCheckpointDownloadInputSchema>;
+export type BootstrapCheckpointDownloadOutput = z.infer<typeof BootstrapCheckpointDownloadOutputSchema>;
+export type BootstrapCheckpointCompleteInput = z.infer<typeof BootstrapCheckpointCompleteInputSchema>;
+export type BootstrapCheckpointCompleteOutput = z.infer<typeof BootstrapCheckpointCompleteOutputSchema>;
+export type RecentReauthInput = z.infer<typeof RecentReauthInputSchema>;
+export type RecentReauthOutput = z.infer<typeof RecentReauthOutputSchema>;
+export type AdminInviteCreateInput = z.infer<typeof AdminInviteCreateInputSchema>;
+export type AdminInviteCreateOutput = z.infer<typeof AdminInviteCreateOutputSchema>;
+export type AdminInviteRecord = z.infer<typeof AdminInviteRecordSchema>;
+export type AdminInviteListOutput = z.infer<typeof AdminInviteListOutputSchema>;
+export type AdminInviteRevokeOutput = z.infer<typeof AdminInviteRevokeOutputSchema>;
+export type AdminUserRecord = z.infer<typeof AdminUserRecordSchema>;
+export type AdminUserListOutput = z.infer<typeof AdminUserListOutputSchema>;
+export type AdminUserLifecycleMutationOutput = z.infer<typeof AdminUserLifecycleMutationOutputSchema>;
+export type AdminAuditEventRecord = z.infer<typeof AdminAuditEventRecordSchema>;
+export type AdminAuditListOutput = z.infer<typeof AdminAuditListOutputSchema>;
 export type VaultItemType = z.infer<typeof VaultItemTypeSchema>;
 export type VaultItemSummary = z.infer<typeof VaultItemSummarySchema>;
 export type VaultItemRecord = z.infer<typeof VaultItemRecordSchema>;
@@ -258,6 +553,12 @@ export type VaultItemTombstoneRecord = z.infer<typeof VaultItemTombstoneRecordSc
 export type VaultItemListOutput = z.infer<typeof VaultItemListOutputSchema>;
 export type VaultItemCreateInput = z.infer<typeof VaultItemCreateInputSchema>;
 export type VaultItemUpdateInput = z.infer<typeof VaultItemUpdateInputSchema>;
+export type AttachmentUploadInitInput = z.infer<typeof AttachmentUploadInitInputSchema>;
+export type AttachmentUploadContentInput = z.infer<typeof AttachmentUploadContentInputSchema>;
+export type AttachmentUploadFinalizeInput = z.infer<typeof AttachmentUploadFinalizeInputSchema>;
+export type AttachmentUploadRecord = z.infer<typeof AttachmentUploadRecordSchema>;
+export type AttachmentUploadInitOutput = z.infer<typeof AttachmentUploadInitOutputSchema>;
+export type AttachmentUploadListOutput = z.infer<typeof AttachmentUploadListOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
 export type GenericAuthFailure = z.infer<typeof GenericAuthFailureSchema>;

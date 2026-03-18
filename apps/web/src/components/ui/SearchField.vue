@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import AppIcon from './AppIcon.vue';
 
 const inputRef = ref<HTMLInputElement | null>(null);
 const model = defineModel<string>({ required: true });
@@ -21,7 +22,7 @@ defineExpose({
 <template>
   <label class="field field--search">
     <span class="sr-only">{{ label }}</span>
-    <span class="field__search-icon" aria-hidden="true">⌕</span>
+    <AppIcon class="field__search-icon" name="search" :size="18" />
     <input
       ref="inputRef"
       :data-testid="testId"

@@ -12,19 +12,27 @@ function createSessionStore(
     | 'remote_authentication_required'
     | 'local_unlock_required'
     | 'ready'
-    | 'onboarding_export_required',
+    | 'onboarding_export_required'
+    | 'onboarding_in_progress',
 ) {
   return {
     state: reactive({
       phase,
+      bootstrapState: 'INITIALIZED' as const,
       username: phase === 'ready' || phase === 'local_unlock_required' ? 'alice' : null,
       userId: phase === 'ready' || phase === 'local_unlock_required' ? 'user_1' : null,
+      role: (phase === 'ready' || phase === 'local_unlock_required' ? 'user' : null) as
+        | 'owner'
+        | 'user'
+        | null,
       deviceId: phase === 'ready' || phase === 'local_unlock_required' ? 'device_1' : null,
       deviceName: phase === 'ready' || phase === 'local_unlock_required' ? 'Primary Browser' : null,
       lifecycleState: phase === 'ready' ? ('active' as const) : null,
       lastError: null,
       lastActivityAt: null,
+      autoLockAfterMs: 5 * 60 * 1000,
     }),
+    refreshBootstrapState: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(undefined),
     prepareOnboarding: vi.fn(),
     finalizeOnboarding: vi.fn(),
@@ -32,6 +40,7 @@ function createSessionStore(
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
     enforceAutoLock: vi.fn(),
@@ -87,8 +96,10 @@ describe('App shell', () => {
     const sessionStore = createSessionStore('anonymous');
     sessionStore.restoreSession.mockImplementation(async () => {
       sessionStore.state.phase = 'local_unlock_required';
+      sessionStore.state.bootstrapState = 'INITIALIZED';
       sessionStore.state.username = 'alice';
       sessionStore.state.userId = 'user_1';
+      sessionStore.state.role = 'user';
       sessionStore.state.deviceId = 'device_1';
       sessionStore.state.deviceName = 'Primary Browser';
       sessionStore.state.lifecycleState = 'active';
@@ -111,14 +122,67 @@ describe('App shell', () => {
     expect(wrapper.text()).toContain('Unlock this device');
   });
 
+  test('preserves /admin target through unlock and reaches admin after local unlock', async () => {
+    window.history.pushState({}, '', '/admin/invites');
+    const sessionStore = createSessionStore('local_unlock_required');
+    sessionStore.state.role = 'owner';
+    sessionStore.localUnlock.mockImplementation(async () => {
+      sessionStore.state.phase = 'ready';
+      sessionStore.state.role = 'owner';
+    });
+    const router = createVaultLiteRouter(sessionStore);
+
+    const wrapper = mount(App, {
+      global: {
+        plugins: [router],
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await router.isReady();
+    await flushPromises();
+
+    expect(router.currentRoute.value.fullPath).toBe('/unlock?next=/admin/invites');
+    const passwordInput = wrapper.find('input[type="password"]');
+    await passwordInput.setValue('correct-password');
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe('/admin/invites');
+  });
+
   test('uses the public shell on auth routes', async () => {
     const { wrapper, sessionStore } = await mountAppAt('/auth', 'remote_authentication_required');
 
     expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="vault-shell"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain('Sign in or add a device');
+    expect(wrapper.text()).toContain('Add a device');
     expect(wrapper.text()).toContain('Onboarding');
-    expect(wrapper.text()).toContain('Auth');
+    expect(wrapper.text()).toContain('Add device');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps unlock as single-task by hiding public navigation links', async () => {
+    const { wrapper, sessionStore } = await mountAppAt('/unlock', 'local_unlock_required');
+
+    expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain('VaultLite');
+    expect(wrapper.text()).not.toContain('Home');
+    expect(wrapper.text()).not.toContain('Onboarding');
+    expect(wrapper.text()).not.toContain('Add device');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps onboarding focused by hiding public navigation links', async () => {
+    const { wrapper, sessionStore } = await mountAppAt('/onboarding', 'anonymous');
+
+    expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain('VaultLite');
+    expect(wrapper.text()).not.toContain('Home');
+    expect(wrapper.text()).not.toContain('Onboarding');
+    expect(wrapper.text()).not.toContain('Add device');
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
   });
 
@@ -129,6 +193,7 @@ describe('App shell', () => {
     expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(false);
     expect(wrapper.text()).toContain('Security');
     expect(wrapper.text()).toContain('Account Kit');
+    expect(wrapper.text()).toContain('Auto-lock after');
     expect(wrapper.text()).toContain('Reissue Account Kit');
     expect(wrapper.text()).not.toContain('Password');
     expect(wrapper.text()).not.toContain('Onboarding');

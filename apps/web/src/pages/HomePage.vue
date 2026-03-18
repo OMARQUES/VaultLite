@@ -12,7 +12,7 @@ import { RouterLink } from 'vue-router';
       </p>
       <div class="hero-card__actions">
         <RouterLink class="button button--primary" to="/onboarding">Start onboarding</RouterLink>
-        <RouterLink class="button button--secondary" to="/auth">Remote authentication</RouterLink>
+        <RouterLink class="button button--secondary" to="/auth">Add device</RouterLink>
       </div>
     </div>
   </section>

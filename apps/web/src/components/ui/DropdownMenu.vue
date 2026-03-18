@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
+import AppIcon from './AppIcon.vue';
 
 const props = defineProps<{
   label: string;
-  items: ReadonlyArray<{ label: string; value: string }>;
+  items: ReadonlyArray<{ label: string; value: string; icon?: 'login' | 'document' | 'card' | 'secure_note' }>;
+  iconOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -37,12 +39,14 @@ onBeforeUnmount(() => {
   <div ref="rootRef" class="dropdown-menu">
     <button
       class="button button--primary dropdown-menu__trigger"
+      :class="{ 'dropdown-menu__trigger--icon-only': props.iconOnly }"
       type="button"
+      :aria-label="props.label"
       :aria-expanded="open ? 'true' : 'false'"
       @click="open = !open"
     >
-      <span class="dropdown-menu__trigger-icon" aria-hidden="true">+</span>
-      <span>{{ props.label }}</span>
+      <AppIcon class="dropdown-menu__trigger-icon" name="plus" :size="16" />
+      <span v-if="!props.iconOnly">{{ props.label }}</span>
     </button>
     <div v-if="open" class="dropdown-menu__surface" role="menu">
       <button
@@ -53,7 +57,10 @@ onBeforeUnmount(() => {
         role="menuitem"
         @click="select(item.value)"
       >
-        {{ item.label }}
+        <span class="dropdown-menu__item-content">
+          <AppIcon v-if="item.icon" class="dropdown-menu__item-icon" :name="item.icon" :size="16" />
+          <span>{{ item.label }}</span>
+        </span>
       </button>
     </div>
   </div>

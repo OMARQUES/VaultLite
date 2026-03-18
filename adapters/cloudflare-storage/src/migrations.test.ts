@@ -23,6 +23,8 @@ describe('cloudflare migration loading', () => {
       '0001_initial',
       '0002_vault_items',
       '0003_vault_item_tombstones',
+      '0004_attachment_upload_pending',
+      '0005_bootstrap_admin_foundation',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

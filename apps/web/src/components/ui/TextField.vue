@@ -4,6 +4,10 @@ import { ref } from 'vue';
 const inputRef = ref<HTMLInputElement | null>(null);
 const model = defineModel<string>({ required: true });
 
+const emit = defineEmits<{
+  blur: [event: FocusEvent];
+}>();
+
 defineProps<{
   label: string;
   name?: string;
@@ -36,6 +40,7 @@ defineExpose({
       :readonly="readonly"
       :value="model"
       @input="model = ($event.target as HTMLInputElement).value"
+      @blur="emit('blur', $event)"
     />
   </label>
 </template>

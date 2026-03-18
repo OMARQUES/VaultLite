@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import AppIcon from './AppIcon.vue';
 
 const model = defineModel<string>({ required: true });
 
@@ -13,10 +14,12 @@ const props = defineProps<{
   readonly?: boolean;
   allowCopy?: boolean;
   maskKey?: string | number | null;
+  labelHidden?: boolean;
 }>();
 
 const emit = defineEmits<{
   copied: [];
+  blur: [event: FocusEvent];
 }>();
 
 const revealed = ref(false);
@@ -67,7 +70,8 @@ defineExpose({
 
 <template>
   <label class="field">
-    <span class="field__label">{{ label }}</span>
+    <span v-if="!labelHidden" class="field__label">{{ label }}</span>
+    <span v-else class="sr-only">{{ label }}</span>
     <div class="secret-field">
       <div class="secret-field__input-wrap">
         <input
@@ -81,6 +85,7 @@ defineExpose({
           :readonly="readonly"
           :value="model"
           @input="model = ($event.target as HTMLInputElement).value"
+          @blur="emit('blur', $event)"
         />
         <div class="secret-field__actions">
           <button
@@ -91,7 +96,8 @@ defineExpose({
             :disabled="disabled"
             @click="revealed = !revealed"
           >
-            {{ revealLabel }}
+            <AppIcon name="eye" :size="16" />
+            <span class="sr-only">{{ revealLabel }}</span>
           </button>
           <button
             v-if="allowCopy"
@@ -101,7 +107,8 @@ defineExpose({
             :disabled="disabled"
             @click="copyValue"
           >
-            {{ copyLabel }}
+            <AppIcon name="copy" :size="16" />
+            <span class="sr-only">{{ copyLabel }}</span>
           </button>
         </div>
       </div>

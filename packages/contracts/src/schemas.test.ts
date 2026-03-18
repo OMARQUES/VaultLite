@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   AccountKitPayloadSchema,
   AttachmentEnvelopeSchema,
+  AttachmentUploadContentInputSchema,
+  AttachmentUploadFinalizeInputSchema,
+  AttachmentUploadInitInputSchema,
+  AttachmentUploadInitOutputSchema,
+  AttachmentUploadListOutputSchema,
   InviteCreateInputSchema,
   OnboardingCompleteInputSchema,
   PasswordRotationInputSchema,
@@ -141,6 +146,64 @@ describe('contracts schemas', () => {
         encryptedPayload: 'encrypted_payload_v1',
         createdAt: '2026-03-15T12:00:00.000Z',
         updatedAt: '2026-03-15T12:00:00.000Z',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('validates attachment upload lifecycle contracts', () => {
+    expect(
+      AttachmentUploadInitInputSchema.safeParse({
+        itemId: 'item_doc_1',
+        contentType: 'application/pdf',
+        size: 1024,
+        idempotencyKey: 'idem_1',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadContentInputSchema.safeParse({
+        uploadToken: 'upload-token',
+        encryptedEnvelope: 'encrypted_payload',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadFinalizeInputSchema.safeParse({
+        uploadId: 'attachment_1',
+        itemId: 'item_doc_1',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadInitOutputSchema.safeParse({
+        uploadId: 'attachment_1',
+        itemId: 'item_doc_1',
+        lifecycleState: 'pending',
+        contentType: 'application/pdf',
+        size: 1024,
+        expiresAt: '2026-03-15T12:15:00.000Z',
+        uploadedAt: null,
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:00.000Z',
+        uploadToken: 'upload-token',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadListOutputSchema.safeParse({
+        uploads: [
+          {
+            uploadId: 'attachment_1',
+            itemId: 'item_doc_1',
+            lifecycleState: 'uploaded',
+            contentType: 'application/pdf',
+            size: 1024,
+            expiresAt: '2026-03-15T12:15:00.000Z',
+            uploadedAt: '2026-03-15T12:01:00.000Z',
+            createdAt: '2026-03-15T12:00:00.000Z',
+            updatedAt: '2026-03-15T12:01:00.000Z',
+          },
+        ],
       }).success,
     ).toBe(true);
   });

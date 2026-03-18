@@ -40,17 +40,25 @@ interface PendingOnboardingState {
 
 export interface SessionState {
   phase: SessionPhase;
+  bootstrapState:
+    | 'UNINITIALIZED_PUBLIC_OPEN'
+    | 'OWNER_CREATED_CHECKPOINT_PENDING'
+    | 'INITIALIZED'
+    | null;
   username: string | null;
   userId: string | null;
+  role: 'owner' | 'user' | null;
   deviceId: string | null;
   deviceName: string | null;
   lifecycleState: 'active' | 'suspended' | 'deprovisioned' | null;
   lastError: string | null;
   lastActivityAt: number | null;
+  autoLockAfterMs: number;
 }
 
 export interface SessionStore {
   state: Readonly<SessionState>;
+  refreshBootstrapState(): Promise<void>;
   restoreSession(): Promise<void>;
   prepareOnboarding(input: {
     inviteToken: string;
@@ -74,6 +82,7 @@ export interface SessionStore {
     password: string;
   }): Promise<void>;
   reissueAccountKit(): Promise<NonNullable<TrustedLocalStateRecord['accountKit']>>;
+  setAutoLockAfterMs(value: number): void;
   lock(): void;
   markActivity(now?: number): void;
   enforceAutoLock(now?: number): void;
@@ -83,10 +92,43 @@ export interface SessionStore {
   };
 }
 
-const AUTO_LOCK_AFTER_MS = 5 * 60 * 1000;
+const AUTO_LOCK_AFTER_MS_DEFAULT = 5 * 60 * 1000;
+const AUTO_LOCK_AFTER_MS_MIN = 30 * 1000;
+const AUTO_LOCK_AFTER_MS_MAX = 24 * 60 * 60 * 1000;
+const AUTO_LOCK_AFTER_MS_STORAGE_KEY = 'vaultlite:auto-lock-after-ms';
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isValidAutoLockAfterMs(value: number): boolean {
+  return Number.isFinite(value) && value >= AUTO_LOCK_AFTER_MS_MIN && value <= AUTO_LOCK_AFTER_MS_MAX;
+}
+
+function readPersistedAutoLockAfterMs(): number {
+  try {
+    const rawValue = globalThis.localStorage?.getItem(AUTO_LOCK_AFTER_MS_STORAGE_KEY);
+    if (!rawValue) {
+      return AUTO_LOCK_AFTER_MS_DEFAULT;
+    }
+
+    const parsed = Number.parseInt(rawValue, 10);
+    if (!isValidAutoLockAfterMs(parsed)) {
+      return AUTO_LOCK_AFTER_MS_DEFAULT;
+    }
+
+    return parsed;
+  } catch {
+    return AUTO_LOCK_AFTER_MS_DEFAULT;
+  }
+}
+
+function persistAutoLockAfterMs(value: number) {
+  try {
+    globalThis.localStorage?.setItem(AUTO_LOCK_AFTER_MS_STORAGE_KEY, String(value));
+  } catch {
+    // Fail closed to in-memory session state when storage is unavailable.
+  }
 }
 
 export function createSessionStore(input: {
@@ -95,13 +137,16 @@ export function createSessionStore(input: {
 }): SessionStore {
   const state = reactive<SessionState>({
     phase: 'anonymous',
+    bootstrapState: null,
     username: null,
     userId: null,
+    role: null,
     deviceId: null,
     deviceName: null,
     lifecycleState: null,
     lastError: null,
     lastActivityAt: null,
+    autoLockAfterMs: readPersistedAutoLockAfterMs(),
   });
   let readyState: ReadyState | null = null;
   let pendingOnboarding: PendingOnboardingState | null = null;
@@ -127,9 +172,37 @@ export function createSessionStore(input: {
     return runtimeMetadata;
   }
 
+  async function refreshBootstrapStateInternal() {
+    const stateResponse = await input.authClient.getBootstrapState();
+    transition({
+      bootstrapState: stateResponse.bootstrapState,
+    });
+    return stateResponse.bootstrapState;
+  }
+
   return {
     state: readonly(state) as Readonly<SessionState>,
+    async refreshBootstrapState() {
+      await refreshBootstrapStateInternal();
+    },
     async restoreSession() {
+      const bootstrapState = await refreshBootstrapStateInternal();
+      if (bootstrapState === 'UNINITIALIZED_PUBLIC_OPEN') {
+        clearReadyState();
+        transition({
+          phase: 'anonymous',
+          username: null,
+          userId: null,
+          role: null,
+          deviceId: null,
+          deviceName: null,
+          lifecycleState: null,
+          lastError: null,
+          lastActivityAt: null,
+        });
+        return;
+      }
+
       const restored = await input.authClient.restoreSession();
       if (restored.sessionState !== 'local_unlock_required' || !restored.user || !restored.device) {
         clearReadyState();
@@ -137,6 +210,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: restored.user?.username ?? null,
           userId: null,
+          role: restored.user?.role ?? null,
           deviceId: null,
           deviceName: null,
           lifecycleState: restored.user?.lifecycleState ?? null,
@@ -153,6 +227,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: restored.user.username,
           userId: restored.user.userId,
+          role: restored.user.role,
           deviceId: restored.device.deviceId,
           deviceName: restored.device.deviceName,
           lifecycleState: restored.user.lifecycleState,
@@ -162,10 +237,27 @@ export function createSessionStore(input: {
         return;
       }
 
+      if (bootstrapState === 'OWNER_CREATED_CHECKPOINT_PENDING' && restored.user.role !== 'owner') {
+        clearReadyState();
+        transition({
+          phase: 'remote_authentication_required',
+          username: null,
+          userId: null,
+          role: null,
+          deviceId: null,
+          deviceName: null,
+          lifecycleState: null,
+          lastError: 'Deployment initialization in progress.',
+          lastActivityAt: null,
+        });
+        return;
+      }
+
       transition({
         phase: 'local_unlock_required',
         username: restored.user.username,
         userId: restored.user.userId,
+        role: restored.user.role,
         deviceId: restored.device.deviceId,
         deviceName: restored.device.deviceName,
         lifecycleState: restored.user.lifecycleState,
@@ -178,6 +270,7 @@ export function createSessionStore(input: {
         phase: 'onboarding_in_progress',
         username: onboarding.username,
         userId: null,
+        role: null,
         deviceId: null,
         deviceName: onboarding.deviceName,
         lifecycleState: null,
@@ -234,6 +327,7 @@ export function createSessionStore(input: {
         transition({
           phase: 'onboarding_export_required',
           username: onboarding.username,
+          role: null,
           deviceId,
           deviceName: onboarding.deviceName,
           lifecycleState: null,
@@ -248,6 +342,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: onboarding.username,
           userId: null,
+          role: null,
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
@@ -308,6 +403,7 @@ export function createSessionStore(input: {
           phase: 'ready',
           username: session.user.username,
           userId: session.user.userId,
+          role: session.user.role,
           deviceId: session.device.deviceId,
           deviceName: session.device.deviceName,
           lifecycleState: session.user.lifecycleState,
@@ -323,6 +419,7 @@ export function createSessionStore(input: {
           phase: 'remote_authentication_required',
           username: current.username,
           userId: null,
+          role: null,
           deviceId: null,
           deviceName: null,
           lifecycleState: null,
@@ -335,12 +432,14 @@ export function createSessionStore(input: {
     async remoteAuthenticate(authentication) {
       const trustedLocalState = await input.trustedLocalStateStore.load(authentication.username);
       if (!trustedLocalState) {
+        const message = 'Trusted local state not found for this username';
         transition({
           phase: 'remote_authentication_required',
           username: authentication.username,
-          lastError: 'Trusted local state not found for this username',
+          role: null,
+          lastError: message,
         });
-        return;
+        throw new Error(message);
       }
 
       const challenge = await input.authClient.requestRemoteAuthenticationChallenge(authentication.username);
@@ -355,6 +454,7 @@ export function createSessionStore(input: {
         phase: 'local_unlock_required',
         username: session.user.username,
         userId: session.user.userId,
+        role: session.user.role,
         deviceId: session.device.deviceId,
         deviceName: session.device.deviceName,
         lifecycleState: session.user.lifecycleState,
@@ -422,6 +522,7 @@ export function createSessionStore(input: {
         phase: 'local_unlock_required',
         username: response.user.username,
         userId: response.user.userId,
+        role: response.user.role,
         deviceId: response.device.deviceId,
         deviceName: response.device.deviceName,
         lifecycleState: response.user.lifecycleState,
@@ -433,12 +534,14 @@ export function createSessionStore(input: {
     async localUnlock(unlock) {
       const trustedLocalState = await input.trustedLocalStateStore.load(unlock.username);
       if (!trustedLocalState) {
+        const message = 'Trusted local state not found for this username';
         transition({
           phase: 'remote_authentication_required',
           username: unlock.username,
-          lastError: 'Trusted local state not found for this username',
+          role: null,
+          lastError: message,
         });
-        return;
+        throw new Error(message);
       }
 
       const payload = await decryptLocalUnlockEnvelope<ReadyState>({
@@ -450,6 +553,7 @@ export function createSessionStore(input: {
       transition({
         phase: 'ready',
         username: trustedLocalState.username,
+        role: state.role,
         deviceId: trustedLocalState.deviceId,
         deviceName: trustedLocalState.deviceName,
         lastError: null,
@@ -488,6 +592,16 @@ export function createSessionStore(input: {
         signature: signed.signature,
       };
     },
+    setAutoLockAfterMs(value: number) {
+      if (!isValidAutoLockAfterMs(value)) {
+        return;
+      }
+
+      transition({
+        autoLockAfterMs: value,
+      });
+      persistAutoLockAfterMs(value);
+    },
     lock() {
       clearReadyState();
       transition({
@@ -507,7 +621,7 @@ export function createSessionStore(input: {
         return;
       }
 
-      if (now - state.lastActivityAt >= AUTO_LOCK_AFTER_MS) {
+      if (now - state.lastActivityAt >= state.autoLockAfterMs) {
         this.lock();
       }
     },

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 
 import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
@@ -9,6 +9,7 @@ import { useSessionStore } from '../composables/useSessionStore';
 
 const sessionStore = useSessionStore();
 const router = useRouter();
+const route = useRoute();
 const password = ref('');
 const errorMessage = ref<string | null>(null);
 const isSubmitting = ref(false);
@@ -20,6 +21,18 @@ onMounted(() => {
   passwordFieldRef.value?.focus();
 });
 
+function readSafeNextPath(): string | null {
+  const rawNext = route.query.next;
+  const next = Array.isArray(rawNext) ? rawNext[0] : rawNext;
+  if (typeof next !== 'string') {
+    return null;
+  }
+  if (!next.startsWith('/') || next.startsWith('//')) {
+    return null;
+  }
+  return next;
+}
+
 async function submit() {
   errorMessage.value = null;
   isSubmitting.value = true;
@@ -29,7 +42,8 @@ async function submit() {
       username: sessionStore.state.username ?? '',
       password: password.value,
     });
-    await router.push('/vault');
+    const next = readSafeNextPath();
+    await router.push(next ?? '/vault');
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -40,10 +54,11 @@ async function submit() {
 
 <template>
   <section class="public-page public-page--unlock">
-    <div class="panel-card panel-card--compact panel-card--narrow">
+    <div class="panel-card panel-card--compact panel-card--narrow unlock-card">
       <div class="page-header">
         <p class="eyebrow">UNLOCK</p>
         <h1>Unlock this device</h1>
+        <p class="page-subtitle">Enter your master password to unlock this trusted device.</p>
       </div>
 
       <InlineAlert v-if="surfaceError" tone="danger">
@@ -51,9 +66,15 @@ async function submit() {
       </InlineAlert>
 
       <form class="form-stack" @submit.prevent="submit">
-        <div class="static-field">
-          <span class="field__label">Username</span>
-          <div class="static-field__value">{{ sessionStore.state.username ?? 'Unknown' }}</div>
+        <div class="unlock-context">
+          <div class="unlock-context__row">
+            <span class="unlock-context__label">Account</span>
+            <p class="unlock-context__value">{{ sessionStore.state.username ?? 'Unknown' }}</p>
+          </div>
+          <div class="unlock-context__row">
+            <span class="unlock-context__label">Device</span>
+            <p class="unlock-context__value">{{ sessionStore.state.deviceName ?? 'Unknown device' }}</p>
+          </div>
         </div>
         <SecretField
           ref="passwordFieldRef"

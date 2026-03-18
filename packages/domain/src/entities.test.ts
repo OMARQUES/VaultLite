@@ -9,7 +9,7 @@ import {
 
 describe('domain vault entities', () => {
   it('exposes canonical vault item types', () => {
-    expect(VAULT_ITEM_TYPES).toEqual(['login', 'document']);
+    expect(VAULT_ITEM_TYPES).toEqual(['login', 'document', 'card', 'secure_note']);
   });
 
   it('supports revisioned encrypted item records', () => {
@@ -27,21 +27,41 @@ describe('domain vault entities', () => {
     expect(record.encryptedPayload).toBe('encrypted_payload_v2');
   });
 
-  it('keeps login and document payload types distinct', () => {
+  it('keeps payload types distinct across login, document, card and secure note', () => {
     const loginPayload: VaultItemPayloadByType['login'] = {
       title: 'Email',
       username: 'alice@example.com',
       password: 'secret',
       urls: ['https://mail.example.com'],
       notes: '',
+      customFields: [],
     };
     const documentPayload: VaultItemPayloadByType['document'] = {
       title: 'Secure note',
       content: 'hello',
+      customFields: [],
+    };
+    const cardPayload: VaultItemPayloadByType['card'] = {
+      title: 'Main card',
+      cardholderName: 'Alice',
+      brand: 'Visa',
+      number: '4111111111111111',
+      expiryMonth: '12',
+      expiryYear: '2030',
+      securityCode: '123',
+      notes: '',
+      customFields: [],
+    };
+    const secureNotePayload: VaultItemPayloadByType['secure_note'] = {
+      title: 'Infra',
+      content: 'server notes',
+      customFields: [],
     };
 
     expect(loginPayload.urls).toEqual(['https://mail.example.com']);
     expect(documentPayload.content).toBe('hello');
+    expect(cardPayload.brand).toBe('Visa');
+    expect(secureNotePayload.content).toBe('server notes');
   });
 
   it('supports tombstone records for deleted vault items', () => {

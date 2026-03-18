@@ -1,5 +1,6 @@
 import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { randomBytes, utf8ToBytes } from '@noble/hashes/utils.js';
+import { AttachmentEnvelopeSchema } from '@vaultlite/contracts';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -132,7 +133,7 @@ export function createOpaqueBundlePlaceholder(input: {
 
 export async function encryptVaultItemPayload(input: {
   accountKey: string;
-  itemType: 'login' | 'document';
+  itemType: 'login' | 'document' | 'card' | 'secure_note';
   payload: unknown;
 }): Promise<string> {
   const key = await importAccountKey(input.accountKey, 'encrypt');
@@ -197,4 +198,37 @@ export async function decryptVaultItemPayload<T>(input: {
   );
 
   return JSON.parse(textDecoder.decode(plaintext)) as T;
+}
+
+export async function encryptAttachmentBlobPayload(input: {
+  accountKey: string;
+  plaintext: ArrayBuffer;
+  contentType: string;
+}): Promise<string> {
+  const key = await importAccountKey(input.accountKey, 'encrypt');
+  const nonce = randomBytes(12);
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(nonce),
+    },
+    key,
+    input.plaintext,
+  );
+  const encryptedBytes = new Uint8Array(ciphertext);
+  const authTagLength = 16;
+  const cipherBytes = encryptedBytes.slice(0, encryptedBytes.length - authTagLength);
+  const authTag = encryptedBytes.slice(encryptedBytes.length - authTagLength);
+
+  const envelope = AttachmentEnvelopeSchema.parse({
+    version: 'blob.v1',
+    algorithm: 'aes-256-gcm',
+    nonce: bytesToBase64Url(nonce),
+    ciphertext: bytesToBase64Url(cipherBytes),
+    authTag: bytesToBase64Url(authTag),
+    contentType: input.contentType,
+    originalSize: input.plaintext.byteLength,
+  });
+
+  return bytesToBase64Url(textEncoder.encode(JSON.stringify(envelope)));
 }
