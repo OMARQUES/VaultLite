@@ -134,6 +134,45 @@ describe('AdminConsolePage', () => {
       inviteLink: 'http://127.0.0.1:8787/onboarding?invite=invite_token_123456',
       expiresAt: '2026-03-19T12:00:00.000Z',
     });
+    authClientMock.suspendAdminUser.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      reasonCode: null,
+      user: {
+        userId: 'user_2',
+        username: 'omarques2',
+        role: 'user',
+        lifecycleState: 'suspended',
+        createdAt: '2026-03-18T12:00:00.000Z',
+        trustedDevicesCount: 1,
+      },
+    });
+    authClientMock.reactivateAdminUser.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      reasonCode: null,
+      user: {
+        userId: 'user_2',
+        username: 'omarques2',
+        role: 'user',
+        lifecycleState: 'active',
+        createdAt: '2026-03-18T12:00:00.000Z',
+        trustedDevicesCount: 1,
+      },
+    });
+    authClientMock.deprovisionAdminUser.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      reasonCode: null,
+      user: {
+        userId: 'user_2',
+        username: 'omarques2',
+        role: 'user',
+        lifecycleState: 'deprovisioned',
+        createdAt: '2026-03-18T12:00:00.000Z',
+        trustedDevicesCount: 0,
+      },
+    });
     authClientMock.requestRemoteAuthenticationChallenge.mockResolvedValue({
       authSalt: 'salt',
     });
@@ -244,5 +283,41 @@ describe('AdminConsolePage', () => {
     await flushPromises();
 
     expect(wrapper.find('.admin-page.admin-page--compact-desktop').exists()).toBe(true);
+  });
+
+  test('closes suspend confirmation dialog after successful mutation', async () => {
+    authClientMock.listAdminUsers.mockResolvedValue({
+      users: [
+        {
+          userId: 'user_2',
+          username: 'omarques2',
+          role: 'user',
+          lifecycleState: 'active',
+          createdAt: '2026-03-18T12:00:00.000Z',
+          trustedDevicesCount: 1,
+        },
+      ],
+    });
+
+    const { wrapper } = await mountAdminAt('/admin/users/user_2');
+    await flushPromises();
+
+    const suspendButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Suspend');
+    expect(suspendButton).toBeDefined();
+    await suspendButton!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Suspend omarques2?');
+    const confirmSuspendButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Suspend user');
+    expect(confirmSuspendButton).toBeDefined();
+    await confirmSuspendButton!.trigger('click');
+    await flushPromises();
+
+    expect(authClientMock.suspendAdminUser).toHaveBeenCalledWith('user_2');
+    expect(wrapper.text()).not.toContain('Suspend omarques2?');
   });
 });

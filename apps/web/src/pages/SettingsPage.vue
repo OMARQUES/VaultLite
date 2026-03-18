@@ -7,6 +7,7 @@ import PrimaryButton from '../components/ui/PrimaryButton.vue';
 import SecondaryButton from '../components/ui/SecondaryButton.vue';
 import ToastMessage from '../components/ui/ToastMessage.vue';
 import { useSessionStore } from '../composables/useSessionStore';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 const sessionStore = useSessionStore();
 const router = useRouter();
@@ -95,7 +96,7 @@ async function reissueAccountKit() {
     lastReissuedAt.value = new Date().toISOString();
     showToast('Account Kit reissued');
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyStep.value = null;
   }

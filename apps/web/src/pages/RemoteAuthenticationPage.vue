@@ -9,6 +9,7 @@ import SecretField from '../components/ui/SecretField.vue';
 import TextField from '../components/ui/TextField.vue';
 import TextareaField from '../components/ui/TextareaField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 const router = useRouter();
 const sessionStore = useSessionStore();
@@ -124,7 +125,7 @@ async function bootstrapDevice() {
     });
     await router.push('/unlock');
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyStep.value = null;
   }

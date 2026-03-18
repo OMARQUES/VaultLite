@@ -9,6 +9,7 @@ import type {
   VaultItemRecord,
   VaultItemUpdateInput,
 } from '@vaultlite/contracts';
+import { dispatchVaultUnauthorizedEvent } from './http-events';
 
 function readCookie(name: string): string | null {
   const prefix = `${name}=`;
@@ -20,7 +21,13 @@ function readCookie(name: string): string | null {
   return target ? decodeURIComponent(target.slice(prefix.length)) : null;
 }
 
-async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+async function requestJson<T>(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options?: {
+    emitUnauthorizedEvent?: boolean;
+  },
+): Promise<T> {
   const response = await fetch(input, {
     credentials: 'include',
     ...init,
@@ -55,6 +62,15 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
     }
 
     const details = responseMessage || responseCode || responseReasonCode || responseResult;
+    if (response.status === 401 && options?.emitUnauthorizedEvent) {
+      dispatchVaultUnauthorizedEvent({
+        source: 'vault',
+        status: 401,
+        code: responseCode || null,
+        message: responseMessage || null,
+        url: typeof input === 'string' ? input : input.toString(),
+      });
+    }
     throw new Error(
       details
         ? `Request failed with status ${response.status} (${details})`
@@ -86,16 +102,20 @@ export interface VaultLiteVaultClient {
 export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
   return {
     listItems() {
-      return requestJson<VaultItemListOutput>(`${baseUrl}/api/vault/items`);
+      return requestJson<VaultItemListOutput>(`${baseUrl}/api/vault/items`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
     },
     getItem(itemId) {
-      return requestJson<VaultItemRecord>(`${baseUrl}/api/vault/items/${itemId}`);
+      return requestJson<VaultItemRecord>(`${baseUrl}/api/vault/items/${itemId}`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
     },
     createItem(input) {
       return requestJson<VaultItemRecord>(`${baseUrl}/api/vault/items`, {
         method: 'POST',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     updateItem(input) {
       return requestJson<VaultItemRecord>(`${baseUrl}/api/vault/items/${input.itemId}`, {
@@ -105,28 +125,30 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
           encryptedPayload: input.encryptedPayload,
           expectedRevision: input.expectedRevision,
         }),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     deleteItem(itemId) {
       return requestJson<void>(`${baseUrl}/api/vault/items/${itemId}`, {
         method: 'DELETE',
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     initAttachmentUpload(input) {
       return requestJson<AttachmentUploadInitOutput>(`${baseUrl}/api/attachments/uploads/init`, {
         method: 'POST',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     uploadAttachmentContent(uploadId, input) {
       return requestJson<AttachmentUploadRecord>(`${baseUrl}/api/attachments/uploads/${uploadId}/content`, {
         method: 'PUT',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     listAttachmentUploads(itemId) {
       return requestJson<AttachmentUploadListOutput>(
         `${baseUrl}/api/attachments?itemId=${encodeURIComponent(itemId)}`,
+        undefined,
+        { emitUnauthorizedEvent: true },
       );
     },
   };

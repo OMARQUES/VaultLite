@@ -42,6 +42,7 @@ import {
   type VaultCustomField,
   type VaultWorkspaceItem,
 } from '../lib/vault-workspace';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 type VaultScope = 'all' | 'favorites' | 'trash';
 type VaultTypeFilter = 'all' | 'login' | 'document' | 'card' | 'secure_note';
@@ -1402,7 +1403,7 @@ async function uploadQueuedDraftAttachments(itemId: string, itemLabel: string) {
     } catch (error) {
       failedUploads += 1;
       if (!firstUploadError) {
-        firstUploadError = error instanceof Error ? error.message : String(error);
+        firstUploadError = toHumanErrorMessage(error);
       }
     }
   }
@@ -1533,7 +1534,7 @@ async function saveCurrent() {
       await router.push(vaultRoute(`/vault/item/${selectedItem.value.itemId}`));
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyAction.value = null;
   }
@@ -1592,7 +1593,7 @@ async function deleteCurrentPermanently() {
     clearItemFromUiState(selectedItemInContext.value.itemId);
     await router.push(vaultRoute('/vault', { scope: 'trash' }));
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyAction.value = null;
   }
@@ -1607,7 +1608,7 @@ async function loadAttachmentUploads(itemId: string) {
       [itemId]: response.uploads.map((upload) => ({ ...upload })),
     };
   } catch (error) {
-    attachmentError.value = error instanceof Error ? error.message : String(error);
+    attachmentError.value = toHumanErrorMessage(error);
   }
 }
 
@@ -1662,7 +1663,7 @@ async function onAttachmentSelected(event: Event) {
     await loadAttachmentUploads(itemId);
     showToast('Attachment uploaded');
   } catch (error) {
-    attachmentError.value = error instanceof Error ? error.message : String(error);
+    attachmentError.value = toHumanErrorMessage(error);
   } finally {
     attachmentBusy.value = false;
     target.value = '';
@@ -1755,7 +1756,7 @@ async function loadVault() {
   try {
     await workspace.load();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busyAction.value = null;
   }

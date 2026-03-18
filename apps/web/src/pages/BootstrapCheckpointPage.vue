@@ -6,6 +6,7 @@ import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import { createVaultLiteAuthClient } from '../lib/auth-client';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 const router = useRouter();
 const sessionStore = useSessionStore();
@@ -56,7 +57,7 @@ async function downloadAccountKit() {
     downloadAttempted.value = true;
     hint.value = 'Download started. Save it outside this browser.';
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busy.value = false;
   }
@@ -76,7 +77,7 @@ async function finishInitialization() {
     await sessionStore.refreshBootstrapState();
     await router.push('/bootstrap/success');
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busy.value = false;
   }
@@ -96,7 +97,7 @@ onMounted(async () => {
   try {
     await loadAccountKit();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   }
 });
 </script>

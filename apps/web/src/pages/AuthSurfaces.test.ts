@@ -40,6 +40,7 @@ function createSessionStore() {
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    handleUnauthorized: vi.fn(),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
@@ -262,5 +263,25 @@ describe('auth surfaces', () => {
     expect((wrapper.get('input').element as HTMLInputElement).type).toBe('password');
     expect(document.activeElement).toBe(wrapper.get('input').element);
     expect(push).not.toHaveBeenCalled();
+  });
+
+  test('unlock surfaces suspended-account message from route reason', async () => {
+    routeState.path = '/unlock';
+    routeState.query = {
+      reason: 'account_suspended',
+    };
+    const sessionStore = createSessionStore();
+
+    const wrapper = mount(UnlockPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Your account is suspended. Ask the owner to reactivate access.');
   });
 });

@@ -163,10 +163,29 @@ describe('createSessionStore', () => {
         username: 'alice',
         password: 'correct-password',
       }),
-    ).rejects.toThrow('Trusted local state not found for this username');
+    ).rejects.toThrow('This device is no longer trusted for this account. Add the device again.');
 
     expect(store.state.phase).toBe('remote_authentication_required');
-    expect(store.state.lastError).toBe('Trusted local state not found for this username');
+    expect(store.state.lastError).toBe('This device is no longer trusted for this account. Add the device again.');
+  });
+
+  test('localUnlock fails when server session is no longer unlock-eligible (suspended/revoked)', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.restoreSession.mockResolvedValueOnce({
+      ok: true,
+      sessionState: 'remote_authentication_required',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.localUnlock({
+        username: 'alice',
+        password: 'correct-password',
+      }),
+    ).rejects.toThrow('Your account is suspended or your session is no longer valid.');
+
+    expect(store.state.phase).toBe('local_unlock_required');
+    expect(store.state.lastError).toBe('Your account is suspended or your session is no longer valid.');
   });
 
   test('remoteAuthenticate fails closed when trusted local state is missing', async () => {
@@ -179,11 +198,24 @@ describe('createSessionStore', () => {
         username: 'alice',
         password: 'correct-password',
       }),
-    ).rejects.toThrow('Trusted local state not found for this username');
+    ).rejects.toThrow('This device is no longer trusted for this account. Add the device again.');
 
     expect(store.state.phase).toBe('remote_authentication_required');
-    expect(store.state.lastError).toBe('Trusted local state not found for this username');
+    expect(store.state.lastError).toBe('This device is no longer trusted for this account. Add the device again.');
     expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
+  });
+
+  test('handleUnauthorized transitions back to unlock-required with explicit error', () => {
+    const dependencies = createMockDependencies();
+    const store = createSessionStore(dependencies as never);
+    return store.restoreSession().then(() => {
+      store.handleUnauthorized({
+        reasonCode: 'account_suspended',
+      });
+
+      expect(store.state.phase).toBe('local_unlock_required');
+      expect(store.state.lastError).toBe('Your account is suspended. Ask the owner to reactivate access.');
+    });
   });
 
   test('prepareOnboarding uses canonical runtime metadata and does not persist trusted local state', async () => {
@@ -233,7 +265,7 @@ describe('createSessionStore', () => {
 
     expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
     expect(store.state.phase).toBe('remote_authentication_required');
-    expect(store.state.lastError).toBe('Request failed with status 409 (username_unavailable)');
+    expect(store.state.lastError).toBe('This username is already in use.');
   });
 
   test('finalizeOnboarding persists trusted local state only after remote completion succeeds', async () => {
@@ -295,7 +327,7 @@ describe('createSessionStore', () => {
     await expect(store.finalizeOnboarding()).rejects.toThrow('server failed');
     expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
     expect(store.state.phase).toBe('remote_authentication_required');
-    expect(store.state.lastError).toBe('server failed');
+    expect(store.state.lastError).toBe('Something went wrong on our side. Please try again.');
   });
 
   test('bootstrapDevice fails closed when Account Kit deployment metadata does not match current runtime metadata', async () => {

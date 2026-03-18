@@ -17,6 +17,7 @@ import ToastMessage from '../components/ui/ToastMessage.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import { deriveAuthProof } from '../lib/browser-crypto';
 import { createVaultLiteAuthClient } from '../lib/auth-client';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 type AdminSection = 'overview' | 'invites' | 'users' | 'audit';
 type InviteStatusFilter = 'all' | 'active' | 'used' | 'expired' | 'revoked';
@@ -251,7 +252,7 @@ function formatFriendlyError(error: unknown): string {
   if (message.includes('already_active')) return 'This user is already active.';
   if (message.includes('token_not_redelivered')) return 'This invite link is shown only once. Revoke and create a replacement if needed.';
   if (message.includes('initialization_pending')) return 'Deployment initialization is still in progress.';
-  return message;
+  return toHumanErrorMessage(error);
 }
 
 function showToast(message: string) {
@@ -901,6 +902,7 @@ async function confirmMutationDialog() {
   try {
     await mutationDialog.run();
     showToast('Action completed');
+    mutationDialog.running = false;
     closeMutationDialog();
   } catch (error) {
     sectionError.value = formatFriendlyError(error);

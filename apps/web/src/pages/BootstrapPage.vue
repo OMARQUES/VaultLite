@@ -15,6 +15,7 @@ import {
   generateAccountKey,
 } from '../lib/browser-crypto';
 import { createVaultLiteAuthClient } from '../lib/auth-client';
+import { toHumanErrorMessage } from '../lib/human-error';
 import { createTrustedLocalStateStore } from '../lib/trusted-local-state';
 
 const router = useRouter();
@@ -43,7 +44,7 @@ async function verifyBootstrapAccess() {
     verificationToken.value = response.verificationToken;
     step.value = 2;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busy.value = false;
   }
@@ -110,7 +111,7 @@ async function initializeOwner() {
     form.password = '';
     await router.push('/bootstrap/checkpoint');
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     busy.value = false;
   }

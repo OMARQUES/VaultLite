@@ -1,6 +1,7 @@
 import { computed, reactive, readonly, ref } from 'vue';
 
 import { decryptVaultItemPayload, encryptVaultItemPayload } from './browser-crypto';
+import { toHumanErrorMessage } from './human-error';
 import type { SessionStore } from './session-store';
 import type { VaultLiteVaultClient } from './vault-client';
 import { buildVaultSearchIndex, queryVaultSearchIndex } from './vault-search';
@@ -235,7 +236,7 @@ export function createVaultWorkspace(input: {
       state.items = await Promise.all(response.items.map((item) => decryptRecord(accountKey, item)));
       rebuildIndex();
     } catch (error) {
-      state.lastError = error instanceof Error ? error.message : String(error);
+      state.lastError = toHumanErrorMessage(error);
       throw error;
     } finally {
       state.isLoading = false;
@@ -301,7 +302,7 @@ export function createVaultWorkspace(input: {
         );
         rebuildIndex();
       } catch (error) {
-        state.lastError = error instanceof Error ? error.message : String(error);
+        state.lastError = toHumanErrorMessage(error);
         throw error;
       }
     },

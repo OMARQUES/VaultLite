@@ -6,6 +6,7 @@ import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
 import SecretField from '../components/ui/SecretField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
+import { toHumanErrorMessage } from '../lib/human-error';
 
 const sessionStore = useSessionStore();
 const router = useRouter();
@@ -15,7 +16,19 @@ const errorMessage = ref<string | null>(null);
 const isSubmitting = ref(false);
 const passwordFieldRef = ref<InstanceType<typeof SecretField> | null>(null);
 
-const surfaceError = computed(() => errorMessage.value ?? sessionStore.state.lastError);
+const routeReasonError = computed(() => {
+  const rawReason = route.query.reason;
+  const reason = Array.isArray(rawReason) ? rawReason[0] : rawReason;
+  if (reason === 'account_suspended') {
+    return 'Your account is suspended. Ask the owner to reactivate access.';
+  }
+  if (reason === 'session_revoked') {
+    return 'Your account is suspended or your session is no longer valid.';
+  }
+  return null;
+});
+
+const surfaceError = computed(() => errorMessage.value ?? sessionStore.state.lastError ?? routeReasonError.value);
 
 onMounted(() => {
   passwordFieldRef.value?.focus();
@@ -45,7 +58,7 @@ async function submit() {
     const next = readSafeNextPath();
     await router.push(next ?? '/vault');
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = toHumanErrorMessage(error);
   } finally {
     isSubmitting.value = false;
   }

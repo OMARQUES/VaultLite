@@ -25,6 +25,7 @@ import type {
   SessionRestoreResponse,
   TrustedSessionResponse,
 } from '@vaultlite/contracts';
+import { dispatchVaultUnauthorizedEvent } from './http-events';
 
 function readCookie(name: string): string | null {
   const prefix = `${name}=`;
@@ -96,7 +97,13 @@ export interface VaultLiteAuthClient {
   deprovisionAdminUser(userId: string): Promise<AdminUserLifecycleMutationOutput>;
 }
 
-async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+async function requestJson<T>(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options?: {
+    emitUnauthorizedEvent?: boolean;
+  },
+): Promise<T> {
   const response = await fetch(input, {
     credentials: 'include',
     ...init,
@@ -131,6 +138,15 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
     }
 
     const details = responseMessage || responseCode || responseReasonCode || responseResult;
+    if (response.status === 401 && options?.emitUnauthorizedEvent) {
+      dispatchVaultUnauthorizedEvent({
+        source: 'auth',
+        status: 401,
+        code: responseCode || null,
+        message: responseMessage || null,
+        url: typeof input === 'string' ? input : input.toString(),
+      });
+    }
     throw new Error(
       details
         ? `Request failed with status ${response.status} (${details})`
@@ -185,6 +201,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
           method: 'POST',
           body: JSON.stringify(input),
         },
+        { emitUnauthorizedEvent: true },
       );
     },
     bootstrapCheckpointComplete(input) {
@@ -194,6 +211,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
           method: 'POST',
           body: JSON.stringify(input),
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
     getRuntimeMetadata() {
@@ -256,13 +274,13 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       return requestJson<AccountKitSignatureOutput>(`${baseUrl}/api/auth/account-kit/sign`, {
         method: 'POST',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     reissueAccountKit(input) {
       return requestJson<AccountKitSignatureOutput>(`${baseUrl}/api/auth/account-kit/reissue`, {
         method: 'POST',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     verifyAccountKit(input) {
       return requestJson(`${baseUrl}/api/auth/account-kit/verify`, {
@@ -274,7 +292,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       return requestJson<RecentReauthOutput>(`${baseUrl}/api/auth/recent-reauth`, {
         method: 'POST',
         body: JSON.stringify(input),
-      });
+      }, { emitUnauthorizedEvent: true });
     },
     createAdminInvite(input) {
       return requestJson<AdminInviteCreateOutput>(
@@ -283,10 +301,13 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
           method: 'POST',
           body: JSON.stringify(input),
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
     listAdminInvites() {
-      return requestJson<AdminInviteListOutput>(`${baseUrl}/api/admin/invites`);
+      return requestJson<AdminInviteListOutput>(`${baseUrl}/api/admin/invites`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
     },
     revokeAdminInvite(inviteId) {
       return requestJson<AdminInviteRevokeOutput>(
@@ -294,14 +315,19 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         withIdempotencyHeader({
           method: 'POST',
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
     listAdminUsers() {
-      return requestJson<AdminUserListOutput>(`${baseUrl}/api/admin/users`);
+      return requestJson<AdminUserListOutput>(`${baseUrl}/api/admin/users`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
     },
     listAdminAudit(limit = 250) {
       return requestJson<AdminAuditListOutput>(
         `${baseUrl}/api/admin/audit?limit=${encodeURIComponent(String(limit))}`,
+        undefined,
+        { emitUnauthorizedEvent: true },
       );
     },
     suspendAdminUser(userId) {
@@ -310,6 +336,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         withIdempotencyHeader({
           method: 'POST',
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
     reactivateAdminUser(userId) {
@@ -318,6 +345,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         withIdempotencyHeader({
           method: 'POST',
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
     deprovisionAdminUser(userId) {
@@ -326,6 +354,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         withIdempotencyHeader({
           method: 'POST',
         }),
+        { emitUnauthorizedEvent: true },
       );
     },
   };

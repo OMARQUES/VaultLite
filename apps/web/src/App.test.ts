@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { sessionStoreKey } from './app-context';
 import App from './App.vue';
+import { VAULT_UNAUTHORIZED_EVENT } from './lib/http-events';
 import { createVaultLiteRouter } from './router';
 
 function createSessionStore(
@@ -40,6 +41,10 @@ function createSessionStore(
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    handleUnauthorized: vi.fn(function handleUnauthorized(this: { state: { username: string | null; phase: string; lastError: string | null } }, input?: { message?: string | null }) {
+      this.state.phase = this.state.username ? 'local_unlock_required' : 'remote_authentication_required';
+      this.state.lastError = input?.message ?? 'Your account is suspended or your session is no longer valid.';
+    }),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
@@ -199,5 +204,24 @@ describe('App shell', () => {
     expect(wrapper.text()).not.toContain('Onboarding');
     expect(wrapper.text()).not.toContain('Auth');
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
+  test('redirects to /unlock when an authenticated surface receives unauthorized event', async () => {
+    const { sessionStore } = await mountAppAt('/vault', 'ready');
+    window.dispatchEvent(
+      new CustomEvent(VAULT_UNAUTHORIZED_EVENT, {
+        detail: {
+          source: 'vault',
+          status: 401,
+          code: 'unauthorized',
+          message: 'unauthorized',
+          url: '/api/vault/items',
+        },
+      }),
+    );
+    await flushPromises();
+
+    expect(sessionStore.handleUnauthorized).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe('/unlock');
   });
 });

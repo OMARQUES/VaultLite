@@ -10,6 +10,7 @@ import {
   generateAccountKey,
 } from './browser-crypto';
 import type { VaultLiteAuthClient } from './auth-client';
+import { toHumanErrorMessage } from './human-error';
 import type { TrustedLocalStateRecord, TrustedLocalStateStore } from './trusted-local-state';
 
 type SessionPhase =
@@ -82,6 +83,10 @@ export interface SessionStore {
     password: string;
   }): Promise<void>;
   reissueAccountKit(): Promise<NonNullable<TrustedLocalStateRecord['accountKit']>>;
+  handleUnauthorized(input?: {
+    reasonCode?: string | null;
+    message?: string | null;
+  }): void;
   setAutoLockAfterMs(value: number): void;
   lock(): void;
   markActivity(now?: number): void;
@@ -98,7 +103,20 @@ const AUTO_LOCK_AFTER_MS_MAX = 24 * 60 * 60 * 1000;
 const AUTO_LOCK_AFTER_MS_STORAGE_KEY = 'vaultlite:auto-lock-after-ms';
 
 function asErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return toHumanErrorMessage(error);
+}
+
+function unauthorizedMessage(input?: {
+  reasonCode?: string | null;
+  message?: string | null;
+}): string {
+  if (input?.message && input.message.trim().length > 0) {
+    return input.message;
+  }
+  if (input?.reasonCode === 'account_suspended') {
+    return 'Your account is suspended. Ask the owner to reactivate access.';
+  }
+  return 'Your account is suspended or your session is no longer valid.';
 }
 
 function isValidAutoLockAfterMs(value: number): boolean {
@@ -231,7 +249,7 @@ export function createSessionStore(input: {
           deviceId: restored.device.deviceId,
           deviceName: restored.device.deviceName,
           lifecycleState: restored.user.lifecycleState,
-          lastError: 'Trusted local state missing for session restoration',
+          lastError: 'This device is no longer trusted for this account. Add the device again.',
           lastActivityAt: null,
         });
         return;
@@ -431,7 +449,7 @@ export function createSessionStore(input: {
     async remoteAuthenticate(authentication) {
       const trustedLocalState = await input.trustedLocalStateStore.load(authentication.username);
       if (!trustedLocalState) {
-        const message = 'Trusted local state not found for this username';
+        const message = 'This device is no longer trusted for this account. Add the device again.';
         transition({
           phase: 'remote_authentication_required',
           username: authentication.username,
@@ -532,12 +550,41 @@ export function createSessionStore(input: {
     async localUnlock(unlock) {
       const trustedLocalState = await input.trustedLocalStateStore.load(unlock.username);
       if (!trustedLocalState) {
-        const message = 'Trusted local state not found for this username';
+        const message = 'This device is no longer trusted for this account. Add the device again.';
         transition({
           phase: 'remote_authentication_required',
           username: unlock.username,
           role: null,
           lastError: message,
+        });
+        throw new Error(message);
+      }
+
+      const restored = await input.authClient.restoreSession();
+      if (
+        restored.sessionState !== 'local_unlock_required' ||
+        !restored.user ||
+        !restored.device ||
+        restored.user.username !== unlock.username ||
+        restored.device.deviceId !== trustedLocalState.deviceId ||
+        restored.user.lifecycleState !== 'active'
+      ) {
+        const message = unauthorizedMessage({
+          message: state.lastError,
+          reasonCode:
+            restored.user?.lifecycleState === 'suspended' ? 'account_suspended' : null,
+        });
+        clearReadyState();
+        transition({
+          phase: 'local_unlock_required',
+          username: unlock.username,
+          userId: restored.user?.userId ?? state.userId,
+          role: restored.user?.role ?? state.role,
+          deviceId: trustedLocalState.deviceId,
+          deviceName: trustedLocalState.deviceName,
+          lifecycleState: restored.user?.lifecycleState ?? state.lifecycleState,
+          lastError: message,
+          lastActivityAt: null,
         });
         throw new Error(message);
       }
@@ -550,12 +597,23 @@ export function createSessionStore(input: {
       readyState = payload;
       transition({
         phase: 'ready',
-        username: trustedLocalState.username,
-        role: state.role,
-        deviceId: trustedLocalState.deviceId,
-        deviceName: trustedLocalState.deviceName,
+        username: restored.user.username,
+        userId: restored.user.userId,
+        role: restored.user.role,
+        deviceId: restored.device.deviceId,
+        deviceName: restored.device.deviceName,
+        lifecycleState: restored.user.lifecycleState,
         lastError: null,
         lastActivityAt: Date.now(),
+      });
+    },
+    handleUnauthorized(inputData) {
+      clearReadyState();
+      const message = unauthorizedMessage(inputData);
+      transition({
+        phase: state.username ? 'local_unlock_required' : 'remote_authentication_required',
+        lastError: message,
+        lastActivityAt: null,
       });
     },
     async reissueAccountKit() {
