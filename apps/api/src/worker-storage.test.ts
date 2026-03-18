@@ -40,8 +40,11 @@ describe('createWorkerStorage', () => {
     };
 
     const storage = await createWorkerStorage({
-      VAULTLITE_DB: fakeDb,
-      VAULTLITE_BLOBS: fakeBucket,
+      runtimeMode: 'test',
+      env: {
+        VAULTLITE_DB: fakeDb,
+        VAULTLITE_BLOBS: fakeBucket,
+      },
     });
 
     expect(preparedSql.length).toBeGreaterThan(0);
@@ -51,10 +54,22 @@ describe('createWorkerStorage', () => {
   });
 
   test('falls back to in-memory storage when local bindings are absent', async () => {
-    const storage = await createWorkerStorage({});
+    const storage = await createWorkerStorage({
+      runtimeMode: 'development',
+      env: {},
+    });
 
     expect(storage).toHaveProperty('invites');
     expect(storage).toHaveProperty('users');
     expect(storage).toHaveProperty('attachmentBlobs');
+  });
+
+  test('rejects in-memory fallback in production mode', async () => {
+    await expect(
+      createWorkerStorage({
+        runtimeMode: 'production',
+        env: {},
+      }),
+    ).rejects.toThrow('runtime_config_invalid');
   });
 });

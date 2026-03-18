@@ -60,6 +60,7 @@ export interface AuthRateLimitRecord {
   key: string;
   attemptCount: number;
   windowStartedAt: string;
+  windowEndsAt: string;
 }
 
 export interface AttachmentBlobRecord {
@@ -186,7 +187,11 @@ export interface SessionRepository {
 }
 
 export interface AuthRateLimitRepository {
-  increment(key: string, nowIso: string): Promise<AuthRateLimitRecord>;
+  increment(input: {
+    key: string;
+    nowIso: string;
+    windowSeconds: number;
+  }): Promise<AuthRateLimitRecord>;
   get(key: string): Promise<AuthRateLimitRecord | null>;
   reset(key: string): Promise<void>;
 }
@@ -566,12 +571,23 @@ export function createInMemoryVaultLiteStorage(input: {
       },
     },
     authRateLimits: {
-      async increment(key, nowIso) {
-        const current = rateLimits.get(key);
-        const next: AuthRateLimitRecord = current
-          ? { ...current, attemptCount: current.attemptCount + 1 }
-          : { key, attemptCount: 1, windowStartedAt: nowIso };
-        rateLimits.set(key, next);
+      async increment(input) {
+        const current = rateLimits.get(input.key);
+        const nowMs = Date.parse(input.nowIso);
+        const nextWindowEndsAt = new Date(nowMs + input.windowSeconds * 1000).toISOString();
+        const isExpired = !current || Date.parse(current.windowEndsAt) <= nowMs;
+        const next: AuthRateLimitRecord = isExpired
+          ? {
+              key: input.key,
+              attemptCount: 1,
+              windowStartedAt: input.nowIso,
+              windowEndsAt: nextWindowEndsAt,
+            }
+          : {
+              ...current,
+              attemptCount: current.attemptCount + 1,
+            };
+        rateLimits.set(input.key, next);
         return { ...next };
       },
       async get(key) {

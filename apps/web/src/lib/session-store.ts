@@ -389,7 +389,6 @@ export function createSessionStore(input: {
           encryptedAccountBundle: current.encryptedAccountBundle,
           accountKeyWrapped: current.accountKeyWrapped,
           localUnlockEnvelope,
-          accountKit: current.accountKit,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -513,7 +512,6 @@ export function createSessionStore(input: {
         encryptedAccountBundle: response.encryptedAccountBundle,
         accountKeyWrapped: response.accountKeyWrapped,
         localUnlockEnvelope,
-        accountKit: parsedAccountKit,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -575,17 +573,6 @@ export function createSessionStore(input: {
         issuedAt: new Date().toISOString(),
       };
       const signed = await input.authClient.reissueAccountKit({ payload });
-      const trustedState = await input.trustedLocalStateStore.load(state.username);
-      if (trustedState) {
-        await input.trustedLocalStateStore.save({
-          ...trustedState,
-          accountKit: {
-            payload,
-            signature: signed.signature,
-          },
-          updatedAt: new Date().toISOString(),
-        });
-      }
 
       return {
         payload,

@@ -6,14 +6,12 @@ import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import { createVaultLiteAuthClient } from '../lib/auth-client';
-import { createTrustedLocalStateStore, type TrustedLocalStateRecord } from '../lib/trusted-local-state';
 
 const router = useRouter();
 const sessionStore = useSessionStore();
 const authClient = createVaultLiteAuthClient();
-const trustedLocalStateStore = createTrustedLocalStateStore();
 
-const accountKit = ref<TrustedLocalStateRecord['accountKit'] | null>(null);
+const accountKit = ref<Awaited<ReturnType<typeof sessionStore.reissueAccountKit>> | null>(null);
 const acknowledged = ref(false);
 const downloadAttempted = ref(false);
 const busy = ref(false);
@@ -23,11 +21,7 @@ const hint = ref('');
 const finishDisabled = computed(() => !acknowledged.value || !downloadAttempted.value || busy.value);
 
 async function loadAccountKit() {
-  const username = sessionStore.state.username;
-  const record = username
-    ? await trustedLocalStateStore.load(username)
-    : await trustedLocalStateStore.loadFirst();
-  accountKit.value = record?.accountKit ?? null;
+  accountKit.value = await sessionStore.reissueAccountKit();
 }
 
 function triggerJsonDownload(payload: object, filename: string) {
@@ -89,9 +83,20 @@ async function finishInitialization() {
 }
 
 onMounted(async () => {
-  await loadAccountKit();
-  if (!accountKit.value) {
-    errorMessage.value = 'Account Kit context is unavailable for checkpoint completion.';
+  if (sessionStore.state.phase === 'local_unlock_required') {
+    await router.replace('/unlock?next=/bootstrap/checkpoint');
+    return;
+  }
+
+  if (sessionStore.state.phase !== 'ready') {
+    errorMessage.value = 'Unlock your owner session before finishing initialization.';
+    return;
+  }
+
+  try {
+    await loadAccountKit();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error);
   }
 });
 </script>

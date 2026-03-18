@@ -269,6 +269,11 @@ describe('createSessionStore', () => {
 
     expect(dependencies.authClient.completeOnboarding).toHaveBeenCalledTimes(1);
     expect(dependencies.trustedLocalStateStore.save).toHaveBeenCalledTimes(1);
+    const persisted = dependencies.trustedLocalStateStore.save.mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(persisted).toBeDefined();
+    expect(persisted).not.toHaveProperty('accountKit');
     expect(store.state.phase).toBe('ready');
   });
 
@@ -323,5 +328,73 @@ describe('createSessionStore', () => {
       }),
     ).rejects.toThrow('Account Kit deployment mismatch');
     expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
+  });
+
+  test('bootstrapDevice persists sanitized trusted local state without accountKit', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.verifyAccountKit.mockResolvedValue({
+      status: 'valid',
+    });
+    dependencies.authClient.bootstrapDevice.mockResolvedValue({
+      ok: true,
+      sessionId: 'session_bootstrap_1',
+      csrfToken: 'csrf_bootstrap_1',
+      authSalt: 'A'.repeat(22),
+      encryptedAccountBundle: 'bundle_bootstrap_1',
+      accountKeyWrapped: 'wrapped_bootstrap_1',
+      user: {
+        userId: 'user_1',
+        username: 'alice',
+        role: 'user',
+        lifecycleState: 'active',
+      },
+      device: {
+        deviceId: 'device_bootstrap_1',
+        deviceName: 'Recovered Browser',
+        platform: 'web',
+      },
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await store.bootstrapDevice({
+      username: 'alice',
+      password: 'correct-password',
+      deviceName: 'Recovered Browser',
+      accountKitJson: JSON.stringify({
+        payload: {
+          version: 'account-kit.v1',
+          serverUrl: 'https://vaultlite.example.com',
+          username: 'alice',
+          accountKey: 'A'.repeat(43),
+          deploymentFingerprint: 'deployment_fp_v1',
+          issuedAt: '2026-03-15T12:00:00.000Z',
+        },
+        signature: 'signed_payload',
+      }),
+    });
+
+    expect(dependencies.trustedLocalStateStore.save).toHaveBeenCalledTimes(1);
+    const persisted = dependencies.trustedLocalStateStore.save.mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(persisted).toBeDefined();
+    expect(persisted).not.toHaveProperty('accountKit');
+  });
+
+  test('reissueAccountKit returns a fresh signed kit without persisting it into trusted local state', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.reissueAccountKit.mockResolvedValue({
+      signature: 'reissued_signature',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await store.localUnlock({
+      username: 'alice',
+      password: 'correct-password',
+    });
+    const reissued = await store.reissueAccountKit();
+
+    expect(reissued.signature).toBe('reissued_signature');
+    expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
   });
 });

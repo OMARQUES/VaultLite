@@ -400,6 +400,77 @@ describe('VaultShellPage', () => {
     expect(wrapper.find('[data-testid="vault-mobile-favorite-indicator-item_2"]').exists()).toBe(false);
   });
 
+  test('blocks unsafe URL schemes and embedded credentials in item URL opener', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const firstMount = await mountVaultAt('/vault/item/item_1', [
+      {
+        itemId: 'item_1',
+        itemType: 'login',
+        revision: 1,
+        createdAt: '2026-03-15T10:00:00.000Z',
+        updatedAt: '2026-03-15T10:00:00.000Z',
+        payload: {
+          title: 'Unsafe Link',
+          username: 'alice',
+          password: 'secret',
+          urls: ['javascript:alert(1)'],
+          notes: '',
+        },
+      },
+    ]);
+
+    await firstMount.wrapper.get('button[aria-label="Open URL"]').trigger('click');
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(firstMount.wrapper.text()).toContain('Invalid or unsafe URL');
+
+    const secondMount = await mountVaultAt('/vault/item/item_2', [
+      {
+        itemId: 'item_2',
+        itemType: 'login',
+        revision: 1,
+        createdAt: '2026-03-15T10:00:00.000Z',
+        updatedAt: '2026-03-15T10:00:00.000Z',
+        payload: {
+          title: 'Credentials URL',
+          username: 'alice',
+          password: 'secret',
+          urls: ['https://alice:secret@example.com'],
+          notes: '',
+        },
+      },
+    ]);
+    await secondMount.wrapper.get('button[aria-label="Open URL"]').trigger('click');
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(secondMount.wrapper.text()).toContain('Invalid or unsafe URL');
+  });
+
+  test('opens only absolute http/https URLs with noopener,noreferrer', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const { wrapper } = await mountVaultAt('/vault/item/item_1', [
+      {
+        itemId: 'item_1',
+        itemType: 'login',
+        revision: 1,
+        createdAt: '2026-03-15T10:00:00.000Z',
+        updatedAt: '2026-03-15T10:00:00.000Z',
+        payload: {
+          title: 'Safe Link',
+          username: 'alice',
+          password: 'secret',
+          urls: ['https://vaultlite.example.com/login'],
+          notes: '',
+        },
+      },
+    ]);
+
+    await wrapper.get('button[aria-label="Open URL"]').trigger('click');
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://vaultlite.example.com/login',
+      '_blank',
+      'noopener,noreferrer',
+    );
+  });
+
   test('hides default filter summary chips on mobile list when no filters are active', async () => {
     mediaQueryMatches = true;
     installMatchMediaStub();

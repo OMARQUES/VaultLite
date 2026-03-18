@@ -148,6 +148,13 @@ describe('contracts schemas', () => {
         updatedAt: '2026-03-15T12:00:00.000Z',
       }).success,
     ).toBe(true);
+
+    expect(
+      VaultItemCreateInputSchema.safeParse({
+        itemType: 'login',
+        encryptedPayload: 'A'.repeat(256 * 1024 + 1),
+      }).success,
+    ).toBe(false);
   });
 
   it('validates attachment upload lifecycle contracts', () => {
@@ -159,6 +166,15 @@ describe('contracts schemas', () => {
         idempotencyKey: 'idem_1',
       }).success,
     ).toBe(true);
+
+    expect(
+      AttachmentUploadInitInputSchema.safeParse({
+        itemId: 'item_doc_1',
+        contentType: 'application/pdf',
+        size: 25 * 1024 * 1024 + 1,
+        idempotencyKey: 'idem_2',
+      }).success,
+    ).toBe(false);
 
     expect(
       AttachmentUploadContentInputSchema.safeParse({

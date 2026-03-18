@@ -49,15 +49,19 @@
 
 ### Browser compromise or XSS-capable client bug
 - Risk: attacker gains script-level access to the app runtime.
-- Required response: CSP baseline, secure session posture, no auth or session secrets in LocalStorage, minimize sensitive in-memory lifetime.
+- Required response: CSP baseline, secure session posture, no auth or session secrets in LocalStorage, URL scheme guardrails for external navigation, minimize sensitive in-memory lifetime.
 
 ### Local storage leakage
 - Risk: unintended local persistence of sensitive state.
-- Required response: allowlist-based local storage policy, explicit prohibitions, wipe behavior, and lock-state rules.
+- Required response: allowlist-based local storage policy, explicit prohibitions (`accountKey` and Account Kit payloads are forbidden at rest), wipe behavior, and lock-state rules.
 
 ### Auth endpoint abuse and guessing pressure
 - Risk: brute force, credential stuffing, or user enumeration.
-- Required response: rate limiting, generic failure behavior, anti-enumeration posture, explicit session model.
+- Required response: bounded windowed rate limiting on both `remote authentication` and device-bootstrap paths, generic failure behavior, anti-enumeration posture, explicit session model.
+
+### Oversized payload and upload abuse
+- Risk: memory pressure, parser abuse, and cost amplification through oversized request bodies.
+- Required response: explicit ceilings at HTTP body handling, schema validation, and upload-envelope semantic validation.
 
 ### Cookie theft, session fixation, and CSRF
 - Risk: session misuse in the browser surface.
@@ -81,3 +85,4 @@
 - Account Kit is bootstrap-critical and must be authenticated strongly
 - session security is part of the design gate, not release-only polish
 - lifecycle operations are security-relevant because they affect sessions and trusted devices
+- production runtime must fail closed when critical security preconditions are missing

@@ -28,6 +28,9 @@ import {
   BootstrapVerifyOutputSchema,
   CanonicalResultSchema,
   GenericAuthFailureSchema,
+  MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
+  MAX_ATTACHMENT_UPLOAD_SIZE_BYTES,
+  MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
   OnboardingAccountKitSignInputSchema,
   OnboardingCompleteInputSchema,
   RecentReauthInputSchema,
@@ -65,6 +68,7 @@ import {
 } from '@vaultlite/cloudflare-runtime';
 import { Hono } from 'hono';
 import { createHash, createHmac, timingSafeEqual, type KeyObject } from 'node:crypto';
+import { ZodError } from 'zod';
 
 const GENERIC_INVALID_CREDENTIALS = GenericAuthFailureSchema.parse({
   ok: false,
@@ -76,6 +80,7 @@ interface VaultLiteApiOptions {
   storage: VaultLiteStorage;
   clock: Clock;
   idGenerator: IdGenerator;
+  runtimeMode: 'development' | 'test' | 'production';
   deploymentFingerprint: string;
   serverUrl: string;
   bootstrapAdminToken: string;
@@ -97,6 +102,12 @@ const VERIFY_TOKEN_TTL_SECONDS = 10 * 60;
 const RECENT_REAUTH_TTL_SECONDS = 5 * 60;
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 const BOOTSTRAP_VERIFY_ATTEMPT_LIMIT = 20;
+const BOOTSTRAP_VERIFY_WINDOW_SECONDS = 5 * 60;
+const AUTH_RATE_LIMIT_ATTEMPT_LIMIT = 5;
+const AUTH_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
+const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
+const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
+const ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES = MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES;
 
 function isoNow(clock: Clock): string {
   return clock.now().toISOString();
@@ -166,6 +177,18 @@ function resolveOnboardingLinkBaseUrl(input: {
   }
 }
 
+function resolveRequestIp(request: Request): string {
+  return (
+    request.headers.get('cf-connecting-ip') ??
+    request.headers.get('x-forwarded-for') ??
+    'unknown'
+  );
+}
+
+function toSubjectHash(value: string): string {
+  return sha256Base64Url(value.trim().toLowerCase());
+}
+
 function toCanonicalResult(value: CanonicalResult): CanonicalResult {
   return CanonicalResultSchema.parse(value);
 }
@@ -186,6 +209,110 @@ function addSeconds(isoValue: string, seconds: number): string {
 
 function parseIsoTimestamp(isoValue: string): number {
   return new Date(isoValue).getTime();
+}
+
+function resolveServerUrlProtocol(serverUrl: string): string {
+  try {
+    return new URL(serverUrl).protocol;
+  } catch {
+    return '';
+  }
+}
+
+function isContentLengthAboveLimit(request: Request, maxBytes: number): boolean {
+  const raw = request.headers.get('content-length');
+  if (!raw) {
+    return false;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return false;
+  }
+  return parsed > maxBytes;
+}
+
+async function readBodyWithLimit(request: Request, maxBytes: number): Promise<string> {
+  if (!request.body) {
+    return '';
+  }
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let output = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new Error('body_limit_exceeded');
+    }
+    output += decoder.decode(value, { stream: true });
+  }
+
+  output += decoder.decode();
+  return output;
+}
+
+async function parseJsonBodyWithLimit<T>(input: {
+  request: Request;
+  maxBytes: number;
+  tooLargeCode: string;
+}): Promise<{ ok: true; body: T } | { ok: false; response: Response }> {
+  if (isContentLengthAboveLimit(input.request, input.maxBytes)) {
+    return {
+      ok: false,
+      response: jsonResponse(413, {
+        ok: false,
+        code: input.tooLargeCode,
+      }),
+    };
+  }
+
+  let text = '';
+  try {
+    text = await readBodyWithLimit(input.request, input.maxBytes);
+  } catch {
+    return {
+      ok: false,
+      response: jsonResponse(413, {
+        ok: false,
+        code: input.tooLargeCode,
+      }),
+    };
+  }
+
+  try {
+    return {
+      ok: true,
+      body: JSON.parse(text) as T,
+    };
+  } catch {
+    return {
+      ok: false,
+      response: jsonResponse(400, {
+        ok: false,
+        code: 'invalid_input',
+      }),
+    };
+  }
+}
+
+function hasTooBigIssue(error: ZodError, pathKey: string): boolean {
+  return error.issues.some((issue) => issue.code === 'too_big' && issue.path.join('.') === pathKey);
+}
+
+function base64UrlDecodedByteLength(value: string): number | null {
+  try {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    return atob(padded).length;
+  } catch {
+    return null;
+  }
 }
 
 function createBootstrapVerificationToken(input: {
@@ -390,7 +517,12 @@ function toAttachmentUploadRecord(record: {
 
 function addSecurityHeaders(response: Response): Response {
   const headers = createDefaultSecurityHeaders(
-    "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    {
+      cspValue:
+        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+      includeHsts: false,
+      noStore: true,
+    },
   );
 
   headers.forEach((value, key) => {
@@ -559,6 +691,23 @@ function inviteStatus(input: {
 
 export function createVaultLiteApi(options: VaultLiteApiOptions) {
   const app = new Hono();
+  const includeHsts =
+    options.runtimeMode === 'production' && resolveServerUrlProtocol(options.serverUrl) === 'https:';
+
+  app.use('*', async (c, next) => {
+    await next();
+    if (includeHsts) {
+      c.res.headers.set('strict-transport-security', 'max-age=31536000; includeSubDomains');
+    }
+  });
+
+  app.onError((error) => {
+    if (error instanceof ZodError) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    return jsonResponse(500, { ok: false, code: 'internal_error' });
+  });
+
   const csrfValidator =
     options.csrfValidator ??
     ({
@@ -651,15 +800,17 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       });
     }
 
-    const ip =
-      c.req.header('cf-connecting-ip') ??
-      c.req.header('x-forwarded-for') ??
-      'unknown';
-    const globalRate = await options.storage.authRateLimits.increment(
-      'bootstrap-verify:global',
+    const ip = resolveRequestIp(c.req.raw);
+    const globalRate = await options.storage.authRateLimits.increment({
+      key: 'bootstrap-verify:global',
       nowIso,
-    );
-    const ipRate = await options.storage.authRateLimits.increment(`bootstrap-verify:ip:${ip}`, nowIso);
+      windowSeconds: BOOTSTRAP_VERIFY_WINDOW_SECONDS,
+    });
+    const ipRate = await options.storage.authRateLimits.increment({
+      key: `bootstrap-verify:ip:${ip}`,
+      nowIso,
+      windowSeconds: BOOTSTRAP_VERIFY_WINDOW_SECONDS,
+    });
     if (
       globalRate.attemptCount > BOOTSTRAP_VERIFY_ATTEMPT_LIMIT ||
       ipRate.attemptCount > BOOTSTRAP_VERIFY_ATTEMPT_LIMIT
@@ -1838,9 +1989,36 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
 
     const input = RemoteAuthenticationInputSchema.parse(await c.req.json());
-    const rateLimitKey = `remote-auth:${input.username}`;
-    const rateLimit = await options.storage.authRateLimits.increment(rateLimitKey, isoNow(options.clock));
-    if (rateLimit.attemptCount > 5) {
+    const nowIso = isoNow(options.clock);
+    const ip = resolveRequestIp(c.req.raw);
+    const subjectHash = toSubjectHash(input.username);
+    const scopeKeys = {
+      ip: `remote-auth:ip:${ip}`,
+      subject: `remote-auth:subject:${subjectHash}`,
+      burst: `remote-auth:ip-subject:${ip}:${subjectHash}`,
+    };
+    const [ipRate, subjectRate, burstRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.ip,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.subject,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.burst,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      ipRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT ||
+      subjectRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT ||
+      burstRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT
+    ) {
       return jsonResponse(429, { ok: false, code: 'rate_limited' });
     }
 
@@ -1859,7 +2037,10 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(401, GENERIC_INVALID_CREDENTIALS);
     }
 
-    await options.storage.authRateLimits.reset(rateLimitKey);
+    await Promise.all([
+      options.storage.authRateLimits.reset(scopeKeys.subject),
+      options.storage.authRateLimits.reset(scopeKeys.burst),
+    ]);
     const session = await issueTrustedSession({
       storage: options.storage,
       clock: options.clock,
@@ -1955,12 +2136,48 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(400, { ok: false, code: 'invalid_input' });
     }
 
+    const nowIso = isoNow(options.clock);
+    const ip = resolveRequestIp(c.req.raw);
+    const subjectHash = toSubjectHash(input.username);
+    const scopeKeys = {
+      ip: `device-bootstrap:ip:${ip}`,
+      subject: `device-bootstrap:subject:${subjectHash}`,
+      burst: `device-bootstrap:ip-subject:${ip}:${subjectHash}`,
+    };
+    const [ipRate, subjectRate, burstRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.ip,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.subject,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: scopeKeys.burst,
+        nowIso,
+        windowSeconds: AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      ipRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT ||
+      subjectRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT ||
+      burstRate.attemptCount > AUTH_RATE_LIMIT_ATTEMPT_LIMIT
+    ) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
+
     const user = await options.storage.users.findByUsername(input.username);
     if (!user || user.lifecycleState !== 'active' || user.authVerifier !== input.authProof) {
       return jsonResponse(401, GENERIC_INVALID_CREDENTIALS);
     }
 
-    const nowIso = isoNow(options.clock);
+    await Promise.all([
+      options.storage.authRateLimits.reset(scopeKeys.subject),
+      options.storage.authRateLimits.reset(scopeKeys.burst),
+    ]);
     const device = await options.storage.devices.register({
       userId: user.userId,
       deviceId: options.idGenerator.nextId('device'),
@@ -2129,7 +2346,22 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
-    const input = VaultItemCreateInputSchema.parse(await c.req.json());
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_ITEM_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultItemCreateInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedPayload')) {
+        return jsonResponse(413, { ok: false, code: 'payload_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
     const nowIso = isoNow(options.clock);
     const item = await options.storage.vaultItems.create({
       itemId: options.idGenerator.nextId('item'),
@@ -2163,7 +2395,22 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
-    const input = VaultItemUpdateInputSchema.parse(await c.req.json());
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_ITEM_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultItemUpdateInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedPayload')) {
+        return jsonResponse(413, { ok: false, code: 'payload_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
 
     try {
       const item = await options.storage.vaultItems.update({
@@ -2227,7 +2474,22 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
-    const input = AttachmentUploadInitInputSchema.parse(await c.req.json());
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: ATTACHMENT_INIT_BODY_LIMIT_BYTES,
+      tooLargeCode: 'attachment_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = AttachmentUploadInitInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'size')) {
+        return jsonResponse(413, { ok: false, code: 'attachment_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
     const item = await options.storage.vaultItems.findByItemId(input.itemId, sessionContext.user.userId);
     if (!item) {
       return jsonResponse(404, { ok: false, code: 'item_not_found' });
@@ -2284,7 +2546,22 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
-    const input = AttachmentUploadContentInputSchema.parse(await c.req.json());
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES,
+      tooLargeCode: 'upload_envelope_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = AttachmentUploadContentInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedEnvelope')) {
+        return jsonResponse(413, { ok: false, code: 'upload_envelope_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
     const uploadId = c.req.param('uploadId');
     const record = await options.storage.attachmentBlobs.get(uploadId);
     if (!record || record.ownerUserId !== sessionContext.user.userId) {
@@ -2313,9 +2590,12 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (!envelope.success) {
       return jsonResponse(400, { ok: false, code: 'attachment_envelope_invalid' });
     }
+    const ciphertextByteLength = base64UrlDecodedByteLength(envelope.data.ciphertext);
     if (
       envelope.data.contentType !== record.contentType ||
-      envelope.data.originalSize !== record.size
+      envelope.data.originalSize !== record.size ||
+      ciphertextByteLength === null ||
+      ciphertextByteLength !== record.size
     ) {
       return jsonResponse(400, { ok: false, code: 'attachment_envelope_mismatch' });
     }

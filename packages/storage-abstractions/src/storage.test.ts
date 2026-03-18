@@ -205,4 +205,31 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(completed.changed).toBe(true);
     expect(completed.state.bootstrapState).toBe('INITIALIZED');
   });
+
+  test('applies windowed auth rate limits with deterministic cooldown reset', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    const first = await storage.authRateLimits.increment({
+      key: 'remote-auth:alice',
+      nowIso: '2026-03-15T12:00:00.000Z',
+      windowSeconds: 300,
+    });
+    expect(first.attemptCount).toBe(1);
+    expect(first.windowStartedAt).toBe('2026-03-15T12:00:00.000Z');
+
+    const second = await storage.authRateLimits.increment({
+      key: 'remote-auth:alice',
+      nowIso: '2026-03-15T12:01:00.000Z',
+      windowSeconds: 300,
+    });
+    expect(second.attemptCount).toBe(2);
+    expect(second.windowStartedAt).toBe('2026-03-15T12:00:00.000Z');
+
+    const postCooldown = await storage.authRateLimits.increment({
+      key: 'remote-auth:alice',
+      nowIso: '2026-03-15T12:06:01.000Z',
+      windowSeconds: 300,
+    });
+    expect(postCooldown.attemptCount).toBe(1);
+    expect(postCooldown.windowStartedAt).toBe('2026-03-15T12:06:01.000Z');
+  });
 });

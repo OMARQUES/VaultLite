@@ -4,6 +4,7 @@ compatibility_date = "2026-03-15"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
+VAULTLITE_RUNTIME_MODE = "development"
 VAULTLITE_SERVER_URL = "http://127.0.0.1:8787"
 VAULTLITE_DEPLOYMENT_FINGERPRINT = "development_deployment"
 VAULTLITE_BOOTSTRAP_ADMIN_TOKEN = "development-bootstrap-admin-token"

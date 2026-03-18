@@ -1,13 +1,18 @@
 import { generateAccountKitKeyPair } from '@vaultlite/crypto/account-kit';
 import { toBase64Url } from '@vaultlite/crypto/base64';
-import { FixedClock, createTestStorage } from '@vaultlite/test-utils';
+import type { Clock } from '@vaultlite/runtime-abstractions';
+import { createTestStorage } from '@vaultlite/test-utils';
 import { createHash } from 'node:crypto';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import { createVaultLiteApi } from './app';
 
 function sha256Base64Url(value: string): string {
   return toBase64Url(createHash('sha256').update(value).digest());
+}
+
+function toBase64UrlUtf8(value: string): string {
+  return toBase64Url(new TextEncoder().encode(value));
 }
 
 class IncrementingIdGenerator {
@@ -16,6 +21,18 @@ class IncrementingIdGenerator {
   nextId(prefix: string): string {
     this.counter += 1;
     return `${prefix}_${this.counter}`;
+  }
+}
+
+class AdjustableClock implements Clock {
+  constructor(private current: Date) {}
+
+  now(): Date {
+    return new Date(this.current);
+  }
+
+  setNow(next: Date): void {
+    this.current = new Date(next);
   }
 }
 
@@ -33,9 +50,9 @@ function getCookieValue(setCookies: string[], cookieName: string): string {
   throw new Error(`Missing cookie ${cookieName}`);
 }
 
-async function createAppFixture() {
+async function createAppFixture(startAt = '2026-03-17T12:00:00.000Z') {
   const storage = createTestStorage();
-  const clock = new FixedClock(new Date('2026-03-17T12:00:00.000Z'));
+  const clock = new AdjustableClock(new Date(startAt));
   const idGenerator = new IncrementingIdGenerator();
   const accountKitKeys = generateAccountKitKeyPair();
 
@@ -43,6 +60,7 @@ async function createAppFixture() {
     storage,
     clock,
     idGenerator,
+    runtimeMode: 'test',
     deploymentFingerprint: 'deployment_fp_v1',
     serverUrl: 'https://vaultlite.example.com',
     bootstrapAdminToken: 'bootstrap-secret',
@@ -51,7 +69,7 @@ async function createAppFixture() {
     accountKitPublicKey: accountKitKeys.publicKey,
   });
 
-  return { app, storage };
+  return { app, storage, clock };
 }
 
 async function initializeDeployment(app: ReturnType<typeof createVaultLiteApi>) {
@@ -79,6 +97,7 @@ async function initializeDeployment(app: ReturnType<typeof createVaultLiteApi>) 
       initialDevicePlatform: 'web',
     }),
   });
+  const initializePayload = (await initializeResponse.json()) as { user: { userId: string } };
   const setCookies = initializeResponse.headers.getSetCookie();
   const ownerCookies = cookieHeaderFromSetCookie(setCookies);
   const ownerCsrf = getCookieValue(setCookies, 'vl_csrf');
@@ -112,6 +131,12 @@ async function initializeDeployment(app: ReturnType<typeof createVaultLiteApi>) 
     },
     body: JSON.stringify({ confirmSavedOutsideBrowser: true }),
   });
+
+  return {
+    ownerCookies,
+    ownerCsrf,
+    ownerUserId: initializePayload.user.userId,
+  };
 }
 
 describe('createVaultLiteApi', () => {
@@ -260,5 +285,369 @@ describe('createVaultLiteApi', () => {
         platform: 'web',
       },
     });
+  });
+
+  test('enforces bounded rate limiting for remote authentication and unlocks after cooldown', async () => {
+    const { app, storage, clock } = await createAppFixture();
+    await initializeDeployment(app);
+
+    await storage.users.create({
+      userId: 'user_3',
+      username: 'charlie',
+      role: 'user',
+      authSalt: 'C'.repeat(22),
+      authVerifier: 'charlie-proof',
+      encryptedAccountBundle: 'bundle_payload_charlie',
+      accountKeyWrapped: 'wrapped_payload_charlie',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_charlie_1',
+      userId: 'user_3',
+      deviceName: 'Charlie Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      revokedAt: null,
+    });
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const response = await app.request('/api/auth/remote-authentication/complete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          username: 'charlie',
+          deviceId: 'device_charlie_1',
+          authProof: 'wrong-proof',
+        }),
+      });
+      expect(response.status).toBe(401);
+    }
+
+    const blocked = await app.request('/api/auth/remote-authentication/complete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        username: 'charlie',
+        deviceId: 'device_charlie_1',
+        authProof: 'wrong-proof',
+      }),
+    });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({
+      ok: false,
+      code: 'rate_limited',
+    });
+
+    clock.setNow(new Date('2026-03-17T12:06:10.000Z'));
+    const postCooldown = await app.request('/api/auth/remote-authentication/complete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        username: 'charlie',
+        deviceId: 'device_charlie_1',
+        authProof: 'wrong-proof',
+      }),
+    });
+    expect(postCooldown.status).toBe(401);
+  });
+
+  test('applies rate limiting to device bootstrap and returns generic anti-enumeration-safe response', async () => {
+    const { app, clock } = await createAppFixture();
+    await initializeDeployment(app);
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const response = await app.request('/api/auth/devices/bootstrap', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.8',
+        },
+        body: JSON.stringify({
+          username: 'owner',
+          authProof: 'invalid-proof',
+          deviceName: 'Recovered Browser',
+          devicePlatform: 'web',
+        }),
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        ok: false,
+        code: 'invalid_credentials',
+        message: 'Invalid credentials',
+      });
+    }
+
+    const blocked = await app.request('/api/auth/devices/bootstrap', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.8',
+      },
+      body: JSON.stringify({
+        username: 'owner',
+        authProof: 'invalid-proof',
+        deviceName: 'Recovered Browser',
+        devicePlatform: 'web',
+      }),
+    });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({
+      ok: false,
+      code: 'rate_limited',
+    });
+
+    clock.setNow(new Date('2026-03-17T12:06:10.000Z'));
+    const postCooldown = await app.request('/api/auth/devices/bootstrap', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.8',
+      },
+      body: JSON.stringify({
+        username: 'owner',
+        authProof: 'invalid-proof',
+        deviceName: 'Recovered Browser',
+        devicePlatform: 'web',
+      }),
+    });
+    expect(postCooldown.status).toBe(401);
+  });
+
+  test('rejects vault item payloads above 256KB', async () => {
+    const { app } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    const oversizedPayload = 'A'.repeat(256 * 1024 + 1);
+    const response = await app.request('/api/vault/items', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: oversizedPayload,
+      }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'payload_too_large',
+    });
+  });
+
+  test('rejects attachment init requests above 25MB', async () => {
+    const { app, storage } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    await storage.vaultItems.create({
+      itemId: 'item_doc_1',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_1',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+
+    const response = await app.request('/api/attachments/uploads/init', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemId: 'item_doc_1',
+        contentType: 'application/pdf',
+        size: 25 * 1024 * 1024 + 1,
+        idempotencyKey: 'idem-attachment-size-limit',
+      }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'attachment_too_large',
+    });
+  });
+
+  test('rejects attachment uploads when envelope metadata does not match declared size', async () => {
+    const { app, storage } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    await storage.vaultItems.create({
+      itemId: 'item_doc_2',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_2',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+
+    const initResponse = await app.request('/api/attachments/uploads/init', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemId: 'item_doc_2',
+        contentType: 'application/pdf',
+        size: 10,
+        idempotencyKey: 'idem-attachment-envelope-mismatch',
+      }),
+    });
+    const initPayload = (await initResponse.json()) as { uploadId: string; uploadToken: string };
+
+    const envelope = {
+      version: 'blob.v1',
+      algorithm: 'aes-256-gcm',
+      nonce: toBase64UrlUtf8('nonce-value'),
+      ciphertext: toBase64UrlUtf8('12345'),
+      authTag: toBase64UrlUtf8('tag-value'),
+      contentType: 'application/pdf',
+      originalSize: 10,
+    };
+
+    const uploadResponse = await app.request(`/api/attachments/uploads/${initPayload.uploadId}/content`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        uploadToken: initPayload.uploadToken,
+        encryptedEnvelope: toBase64UrlUtf8(JSON.stringify(envelope)),
+      }),
+    });
+
+    expect(uploadResponse.status).toBe(400);
+    expect(await uploadResponse.json()).toEqual({
+      ok: false,
+      code: 'attachment_envelope_mismatch',
+    });
+  });
+
+  test('rejects oversized attachment envelope request body', async () => {
+    const { app, storage } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    await storage.vaultItems.create({
+      itemId: 'item_doc_3',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_3',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+
+    const initResponse = await app.request('/api/attachments/uploads/init', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemId: 'item_doc_3',
+        contentType: 'application/pdf',
+        size: 10,
+        idempotencyKey: 'idem-attachment-envelope-too-large',
+      }),
+    });
+    const initPayload = (await initResponse.json()) as { uploadId: string; uploadToken: string };
+
+    const oversizedRequest = new Request(
+      `http://localhost/api/attachments/uploads/${initPayload.uploadId}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          cookie: ownerCookies,
+          'x-csrf-token': ownerCsrf,
+          'content-length': String(100 * 1024 * 1024),
+        },
+        body: JSON.stringify({
+          uploadToken: initPayload.uploadToken,
+          encryptedEnvelope: toBase64UrlUtf8('tiny'),
+        }),
+      },
+    );
+
+    const response = await app.fetch(oversizedRequest);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'upload_envelope_too_large',
+    });
+  });
+
+  test('applies security header baseline on 2xx/4xx/5xx and only applies HSTS in production over https', async () => {
+    const { app, storage, clock } = await createAppFixture();
+
+    const success = await app.request('/api/runtime/metadata');
+    expect(success.status).toBe(200);
+    expect(success.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(success.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(success.headers.get('x-frame-options')).toBe('DENY');
+    expect(success.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(success.headers.get('permissions-policy')).toContain('camera=()');
+    expect(success.headers.get('cache-control')).toBe('no-store');
+    expect(success.headers.get('strict-transport-security')).toBeNull();
+
+    const notFound = await app.request('/api/does-not-exist');
+    expect(notFound.status).toBe(404);
+    expect(notFound.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(notFound.headers.get('cache-control')).toBe('no-store');
+
+    const failingStorage = storage;
+    const failingKeys = generateAccountKitKeyPair();
+    vi.spyOn(failingStorage.deploymentState, 'get').mockRejectedValueOnce(new Error('boom'));
+    const failingApp = createVaultLiteApi({
+      storage: failingStorage,
+      clock,
+      idGenerator: new IncrementingIdGenerator(),
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: failingKeys.privateKey,
+      accountKitPublicKey: failingKeys.publicKey,
+    });
+
+    const serverError = await failingApp.request('/api/bootstrap/state');
+    expect(serverError.status).toBe(500);
+    expect(serverError.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(serverError.headers.get('cache-control')).toBe('no-store');
+
+    const productionKeys = generateAccountKitKeyPair();
+    const productionApp = createVaultLiteApi({
+      storage: createTestStorage(),
+      clock,
+      idGenerator: new IncrementingIdGenerator(),
+      runtimeMode: 'production',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret-that-is-strong-enough',
+      secureCookies: true,
+      accountKitPrivateKey: productionKeys.privateKey,
+      accountKitPublicKey: productionKeys.publicKey,
+    });
+
+    const productionResponse = await productionApp.request('/api/runtime/metadata');
+    expect(productionResponse.status).toBe(200);
+    expect(productionResponse.headers.get('strict-transport-security')).toContain('max-age=');
   });
 });

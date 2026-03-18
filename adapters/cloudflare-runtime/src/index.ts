@@ -90,13 +90,24 @@ export function createSessionCookieBundle(input: {
   };
 }
 
-export function createDefaultSecurityHeaders(cspValue: string): Headers {
+export function createDefaultSecurityHeaders(input: {
+  cspValue: string;
+  includeHsts?: boolean;
+  noStore?: boolean;
+}): Headers {
   const headers = new Headers();
-  headers.set('content-security-policy', cspValue);
+  headers.set('content-security-policy', input.cspValue);
   headers.set('referrer-policy', 'no-referrer');
   headers.set('x-content-type-options', 'nosniff');
   headers.set('x-frame-options', 'DENY');
+  headers.set('permissions-policy', 'camera=(), microphone=(), geolocation=()');
   headers.set('cross-origin-opener-policy', 'same-origin');
   headers.set('cross-origin-resource-policy', 'same-origin');
+  if (input.noStore) {
+    headers.set('cache-control', 'no-store');
+  }
+  if (input.includeHsts) {
+    headers.set('strict-transport-security', 'max-age=31536000; includeSubDomains');
+  }
   return headers;
 }

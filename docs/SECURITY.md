@@ -40,7 +40,36 @@ Account Kit must:
 - Allowed local state must be defined by ADR 0006.
 - IndexedDB may hold only approved encrypted or non-sensitive local state.
 - LocalStorage must not contain auth/session secrets or other forbidden state.
+- Trusted local state must not persist `accountKey` or Account Kit payloads containing `accountKey`.
+- Only encrypted `localUnlockEnvelope` is allowed for local unlock continuity.
 - Auto-lock and secret wipe behavior are mandatory parts of the design.
+
+## Runtime fail-closed constraints
+- `VAULTLITE_RUNTIME_MODE` is mandatory and must be explicit (`development`, `test`, `production`).
+- Production runtime must fail closed when bootstrap token posture is weak or default.
+- Production runtime must fail closed when Account Kit signing keypair is missing.
+- Production runtime must fail closed when distributed storage bindings are missing.
+
+## Abuse-resistance constraints
+- Authentication abuse limits are bounded to deterministic windows (`5 attempts / 5 minutes` for auth-critical paths).
+- Rate-limited responses remain anti-enumeration safe.
+- Successful authentication resets only scoped counters; IP burst counters are retained.
+
+## Input size ceilings
+- Vault item encrypted payload is capped at `256KB`.
+- Attachment init declared size is capped at `25MB`.
+- Attachment upload envelope request body is capped with explicit server-side cutoff.
+- Upload validation must reject envelope metadata that does not match declared attachment size.
+
+## Security header baseline
+- API responses must emit baseline headers on success and error paths:
+  - `content-security-policy`
+  - `x-content-type-options`
+  - `x-frame-options`
+  - `referrer-policy`
+  - `permissions-policy`
+  - `cache-control: no-store`
+- HSTS is applied only when runtime mode is `production` and configured `serverUrl` uses HTTPS.
 
 ## Search constraints
 - Search is local-only.

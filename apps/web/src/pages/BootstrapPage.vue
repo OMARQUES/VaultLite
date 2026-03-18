@@ -79,17 +79,6 @@ async function initializeOwner() {
       initialDevicePlatform: 'web',
     });
 
-    const accountKitPayload = {
-      version: 'account-kit.v1' as const,
-      serverUrl: metadata.serverUrl,
-      username: form.username,
-      accountKey,
-      deploymentFingerprint: metadata.deploymentFingerprint,
-      issuedAt: new Date().toISOString(),
-    };
-    const signed = await authClient.signAccountKit({
-      payload: accountKitPayload,
-    });
     const localUnlockEnvelope = await createLocalUnlockEnvelope({
       password: form.password,
       authSalt,
@@ -109,16 +98,16 @@ async function initializeOwner() {
       encryptedAccountBundle,
       accountKeyWrapped,
       localUnlockEnvelope,
-      accountKit: {
-        payload: accountKitPayload,
-        signature: signed.signature,
-      },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
 
-    form.password = '';
     await sessionStore.restoreSession();
+    await sessionStore.localUnlock({
+      username: ownerSession.user.username,
+      password: form.password,
+    });
+    form.password = '';
     await router.push('/bootstrap/checkpoint');
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);

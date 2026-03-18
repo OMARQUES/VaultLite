@@ -10,6 +10,9 @@ import {
 } from '@vaultlite/domain';
 import {
   accountKeySchema,
+  MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
+  MAX_ATTACHMENT_UPLOAD_SIZE_BYTES,
+  MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
   base64UrlSchema,
   encryptedPayloadSchema,
   isoDatetimeSchema,
@@ -358,13 +361,19 @@ export const VaultItemListOutputSchema = z
 export const VaultItemCreateInputSchema = z
   .object({
     itemType: VaultItemTypeSchema,
-    encryptedPayload: encryptedPayloadSchema,
+    encryptedPayload: encryptedPayloadSchema.max(
+      MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
+      'Vault item payload exceeds maximum size',
+    ),
   })
   .strict();
 export const VaultItemUpdateInputSchema = z
   .object({
     itemType: VaultItemTypeSchema,
-    encryptedPayload: encryptedPayloadSchema,
+    encryptedPayload: encryptedPayloadSchema.max(
+      MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
+      'Vault item payload exceeds maximum size',
+    ),
     expectedRevision: z.number().int().positive(),
   })
   .strict();
@@ -373,7 +382,7 @@ export const AttachmentUploadInitInputSchema = z
   .object({
     itemId: z.string().min(1),
     contentType: z.string().min(1),
-    size: z.number().int().positive(),
+    size: z.number().int().positive().max(MAX_ATTACHMENT_UPLOAD_SIZE_BYTES),
     idempotencyKey: z.string().min(1),
   })
   .strict();
@@ -381,7 +390,10 @@ export const AttachmentUploadInitInputSchema = z
 export const AttachmentUploadContentInputSchema = z
   .object({
     uploadToken: z.string().min(1),
-    encryptedEnvelope: encryptedPayloadSchema,
+    encryptedEnvelope: encryptedPayloadSchema.max(
+      MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
+      'Attachment upload envelope exceeds maximum size',
+    ),
   })
   .strict();
 

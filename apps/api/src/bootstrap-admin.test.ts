@@ -37,6 +37,7 @@ async function createFixture() {
     storage,
     clock,
     idGenerator,
+    runtimeMode: 'test',
     deploymentFingerprint: 'deployment_fp_v1',
     serverUrl: 'https://vaultlite.example.com',
     bootstrapAdminToken: 'bootstrap-secret',

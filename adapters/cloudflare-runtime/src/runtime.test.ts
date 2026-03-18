@@ -25,8 +25,15 @@ describe('cloudflare runtime adapter', () => {
   });
 
   test('creates security headers baseline', () => {
-    const headers = createDefaultSecurityHeaders("default-src 'self'");
+    const headers = createDefaultSecurityHeaders({
+      cspValue: "default-src 'self'",
+      includeHsts: true,
+      noStore: true,
+    });
     expect(headers.get('content-security-policy')).toBe("default-src 'self'");
     expect(headers.get('x-frame-options')).toBe('DENY');
+    expect(headers.get('permissions-policy')).toContain('camera=()');
+    expect(headers.get('strict-transport-security')).toContain('max-age=');
+    expect(headers.get('cache-control')).toBe('no-store');
   });
 });

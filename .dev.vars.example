@@ -1,6 +1,7 @@
 # Optional local overrides for `wrangler dev`.
 # Copy to `.dev.vars` only if you need to override the defaults from `wrangler.toml`.
 
+VAULTLITE_RUNTIME_MODE=development
 VAULTLITE_SERVER_URL=http://127.0.0.1:8787
 VAULTLITE_DEPLOYMENT_FINGERPRINT=development_deployment
 VAULTLITE_BOOTSTRAP_ADMIN_TOKEN=development-bootstrap-admin-token

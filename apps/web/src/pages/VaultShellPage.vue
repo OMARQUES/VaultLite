@@ -1145,8 +1145,20 @@ function openUrl(url: string | undefined) {
   if (!url) {
     return;
   }
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    showToast('Invalid or unsafe URL');
+    return;
+  }
 
-  window.open(url, '_blank', 'noopener,noreferrer');
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
+    showToast('Invalid or unsafe URL');
+    return;
+  }
+
+  window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
 }
 
 function pendingEditorExitTarget(): RouteLocationRaw {

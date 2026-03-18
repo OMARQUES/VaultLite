@@ -245,6 +245,15 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
   ON audit_events (created_at);`,
   },
+  {
+    id: '0006_auth_rate_limit_window_end',
+    filename: '0006_auth_rate_limit_window_end.sql',
+    sql: `ALTER TABLE auth_rate_limits ADD COLUMN window_ends_at TEXT;
+
+UPDATE auth_rate_limits
+SET window_ends_at = window_started_at
+WHERE window_ends_at IS NULL;`,
+  },
 ];
 
 export function getInfrastructureMigrationDirectory(): URL | string {
@@ -750,31 +759,57 @@ class CloudflareSessionRepository implements SessionRepository {
 class CloudflareAuthRateLimitRepository implements AuthRateLimitRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
-  async increment(key: string, nowIso: string): Promise<AuthRateLimitRecord> {
-    const current = await this.get(key);
-    if (!current) {
+  async increment(input: {
+    key: string;
+    nowIso: string;
+    windowSeconds: number;
+  }): Promise<AuthRateLimitRecord> {
+    const current = await this.get(input.key);
+    const nextWindowEndsAt = new Date(
+      Date.parse(input.nowIso) + input.windowSeconds * 1000,
+    ).toISOString();
+    if (!current || current.windowEndsAt <= input.nowIso) {
       await executeOne(
         this.db,
-        `INSERT INTO auth_rate_limits (rate_limit_key, attempt_count, window_started_at)
-         VALUES (?, ?, ?)`,
-        [key, 1, nowIso],
+        `INSERT INTO auth_rate_limits (rate_limit_key, attempt_count, window_started_at, window_ends_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(rate_limit_key)
+         DO UPDATE SET attempt_count = excluded.attempt_count,
+                       window_started_at = excluded.window_started_at,
+                       window_ends_at = excluded.window_ends_at`,
+        [input.key, 1, input.nowIso, nextWindowEndsAt],
       );
-      return { key, attemptCount: 1, windowStartedAt: nowIso };
+      return {
+        key: input.key,
+        attemptCount: 1,
+        windowStartedAt: input.nowIso,
+        windowEndsAt: nextWindowEndsAt,
+      };
     }
 
     const nextAttemptCount = current.attemptCount + 1;
     await executeOne(
       this.db,
-      `UPDATE auth_rate_limits SET attempt_count = ?, window_started_at = ? WHERE rate_limit_key = ?`,
-      [nextAttemptCount, current.windowStartedAt, key],
+      `UPDATE auth_rate_limits
+       SET attempt_count = ?, window_started_at = ?, window_ends_at = ?
+       WHERE rate_limit_key = ?`,
+      [nextAttemptCount, current.windowStartedAt, current.windowEndsAt, input.key],
     );
-    return { key, attemptCount: nextAttemptCount, windowStartedAt: current.windowStartedAt };
+    return {
+      key: input.key,
+      attemptCount: nextAttemptCount,
+      windowStartedAt: current.windowStartedAt,
+      windowEndsAt: current.windowEndsAt,
+    };
   }
 
   async get(key: string): Promise<AuthRateLimitRecord | null> {
     return selectOne<AuthRateLimitRecord>(
       this.db,
-      `SELECT rate_limit_key AS key, attempt_count AS attemptCount, window_started_at AS windowStartedAt
+      `SELECT rate_limit_key AS key,
+              attempt_count AS attemptCount,
+              window_started_at AS windowStartedAt,
+              COALESCE(window_ends_at, window_started_at) AS windowEndsAt
        FROM auth_rate_limits WHERE rate_limit_key = ?`,
       [key],
     );

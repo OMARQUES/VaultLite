@@ -122,10 +122,10 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 ## Current Focus
 
 Active phase: `Phase 9 security hardening`
-Active card: `P9-C06 - Security hardening remediation pack (8 audit findings)`
+Active card: `P9-C01 - Sync service baseline`
 Global gates still blocking sensitive implementation: `none`
-Reason: Full repository security review identified 8 concrete hardening findings with multiple `high`-severity items (auth-abuse and secret posture). These must be remediated and regression-tested before advancing sync and lifecycle expansion in Phase 9.
-Suggested immediate sequence: `P9-C06` -> `P9-C01` -> `P9-C02`.
+Reason: `P9-C06` hardening pack is now implemented and regression-tested; execution can move to sync baseline while preserving the hardened security posture.
+Suggested immediate sequence: `P9-C01` -> `P9-C02` -> `P9-C03`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -216,7 +216,7 @@ Suggested immediate sequence: `P9-C06` -> `P9-C01` -> `P9-C02`.
 - `P9-C03` Device listing — `not_started`
 - `P9-C04` Device revocation — `not_started`
 - `P9-C05` Password rotation atomic flow — `not_started`
-- `P9-C06` Security hardening remediation pack (8 audit findings) — `not_started`
+- `P9-C06` Security hardening remediation pack (8 audit findings) — `done`
 - `P95-C01` User listing and status view — `not_started`
 - `P95-C02` Suspend endpoint and UI — `not_started`
 - `P95-C03` Reactivate endpoint and UI — `not_started`
@@ -1662,7 +1662,7 @@ Suggested next action: carry the stabilized search and delete semantics into the
 Card ID: `P7-C05`
 Title: `Password generator`
 Phase/Epic: `Phase 7 - Vault CRUD and Local Search`
-Status: `not_started`
+Status: `done`
 Priority: `P2`
 Objective: Provide a local password generation utility for login creation flows.
 Description: Build the password generator UI and helper logic used when creating or updating login items.
@@ -2106,6 +2106,16 @@ Evidence required to mark done:
 - Updated security notes in `docs/SECURITY.md` and/or `docs/THREAT_MODEL.md` for changed assumptions (rate-limit windowing, production secret posture, local persistence boundaries).
 - Short closure table in the card notes: `finding -> fix -> test file -> status`.
 Suggested next action: implement in three slices (`auth abuse and runtime fail-closed`, `local persistence and payload ceilings`, `client URL + headers hardening`) with tests committed in the same sequence.
+
+Closure evidence snapshot:
+- Finding 1 (`bootstrap brute-force`) -> rate-limit parity added in `/api/auth/devices/bootstrap` -> `apps/api/src/app.test.ts` (`applies rate limiting to device bootstrap...`) -> `closed`.
+- Finding 2 (`trusted local plaintext-equivalent`) -> trusted local state sanitization + removal of `accountKit` persistence in session flows -> `apps/web/src/lib/trusted-local-state.test.ts`, `apps/web/src/lib/session-store.test.ts` -> `closed`.
+- Finding 3 (`unbounded rate-limit`) -> explicit window contract + storage migration (`window_ends_at`) -> `packages/storage-abstractions/src/storage.test.ts`, `adapters/cloudflare-storage/src/migrations.test.ts` -> `closed`.
+- Finding 4 (`bootstrap token fail-closed`) -> production runtime token validation + explicit runtime mode -> `apps/api/src/runtime-config.test.ts` -> `closed`.
+- Finding 5 (`ephemeral key / in-memory in production`) -> production keypair requirement + distributed-storage enforcement -> `apps/api/src/runtime-config.test.ts`, `apps/api/src/index.test.ts`, `apps/api/src/worker-storage.test.ts` -> `closed`.
+- Finding 6 (`payload/upload ceilings`) -> contract max + API body cutoff + envelope semantic size check -> `packages/contracts/src/schemas.test.ts`, `apps/api/src/app.test.ts` -> `closed`.
+- Finding 7 (`unsafe URL schemes`) -> `http/https` allowlist + userinfo block + secure open flags -> `apps/web/src/pages/VaultShellPage.test.ts` -> `closed`.
+- Finding 8 (`security headers baseline`) -> CSP + permissions-policy + no-store + conditional HSTS + error-path coverage -> `adapters/cloudflare-runtime/src/runtime.test.ts`, `apps/api/src/app.test.ts` -> `closed`.
 
 ## Phase 9.5
 
@@ -2624,6 +2634,7 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-18: Completed `P9-C06` hardening pack end-to-end with fail-closed runtime mode, bounded auth/bootstrap rate limiting, trusted local state sanitization, payload/upload ceilings, client URL scheme guard, expanded security headers baseline, and updated `docs/SECURITY.md` + `docs/THREAT_MODEL.md` with regression coverage.
 - 2026-03-17: Added `P9-C06` as a dedicated `P0` security hardening remediation pack for the 8 audit findings (auth bootstrap anti-abuse, bounded rate-limit windows, production fail-closed token/key posture, local `accountKey` persistence hardening, payload ceilings, URL scheme validation, and security header baseline expansion). Execution order now prioritizes `P9-C06` before sync baseline.
 - 2026-03-17: Repository audit pass completed to align cards with implementation evidence. `P7-C05` was reset from `in_progress` to `not_started` because no password-generator helper/UI/tests are present yet; `P8-C03` to `P8-C06` remain `not_started` and API finalize still returns `attachment_finalize_not_implemented`.
 - 2026-03-16: Completed `P8-C01`, `P8-C02`, and `P8-C07` in one attachment-focused sequence. Added upload-init contracts and API, pending record lifecycle with idempotency and expiry, encrypted client upload using the approved blob envelope, cloudflare-storage migration `0004_attachment_upload_pending`, and document attachment status UX in `/vault` with targeted tests across contracts, storage, API, and web.
@@ -2654,9 +2665,9 @@ Suggested next action: compile the final checklist from implemented verification
 - `2026-03-14`: Browser extension V1 is retrieval and fill-oriented; `save login` is out of scope for the first delivery.
 
 ## Next Cards
-1. `P9-C06` - `Security hardening remediation pack (8 audit findings)`
-       Condition to start: complete mapping table `finding -> fix -> test` and enforce fail-closed production assumptions before sync expansion.
-2. `P9-C01` - `Sync service baseline`
-       Condition to start: `P9-C06` merged and high-severity auth/local-secret findings closed with passing regression tests.
-3. `P9-C02` - `Deterministic conflict handling`
+1. `P9-C01` - `Sync service baseline`
+       Condition to start: `P9-C06` is complete and regression suites are green.
+2. `P9-C02` - `Deterministic conflict handling`
        Condition to start: baseline sync primitives are implemented and validated with two-device convergence tests.
+3. `P9-C03` - `Device listing`
+       Condition to start: `P9-C02` complete with deterministic conflict behavior in place.

@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+export const MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES = 256 * 1024;
+export const MAX_ATTACHMENT_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024;
+export const MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES = 40 * 1024 * 1024;
+
 export const base64UrlSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]+$/, 'Expected a base64url string');

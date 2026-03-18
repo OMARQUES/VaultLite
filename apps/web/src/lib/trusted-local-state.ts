@@ -35,6 +35,20 @@ const DATABASE_NAME = 'vaultlite-trusted-state';
 const STORE_NAME = 'trusted-state';
 const DATABASE_VERSION = 1;
 
+function sanitizeTrustedLocalStateRecord(
+  record: TrustedLocalStateRecord | Record<string, unknown> | null | undefined,
+): TrustedLocalStateRecord | null {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const sanitized = { ...(record as Record<string, unknown>) };
+  // Legacy versions persisted accountKit payloads containing accountKey.
+  delete sanitized.accountKit;
+
+  return sanitized as unknown as TrustedLocalStateRecord;
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
@@ -68,14 +82,29 @@ async function withStore<T>(
 export function createTrustedLocalStateStore(): TrustedLocalStateStore {
   return {
     async save(record) {
-      await withStore('readwrite', (store) => store.put(record));
+      const sanitized = sanitizeTrustedLocalStateRecord(record);
+      if (!sanitized) {
+        return;
+      }
+      await withStore('readwrite', (store) => store.put(sanitized));
     },
     async load(username) {
-      return (await withStore('readonly', (store) => store.get(username))) ?? null;
+      const loaded =
+        (await withStore<TrustedLocalStateRecord | undefined>('readonly', (store) =>
+          store.get(username),
+        )) ?? null;
+      const sanitized = sanitizeTrustedLocalStateRecord(loaded);
+      if (!sanitized) {
+        return null;
+      }
+      if (loaded?.accountKit !== undefined) {
+        await withStore('readwrite', (store) => store.put(sanitized));
+      }
+      return sanitized;
     },
     async loadFirst() {
       const database = await openDatabase();
-      return new Promise((resolve, reject) => {
+      const loaded = await new Promise<TrustedLocalStateRecord | null>((resolve, reject) => {
         const transaction = database.transaction(STORE_NAME, 'readonly');
         const store = transaction.objectStore(STORE_NAME);
         const request = store.openCursor();
@@ -87,6 +116,15 @@ export function createTrustedLocalStateStore(): TrustedLocalStateStore {
         transaction.oncomplete = () => database.close();
         transaction.onerror = () => reject(transaction.error);
       });
+
+      const sanitized = sanitizeTrustedLocalStateRecord(loaded);
+      if (!sanitized) {
+        return null;
+      }
+      if (loaded?.accountKit !== undefined) {
+        await withStore('readwrite', (store) => store.put(sanitized));
+      }
+      return sanitized;
     },
     async clear(username) {
       await withStore('readwrite', (store) => store.delete(username));

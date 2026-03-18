@@ -15,7 +15,11 @@ export interface VaultLiteWorkerBindings extends VaultLiteWorkerEnv {
   VAULTLITE_BLOBS?: R2BucketLike;
 }
 
-export async function createWorkerStorage(env: Partial<VaultLiteWorkerBindings> = {}): Promise<VaultLiteStorage> {
+export async function createWorkerStorage(input: {
+  env?: Partial<VaultLiteWorkerBindings>;
+  runtimeMode: 'development' | 'test' | 'production';
+}): Promise<VaultLiteStorage> {
+  const env = input.env ?? {};
   if (env.VAULTLITE_DB && env.VAULTLITE_BLOBS) {
     await applyCloudflareMigrations(env.VAULTLITE_DB);
     return createCloudflareVaultLiteStorage({
@@ -24,17 +28,25 @@ export async function createWorkerStorage(env: Partial<VaultLiteWorkerBindings> 
     });
   }
 
+  if (input.runtimeMode === 'production') {
+    throw new Error('runtime_config_invalid:production_requires_distributed_storage');
+  }
+
   return createInMemoryVaultLiteStorage();
 }
 
 async function createWorkerApp(env: Partial<VaultLiteWorkerBindings> = {}) {
   const runtime = createWorkerRuntimeConfig(env);
-  const storage = await createWorkerStorage(env);
+  const storage = await createWorkerStorage({
+    env,
+    runtimeMode: runtime.runtimeMode,
+  });
 
   return createVaultLiteApi({
     storage,
     clock: new SystemClock(),
     idGenerator: new CryptoIdGenerator(),
+    runtimeMode: runtime.runtimeMode,
     deploymentFingerprint: runtime.deploymentFingerprint,
     serverUrl: runtime.serverUrl,
     bootstrapAdminToken: runtime.bootstrapAdminToken,
@@ -44,11 +56,12 @@ async function createWorkerApp(env: Partial<VaultLiteWorkerBindings> = {}) {
   });
 }
 
-let cachedAppPromise = createWorkerApp();
+let cachedAppPromise: Promise<ReturnType<typeof createVaultLiteApi>> | null = null;
 let cachedConfigSignature = '';
 
 function getConfigSignature(env: Partial<VaultLiteWorkerBindings> = {}): string {
   return [
+    env.VAULTLITE_RUNTIME_MODE ?? '',
     env.VAULTLITE_SERVER_URL ?? '',
     env.VAULTLITE_DEPLOYMENT_FINGERPRINT ?? '',
     env.VAULTLITE_BOOTSTRAP_ADMIN_TOKEN ?? '',
@@ -62,7 +75,7 @@ function getConfigSignature(env: Partial<VaultLiteWorkerBindings> = {}): string 
 export default {
   async fetch(request: Request, env?: Partial<VaultLiteWorkerBindings>) {
     const nextSignature = getConfigSignature(env);
-    if (nextSignature !== cachedConfigSignature) {
+    if (!cachedAppPromise || nextSignature !== cachedConfigSignature) {
       cachedAppPromise = createWorkerApp(env);
       cachedConfigSignature = nextSignature;
     }
