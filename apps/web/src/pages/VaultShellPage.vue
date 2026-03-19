@@ -1792,6 +1792,7 @@ async function onAttachmentSelected(event: Event) {
 async function uploadAttachmentFile(file: File, itemId: string) {
   const initResponse = await vaultClient.initAttachmentUpload({
     itemId,
+    fileName: file.name || `${itemId}.bin`,
     contentType: file.type || 'application/octet-stream',
     size: file.size,
     idempotencyKey: buildAttachmentIdempotencyKey(file, itemId),
@@ -1806,6 +1807,7 @@ async function uploadAttachmentFile(file: File, itemId: string) {
     uploadToken: initResponse.uploadToken,
     encryptedEnvelope,
   });
+  await vaultClient.finalizeAttachmentUpload(initResponse.uploadId, itemId);
   registerUploadAsset(initResponse.uploadId, file);
 }
 

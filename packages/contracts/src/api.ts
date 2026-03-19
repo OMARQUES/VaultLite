@@ -482,6 +482,7 @@ export const VaultItemUpdateInputSchema = z
 export const AttachmentUploadInitInputSchema = z
   .object({
     itemId: z.string().min(1),
+    fileName: z.string().min(1),
     contentType: z.string().min(1),
     size: z.number().int().positive().max(MAX_ATTACHMENT_UPLOAD_SIZE_BYTES),
     idempotencyKey: z.string().min(1),
@@ -509,11 +510,13 @@ export const AttachmentUploadRecordSchema = z
   .object({
     uploadId: z.string().min(1),
     itemId: z.string().min(1),
+    fileName: z.string().min(1),
     lifecycleState: AttachmentLifecycleStateSchema,
     contentType: z.string().min(1),
     size: z.number().int().positive(),
     expiresAt: isoDatetimeSchema,
     uploadedAt: isoDatetimeSchema.nullable(),
+    attachedAt: isoDatetimeSchema.nullable(),
     createdAt: isoDatetimeSchema,
     updatedAt: isoDatetimeSchema,
   })
@@ -526,6 +529,30 @@ export const AttachmentUploadInitOutputSchema = AttachmentUploadRecordSchema.ext
 export const AttachmentUploadListOutputSchema = z
   .object({
     uploads: z.array(AttachmentUploadRecordSchema),
+  })
+  .strict();
+
+export const AttachmentUploadFinalizeOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    upload: AttachmentUploadRecordSchema,
+  })
+  .strict();
+
+export const AttachmentUploadEnvelopeOutputSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    itemId: z.string().min(1),
+    fileName: z.string().min(1),
+    contentType: z.string().min(1),
+    size: z.number().int().positive(),
+    uploadedAt: isoDatetimeSchema,
+    attachedAt: isoDatetimeSchema,
+    encryptedEnvelope: encryptedPayloadSchema.max(
+      MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
+      'Attachment upload envelope exceeds maximum size',
+    ),
   })
   .strict();
 
@@ -678,6 +705,8 @@ export type AttachmentUploadFinalizeInput = z.infer<typeof AttachmentUploadFinal
 export type AttachmentUploadRecord = z.infer<typeof AttachmentUploadRecordSchema>;
 export type AttachmentUploadInitOutput = z.infer<typeof AttachmentUploadInitOutputSchema>;
 export type AttachmentUploadListOutput = z.infer<typeof AttachmentUploadListOutputSchema>;
+export type AttachmentUploadFinalizeOutput = z.infer<typeof AttachmentUploadFinalizeOutputSchema>;
+export type AttachmentUploadEnvelopeOutput = z.infer<typeof AttachmentUploadEnvelopeOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
 export type GenericAuthFailure = z.infer<typeof GenericAuthFailureSchema>;

@@ -1,6 +1,8 @@
 import {
   AttachmentEnvelopeSchema,
   AttachmentUploadContentInputSchema,
+  AttachmentUploadEnvelopeOutputSchema,
+  AttachmentUploadFinalizeOutputSchema,
   AttachmentUploadFinalizeInputSchema,
   AttachmentUploadInitInputSchema,
   AttachmentUploadInitOutputSchema,
@@ -635,22 +637,26 @@ const ATTACHMENT_PENDING_TTL_MINUTES = 15;
 function toAttachmentUploadRecord(record: {
   key: string;
   itemId: string | null;
+  fileName: string;
   lifecycleState: 'pending' | 'uploaded' | 'attached' | 'deleted' | 'orphaned';
   contentType: string;
   size: number;
   expiresAt: string | null;
   uploadedAt: string | null;
+  attachedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }) {
   return AttachmentUploadRecordSchema.parse({
     uploadId: record.key,
     itemId: record.itemId ?? '',
+    fileName: record.fileName.trim().length > 0 ? record.fileName : `${record.key}.bin`,
     lifecycleState: record.lifecycleState,
     contentType: record.contentType,
     size: record.size,
     expiresAt: record.expiresAt ?? record.createdAt,
     uploadedAt: record.uploadedAt,
+    attachedAt: record.attachedAt,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   });
@@ -3277,6 +3283,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       key: options.idGenerator.nextId('attachment'),
       ownerUserId: sessionContext.user.userId,
       itemId: input.itemId,
+      fileName: input.fileName,
       lifecycleState: 'pending',
       envelope: '',
       contentType: input.contentType,
@@ -3285,6 +3292,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       uploadToken: options.idGenerator.nextId('upload_token'),
       expiresAt: addMinutes(options.clock.now(), ATTACHMENT_PENDING_TTL_MINUTES),
       uploadedAt: null,
+      attachedAt: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -3381,10 +3389,28 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
     }
 
-    const input = AttachmentUploadFinalizeInputSchema.parse(await c.req.json());
+    const parsed = AttachmentUploadFinalizeInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsed.data;
     const record = await options.storage.attachmentBlobs.get(input.uploadId);
-    if (!record || record.ownerUserId !== sessionContext.user.userId || record.itemId !== input.itemId) {
+    if (!record || record.ownerUserId !== sessionContext.user.userId) {
       return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+    }
+    if (record.itemId !== input.itemId) {
+      return jsonResponse(409, { ok: false, code: 'attachment_already_bound_to_other_item' });
+    }
+
+    if (record.lifecycleState === 'attached') {
+      return jsonResponse(
+        200,
+        AttachmentUploadFinalizeOutputSchema.parse({
+          ok: true,
+          result: 'success_no_op',
+          upload: toAttachmentUploadRecord(record),
+        }),
+      );
     }
 
     const nowIso = isoNow(options.clock);
@@ -3394,8 +3420,77 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (record.lifecycleState !== 'uploaded') {
       return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
     }
+    const item = await options.storage.vaultItems.findByItemId(input.itemId, sessionContext.user.userId);
+    if (!item) {
+      return jsonResponse(404, { ok: false, code: 'item_not_found' });
+    }
 
-    return jsonResponse(501, { ok: false, code: 'attachment_finalize_not_implemented' });
+    try {
+      const attached = await options.storage.attachmentBlobs.markAttached({
+        key: input.uploadId,
+        ownerUserId: sessionContext.user.userId,
+        itemId: input.itemId,
+        updatedAt: nowIso,
+        attachedAt: nowIso,
+      });
+
+      return jsonResponse(
+        200,
+        AttachmentUploadFinalizeOutputSchema.parse({
+          ok: true,
+          result: 'success_changed',
+          upload: toAttachmentUploadRecord(attached),
+        }),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'attachment_finalize_failed';
+      if (message === 'attachment_not_found') {
+        return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+      }
+      if (message === 'attachment_already_bound_to_other_item') {
+        return jsonResponse(409, { ok: false, code: 'attachment_already_bound_to_other_item' });
+      }
+      if (message === 'attachment_upload_incomplete') {
+        return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
+      }
+      return jsonResponse(500, { ok: false, code: 'attachment_finalize_failed' });
+    }
+  });
+
+  app.get('/api/attachments/uploads/:uploadId/envelope', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+
+    const uploadId = c.req.param('uploadId');
+    const record = await options.storage.attachmentBlobs.get(uploadId);
+    if (!record || record.ownerUserId !== sessionContext.user.userId) {
+      return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+    }
+    if (
+      record.lifecycleState !== 'attached' ||
+      !record.itemId ||
+      !record.uploadedAt ||
+      !record.attachedAt ||
+      record.envelope.length === 0
+    ) {
+      return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
+    }
+
+    return jsonResponse(
+      200,
+      AttachmentUploadEnvelopeOutputSchema.parse({
+        uploadId: record.key,
+        itemId: record.itemId,
+        fileName: record.fileName.trim().length > 0 ? record.fileName : `${record.key}.bin`,
+        contentType: record.contentType,
+        size: record.size,
+        uploadedAt: record.uploadedAt,
+        attachedAt: record.attachedAt,
+        encryptedEnvelope: record.envelope,
+      }),
+    );
   });
 
   app.get('/api/attachments', async (c) => {

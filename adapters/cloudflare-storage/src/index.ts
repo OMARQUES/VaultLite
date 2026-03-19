@@ -264,6 +264,12 @@ WHERE window_ends_at IS NULL;`,
 ALTER TABLE vault_item_tombstones ADD COLUMN created_at TEXT;
 ALTER TABLE vault_item_tombstones ADD COLUMN updated_at TEXT;`,
   },
+  {
+    id: '0008_attachment_filename_attached_at',
+    filename: '0008_attachment_filename_attached_at.sql',
+    sql: `ALTER TABLE attachment_blobs ADD COLUMN file_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE attachment_blobs ADD COLUMN attached_at TEXT;`,
+  },
 ];
 
 export function getInfrastructureMigrationDirectory(): URL | string {
@@ -1079,13 +1085,14 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
     await executeOne(
       this.db,
       `INSERT OR REPLACE INTO attachment_blobs (
-          blob_key, owner_user_id, item_id, lifecycle_state, envelope, content_type, size,
-          idempotency_key, upload_token, expires_at, uploaded_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          blob_key, owner_user_id, item_id, file_name, lifecycle_state, envelope, content_type, size,
+          idempotency_key, upload_token, expires_at, uploaded_at, attached_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.key,
         record.ownerUserId,
         record.itemId,
+        record.fileName,
         record.lifecycleState,
         record.envelope,
         record.contentType,
@@ -1094,6 +1101,7 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
         record.uploadToken,
         record.expiresAt,
         record.uploadedAt,
+        record.attachedAt,
         record.createdAt,
         record.updatedAt,
       ],
@@ -1105,9 +1113,10 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
     const metadata = await selectOne<AttachmentBlobRecord>(
       this.db,
       `SELECT blob_key AS key, owner_user_id AS ownerUserId, item_id AS itemId,
+              file_name AS fileName,
               lifecycle_state AS lifecycleState, envelope, content_type AS contentType,
               size, idempotency_key AS idempotencyKey, upload_token AS uploadToken,
-              expires_at AS expiresAt, uploaded_at AS uploadedAt,
+              expires_at AS expiresAt, uploaded_at AS uploadedAt, attached_at AS attachedAt,
               created_at AS createdAt, updated_at AS updatedAt
        FROM attachment_blobs WHERE blob_key = ?`,
       [key],
@@ -1132,9 +1141,10 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
     return selectMany<AttachmentBlobRecord>(
       this.db,
       `SELECT blob_key AS key, owner_user_id AS ownerUserId, item_id AS itemId,
+              file_name AS fileName,
               lifecycle_state AS lifecycleState, envelope, content_type AS contentType,
               size, idempotency_key AS idempotencyKey, upload_token AS uploadToken,
-              expires_at AS expiresAt, uploaded_at AS uploadedAt,
+              expires_at AS expiresAt, uploaded_at AS uploadedAt, attached_at AS attachedAt,
               created_at AS createdAt, updated_at AS updatedAt
        FROM attachment_blobs
        WHERE owner_user_id = ? AND item_id = ?
@@ -1151,9 +1161,10 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
     return selectOne<AttachmentBlobRecord>(
       this.db,
       `SELECT blob_key AS key, owner_user_id AS ownerUserId, item_id AS itemId,
+              file_name AS fileName,
               lifecycle_state AS lifecycleState, envelope, content_type AS contentType,
               size, idempotency_key AS idempotencyKey, upload_token AS uploadToken,
-              expires_at AS expiresAt, uploaded_at AS uploadedAt,
+              expires_at AS expiresAt, uploaded_at AS uploadedAt, attached_at AS attachedAt,
               created_at AS createdAt, updated_at AS updatedAt
        FROM attachment_blobs
        WHERE owner_user_id = ? AND item_id = ? AND idempotency_key = ?
@@ -1186,6 +1197,56 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
        WHERE blob_key = ? AND owner_user_id = ?`,
       ['uploaded', input.envelope, input.uploadedAt, input.updatedAt, input.key, input.ownerUserId],
     );
+
+    const updated = await this.get(input.key);
+    if (!updated) {
+      throw new Error('attachment_not_found');
+    }
+    return updated;
+  }
+
+  async markAttached(input: {
+    key: string;
+    ownerUserId: string;
+    itemId: string;
+    updatedAt: string;
+    attachedAt: string;
+  }): Promise<AttachmentBlobRecord> {
+    const current = await this.get(input.key);
+    if (!current || current.ownerUserId !== input.ownerUserId) {
+      throw new Error('attachment_not_found');
+    }
+    if (current.itemId !== input.itemId) {
+      throw new Error('attachment_already_bound_to_other_item');
+    }
+    if (current.lifecycleState === 'attached') {
+      return current;
+    }
+    if (current.lifecycleState !== 'uploaded') {
+      throw new Error('attachment_upload_incomplete');
+    }
+
+    const changedRows = await executeOneWithChanges(
+      this.db,
+      `UPDATE attachment_blobs
+       SET lifecycle_state = ?, attached_at = ?, updated_at = ?, expires_at = NULL, upload_token = NULL
+       WHERE blob_key = ? AND owner_user_id = ? AND item_id = ? AND lifecycle_state = ?`,
+      ['attached', input.attachedAt, input.updatedAt, input.key, input.ownerUserId, input.itemId, 'uploaded'],
+    );
+
+    if (changedRows === 0) {
+      const latest = await this.get(input.key);
+      if (!latest || latest.ownerUserId !== input.ownerUserId) {
+        throw new Error('attachment_not_found');
+      }
+      if (latest.itemId !== input.itemId) {
+        throw new Error('attachment_already_bound_to_other_item');
+      }
+      if (latest.lifecycleState === 'attached') {
+        return latest;
+      }
+      throw new Error('attachment_upload_incomplete');
+    }
 
     const updated = await this.get(input.key);
     if (!updated) {
@@ -1516,7 +1577,19 @@ export async function applyCloudflareMigrations(db: D1DatabaseLike): Promise<voi
 
   for (const migration of migrations) {
     for (const statement of migration.statements) {
-      await db.prepare(statement).run();
+      try {
+        await db.prepare(statement).run();
+      } catch (error) {
+        const normalizedStatement = statement.trim().toLowerCase().replace(/\s+/g, ' ');
+        const isAlterAddColumn =
+          normalizedStatement.startsWith('alter table') && normalizedStatement.includes(' add column ');
+        const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        const isDuplicateColumn = message.includes('duplicate column name');
+        if (isAlterAddColumn && isDuplicateColumn) {
+          continue;
+        }
+        throw error;
+      }
     }
   }
 }

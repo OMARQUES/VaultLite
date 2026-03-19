@@ -67,6 +67,7 @@ export interface AttachmentBlobRecord {
   key: string;
   ownerUserId: string;
   itemId: string | null;
+  fileName: string;
   lifecycleState: AttachmentLifecycleState;
   envelope: string;
   contentType: string;
@@ -75,6 +76,7 @@ export interface AttachmentBlobRecord {
   uploadToken: string | null;
   expiresAt: string | null;
   uploadedAt: string | null;
+  attachedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -212,6 +214,13 @@ export interface AttachmentBlobRepository {
     envelope: string;
     updatedAt: string;
     uploadedAt: string;
+  }): Promise<AttachmentBlobRecord>;
+  markAttached(input: {
+    key: string;
+    ownerUserId: string;
+    itemId: string;
+    updatedAt: string;
+    attachedAt: string;
   }): Promise<AttachmentBlobRecord>;
   delete(key: string): Promise<void>;
 }
@@ -705,6 +714,31 @@ export function createInMemoryVaultLiteStorage(input: {
           envelope: input.envelope,
           uploadedAt: input.uploadedAt,
           updatedAt: input.updatedAt,
+        };
+        attachmentBlobs.set(updated.key, updated);
+        return { ...updated };
+      },
+      async markAttached(input) {
+        const record = attachmentBlobs.get(input.key);
+        if (!record || record.ownerUserId !== input.ownerUserId) {
+          throw new Error('attachment_not_found');
+        }
+        if (record.itemId !== input.itemId) {
+          throw new Error('attachment_already_bound_to_other_item');
+        }
+        if (record.lifecycleState === 'attached') {
+          return { ...record };
+        }
+        if (record.lifecycleState !== 'uploaded') {
+          throw new Error('attachment_upload_incomplete');
+        }
+        const updated: AttachmentBlobRecord = {
+          ...record,
+          lifecycleState: 'attached',
+          attachedAt: input.attachedAt,
+          updatedAt: input.updatedAt,
+          expiresAt: null,
+          uploadToken: null,
         };
         attachmentBlobs.set(updated.key, updated);
         return { ...updated };

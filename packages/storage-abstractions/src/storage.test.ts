@@ -185,6 +185,7 @@ describe('createInMemoryVaultLiteStorage', () => {
       key: 'attachment_1',
       ownerUserId: 'user_1',
       itemId: 'item_doc_1',
+      fileName: 'policy.pdf',
       lifecycleState: 'pending',
       envelope: '',
       contentType: 'application/pdf',
@@ -193,6 +194,7 @@ describe('createInMemoryVaultLiteStorage', () => {
       uploadToken: 'upload_token_1',
       expiresAt: '2026-03-15T12:15:00.000Z',
       uploadedAt: null,
+      attachedAt: null,
       createdAt: '2026-03-15T12:00:00.000Z',
       updatedAt: '2026-03-15T12:00:00.000Z',
     });
@@ -218,6 +220,35 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(uploaded.lifecycleState).toBe('uploaded');
     expect(uploaded.uploadedAt).toBe('2026-03-15T12:01:00.000Z');
     expect(uploaded.envelope).toBe('encrypted_blob_payload');
+
+    const attached = await storage.attachmentBlobs.markAttached({
+      key: 'attachment_1',
+      ownerUserId: 'user_1',
+      itemId: 'item_doc_1',
+      updatedAt: '2026-03-15T12:02:00.000Z',
+      attachedAt: '2026-03-15T12:02:00.000Z',
+    });
+    expect(attached.lifecycleState).toBe('attached');
+    expect(attached.attachedAt).toBe('2026-03-15T12:02:00.000Z');
+
+    const replay = await storage.attachmentBlobs.markAttached({
+      key: 'attachment_1',
+      ownerUserId: 'user_1',
+      itemId: 'item_doc_1',
+      updatedAt: '2026-03-15T12:03:00.000Z',
+      attachedAt: '2026-03-15T12:03:00.000Z',
+    });
+    expect(replay.lifecycleState).toBe('attached');
+
+    await expect(
+      storage.attachmentBlobs.markAttached({
+        key: 'attachment_1',
+        ownerUserId: 'user_1',
+        itemId: 'item_other',
+        updatedAt: '2026-03-15T12:04:00.000Z',
+        attachedAt: '2026-03-15T12:04:00.000Z',
+      }),
+    ).rejects.toThrow('attachment_already_bound_to_other_item');
   });
 
   test('tracks deployment state transitions and checkpoint attempts', async () => {

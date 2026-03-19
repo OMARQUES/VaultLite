@@ -5,6 +5,7 @@
     ".": "./src/index.ts",
     "./account-key": "./src/account-key.ts",
     "./account-kit": "./src/account-kit.ts",
+    "./backup-package": "./src/backup-package.ts",
     "./base64": "./src/base64.ts",
     "./blob-envelope": "./src/blob-envelope.ts",
     "./kdf": "./src/kdf.ts",

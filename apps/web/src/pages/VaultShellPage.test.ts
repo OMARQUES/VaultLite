@@ -91,6 +91,8 @@ let compactDesktopQueryMatches = false;
 const attachmentClientMock = {
   initAttachmentUpload: vi.fn(),
   uploadAttachmentContent: vi.fn(),
+  finalizeAttachmentUpload: vi.fn(),
+  getAttachmentEnvelope: vi.fn(),
   listAttachmentUploads: vi.fn(),
 };
 
@@ -195,6 +197,10 @@ function createSessionStore(role: 'owner' | 'user' = 'user') {
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    getRuntimeMetadata: vi.fn().mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+    }),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
@@ -255,8 +261,27 @@ describe('VaultShellPage', () => {
     installMatchMediaStub();
     attachmentClientMock.initAttachmentUpload.mockReset();
     attachmentClientMock.uploadAttachmentContent.mockReset();
+    attachmentClientMock.finalizeAttachmentUpload.mockReset();
+    attachmentClientMock.getAttachmentEnvelope.mockReset();
     attachmentClientMock.listAttachmentUploads.mockReset();
     attachmentClientMock.listAttachmentUploads.mockResolvedValue({ uploads: [] });
+    attachmentClientMock.finalizeAttachmentUpload.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      upload: {
+        uploadId: 'attachment_default',
+        itemId: 'item_doc_1',
+        fileName: 'default.txt',
+        lifecycleState: 'attached',
+        contentType: 'text/plain',
+        size: 1,
+        expiresAt: '2026-03-15T12:15:00.000Z',
+        uploadedAt: '2026-03-15T12:00:10.000Z',
+        attachedAt: '2026-03-15T12:00:20.000Z',
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:20.000Z',
+      },
+    });
   });
 
   afterEach(() => {
@@ -846,11 +871,13 @@ describe('VaultShellPage', () => {
         {
           uploadId: 'attachment_1',
           itemId: 'item_doc_1',
+          fileName: 'document.pdf',
           lifecycleState: 'uploaded',
           contentType: 'application/pdf',
           size: 1024,
           expiresAt: '2026-03-15T12:15:00.000Z',
           uploadedAt: '2026-03-15T12:00:30.000Z',
+          attachedAt: null,
           createdAt: '2026-03-15T12:00:00.000Z',
           updatedAt: '2026-03-15T12:00:30.000Z',
         },
@@ -1027,11 +1054,13 @@ describe('VaultShellPage', () => {
         {
           uploadId: 'attachment_login_1',
           itemId: 'item_login_1',
+          fileName: 'login.txt',
           lifecycleState: 'uploaded',
           contentType: 'text/plain',
           size: 64,
           expiresAt: '2026-03-15T12:15:00.000Z',
           uploadedAt: '2026-03-15T12:00:30.000Z',
+          attachedAt: null,
           createdAt: '2026-03-15T12:00:00.000Z',
           updatedAt: '2026-03-15T12:00:30.000Z',
         },
@@ -1070,11 +1099,13 @@ describe('VaultShellPage', () => {
     attachmentClientMock.initAttachmentUpload.mockResolvedValueOnce({
       uploadId: 'attachment_queued_1',
       itemId: 'item_doc_created_1',
+      fileName: 'notes.txt',
       lifecycleState: 'pending',
       contentType: 'text/plain',
       size: 12,
       expiresAt: '2026-03-15T12:15:00.000Z',
       uploadedAt: null,
+      attachedAt: null,
       createdAt: '2026-03-15T12:00:00.000Z',
       updatedAt: '2026-03-15T12:00:00.000Z',
       uploadToken: 'upload_token_created_1',
@@ -1082,26 +1113,47 @@ describe('VaultShellPage', () => {
     attachmentClientMock.uploadAttachmentContent.mockResolvedValueOnce({
       uploadId: 'attachment_queued_1',
       itemId: 'item_doc_created_1',
+      fileName: 'notes.txt',
       lifecycleState: 'uploaded',
       contentType: 'text/plain',
       size: 12,
       expiresAt: '2026-03-15T12:15:00.000Z',
       uploadedAt: '2026-03-15T12:00:10.000Z',
+      attachedAt: null,
       createdAt: '2026-03-15T12:00:00.000Z',
       updatedAt: '2026-03-15T12:00:10.000Z',
+    });
+    attachmentClientMock.finalizeAttachmentUpload.mockResolvedValueOnce({
+      ok: true,
+      result: 'success_changed',
+      upload: {
+        uploadId: 'attachment_queued_1',
+        itemId: 'item_doc_created_1',
+        fileName: 'notes.txt',
+        lifecycleState: 'attached',
+        contentType: 'text/plain',
+        size: 12,
+        expiresAt: '2026-03-15T12:15:00.000Z',
+        uploadedAt: '2026-03-15T12:00:10.000Z',
+        attachedAt: '2026-03-15T12:00:12.000Z',
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:12.000Z',
+      },
     });
     attachmentClientMock.listAttachmentUploads.mockResolvedValue({
       uploads: [
         {
           uploadId: 'attachment_queued_1',
           itemId: 'item_doc_created_1',
-          lifecycleState: 'uploaded',
+          fileName: 'notes.txt',
+          lifecycleState: 'attached',
           contentType: 'text/plain',
           size: 12,
           expiresAt: '2026-03-15T12:15:00.000Z',
           uploadedAt: '2026-03-15T12:00:10.000Z',
+          attachedAt: '2026-03-15T12:00:12.000Z',
           createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:10.000Z',
+          updatedAt: '2026-03-15T12:00:12.000Z',
         },
       ],
     });
@@ -1154,6 +1206,7 @@ describe('VaultShellPage', () => {
     });
     expect(attachmentClientMock.initAttachmentUpload).toHaveBeenCalledWith({
       itemId: 'item_doc_created_1',
+      fileName: 'notes.txt',
       contentType: 'text/plain',
       size: 11,
       idempotencyKey: 'item-attachment:item_doc_created_1:text/plain:11:456',
@@ -1165,6 +1218,10 @@ describe('VaultShellPage', () => {
         encryptedEnvelope: 'encrypted_blob_payload',
       },
     );
+    expect(attachmentClientMock.finalizeAttachmentUpload).toHaveBeenCalledWith(
+      'attachment_queued_1',
+      'item_doc_created_1',
+    );
     expect(router.currentRoute.value.path).toBe('/vault/item/item_doc_created_1');
   });
 
@@ -1175,11 +1232,13 @@ describe('VaultShellPage', () => {
     attachmentClientMock.initAttachmentUpload.mockResolvedValueOnce({
       uploadId: 'attachment_1',
       itemId: 'item_doc_1',
+      fileName: 'note.txt',
       lifecycleState: 'pending',
       contentType: 'text/plain',
       size: 5,
       expiresAt: '2026-03-15T12:15:00.000Z',
       uploadedAt: null,
+      attachedAt: null,
       createdAt: '2026-03-15T12:00:00.000Z',
       updatedAt: '2026-03-15T12:00:00.000Z',
       uploadToken: 'upload_token_1',
@@ -1187,13 +1246,32 @@ describe('VaultShellPage', () => {
     attachmentClientMock.uploadAttachmentContent.mockResolvedValueOnce({
       uploadId: 'attachment_1',
       itemId: 'item_doc_1',
+      fileName: 'note.txt',
       lifecycleState: 'uploaded',
       contentType: 'text/plain',
       size: 5,
       expiresAt: '2026-03-15T12:15:00.000Z',
       uploadedAt: '2026-03-15T12:00:10.000Z',
+      attachedAt: null,
       createdAt: '2026-03-15T12:00:00.000Z',
       updatedAt: '2026-03-15T12:00:10.000Z',
+    });
+    attachmentClientMock.finalizeAttachmentUpload.mockResolvedValueOnce({
+      ok: true,
+      result: 'success_changed',
+      upload: {
+        uploadId: 'attachment_1',
+        itemId: 'item_doc_1',
+        fileName: 'note.txt',
+        lifecycleState: 'attached',
+        contentType: 'text/plain',
+        size: 5,
+        expiresAt: '2026-03-15T12:15:00.000Z',
+        uploadedAt: '2026-03-15T12:00:10.000Z',
+        attachedAt: '2026-03-15T12:00:12.000Z',
+        createdAt: '2026-03-15T12:00:00.000Z',
+        updatedAt: '2026-03-15T12:00:12.000Z',
+      },
     });
     attachmentClientMock.listAttachmentUploads
       .mockResolvedValueOnce({ uploads: [] })
@@ -1202,13 +1280,15 @@ describe('VaultShellPage', () => {
           {
             uploadId: 'attachment_1',
             itemId: 'item_doc_1',
-            lifecycleState: 'uploaded',
+            fileName: 'note.txt',
+            lifecycleState: 'attached',
             contentType: 'text/plain',
             size: 5,
             expiresAt: '2026-03-15T12:15:00.000Z',
             uploadedAt: '2026-03-15T12:00:10.000Z',
+            attachedAt: '2026-03-15T12:00:12.000Z',
             createdAt: '2026-03-15T12:00:00.000Z',
-            updatedAt: '2026-03-15T12:00:10.000Z',
+            updatedAt: '2026-03-15T12:00:12.000Z',
           },
         ],
       });
@@ -1243,6 +1323,7 @@ describe('VaultShellPage', () => {
 
     expect(attachmentClientMock.initAttachmentUpload).toHaveBeenCalledWith({
       itemId: 'item_doc_1',
+      fileName: 'note.txt',
       contentType: 'text/plain',
       size: 5,
       idempotencyKey: 'item-attachment:item_doc_1:text/plain:5:123',
@@ -1251,6 +1332,10 @@ describe('VaultShellPage', () => {
       uploadToken: 'upload_token_1',
       encryptedEnvelope: 'encrypted_blob_payload',
     });
-    expect(wrapper.text()).toContain('Uploaded');
+    expect(attachmentClientMock.finalizeAttachmentUpload).toHaveBeenCalledWith(
+      'attachment_1',
+      'item_doc_1',
+    );
+    expect(wrapper.text()).toContain('Attached');
   });
 });

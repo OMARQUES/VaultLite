@@ -48,6 +48,10 @@ function createSessionStore(
     }),
     revokeDevice: vi.fn(),
     rotatePassword: vi.fn(),
+    getRuntimeMetadata: vi.fn().mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+    }),
     handleUnauthorized: vi.fn(function handleUnauthorized(
       this: { state: { username: string | null; phase: string; lastError: string | null } },
       input?: { message?: string | null; reasonCode?: string | null },

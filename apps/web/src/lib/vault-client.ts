@@ -1,5 +1,7 @@
 import type {
   AttachmentUploadContentInput,
+  AttachmentUploadEnvelopeOutput,
+  AttachmentUploadFinalizeOutput,
   AttachmentUploadInitInput,
   AttachmentUploadInitOutput,
   AttachmentUploadListOutput,
@@ -116,6 +118,8 @@ export interface VaultLiteVaultClient {
     uploadId: string,
     input: AttachmentUploadContentInput,
   ): Promise<AttachmentUploadRecord>;
+  finalizeAttachmentUpload(uploadId: string, itemId: string): Promise<AttachmentUploadFinalizeOutput>;
+  getAttachmentEnvelope(uploadId: string): Promise<AttachmentUploadEnvelopeOutput>;
   listAttachmentUploads(itemId: string): Promise<AttachmentUploadListOutput>;
 }
 
@@ -247,6 +251,22 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
         method: 'PUT',
         body: JSON.stringify(input),
       }, { emitUnauthorizedEvent: true });
+    },
+    finalizeAttachmentUpload(uploadId, itemId) {
+      return requestJson<AttachmentUploadFinalizeOutput>(`${baseUrl}/api/attachments/uploads/finalize`, {
+        method: 'POST',
+        body: JSON.stringify({
+          uploadId,
+          itemId,
+        }),
+      }, { emitUnauthorizedEvent: true });
+    },
+    getAttachmentEnvelope(uploadId) {
+      return requestJson<AttachmentUploadEnvelopeOutput>(
+        `${baseUrl}/api/attachments/uploads/${encodeURIComponent(uploadId)}/envelope`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
     },
     listAttachmentUploads(itemId) {
       return requestJson<AttachmentUploadListOutput>(

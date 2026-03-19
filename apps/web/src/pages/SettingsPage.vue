@@ -4,6 +4,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import DangerButton from '../components/ui/DangerButton.vue';
+import DataPortabilitySection from '../components/settings/DataPortabilitySection.vue';
 import DialogModal from '../components/ui/DialogModal.vue';
 import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
@@ -408,6 +409,11 @@ async function rotatePassword() {
           </PrimaryButton>
         </div>
       </section>
+
+      <DataPortabilitySection
+        :session-store="sessionStore"
+        @notify="showToast"
+      />
     </div>
 
     <DialogModal

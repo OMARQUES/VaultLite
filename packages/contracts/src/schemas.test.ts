@@ -1,18 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BackupManifestV1Schema,
   AccountKitPayloadSchema,
   AttachmentEnvelopeSchema,
   AttachmentUploadContentInputSchema,
+  AttachmentUploadEnvelopeOutputSchema,
   AttachmentUploadFinalizeInputSchema,
+  AttachmentUploadFinalizeOutputSchema,
   AttachmentUploadInitInputSchema,
   AttachmentUploadInitOutputSchema,
   AttachmentUploadListOutputSchema,
+  EncryptedBackupPackageV1Schema,
   InviteCreateInputSchema,
   OnboardingCompleteInputSchema,
   PasswordRotationInputSchema,
   RemoteAuthenticationChallengeInputSchema,
   RemoteAuthenticationInputSchema,
+  VaultJsonExportV1Schema,
   VaultItemCreateInputSchema,
   VaultItemRecordSchema,
   VaultItemRestoreOutputSchema,
@@ -180,6 +185,7 @@ describe('contracts schemas', () => {
     expect(
       AttachmentUploadInitInputSchema.safeParse({
         itemId: 'item_doc_1',
+        fileName: 'document.pdf',
         contentType: 'application/pdf',
         size: 1024,
         idempotencyKey: 'idem_1',
@@ -189,6 +195,7 @@ describe('contracts schemas', () => {
     expect(
       AttachmentUploadInitInputSchema.safeParse({
         itemId: 'item_doc_1',
+        fileName: 'document.pdf',
         contentType: 'application/pdf',
         size: 25 * 1024 * 1024 + 1,
         idempotencyKey: 'idem_2',
@@ -213,11 +220,13 @@ describe('contracts schemas', () => {
       AttachmentUploadInitOutputSchema.safeParse({
         uploadId: 'attachment_1',
         itemId: 'item_doc_1',
+        fileName: 'document.pdf',
         lifecycleState: 'pending',
         contentType: 'application/pdf',
         size: 1024,
         expiresAt: '2026-03-15T12:15:00.000Z',
         uploadedAt: null,
+        attachedAt: null,
         createdAt: '2026-03-15T12:00:00.000Z',
         updatedAt: '2026-03-15T12:00:00.000Z',
         uploadToken: 'upload-token',
@@ -230,15 +239,50 @@ describe('contracts schemas', () => {
           {
             uploadId: 'attachment_1',
             itemId: 'item_doc_1',
+            fileName: 'document.pdf',
             lifecycleState: 'uploaded',
             contentType: 'application/pdf',
             size: 1024,
             expiresAt: '2026-03-15T12:15:00.000Z',
             uploadedAt: '2026-03-15T12:01:00.000Z',
+            attachedAt: null,
             createdAt: '2026-03-15T12:00:00.000Z',
             updatedAt: '2026-03-15T12:01:00.000Z',
           },
         ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadFinalizeOutputSchema.safeParse({
+        ok: true,
+        result: 'success_changed',
+        upload: {
+          uploadId: 'attachment_1',
+          itemId: 'item_doc_1',
+          fileName: 'document.pdf',
+          lifecycleState: 'attached',
+          contentType: 'application/pdf',
+          size: 1024,
+          expiresAt: '2026-03-15T12:15:00.000Z',
+          uploadedAt: '2026-03-15T12:01:00.000Z',
+          attachedAt: '2026-03-15T12:02:00.000Z',
+          createdAt: '2026-03-15T12:00:00.000Z',
+          updatedAt: '2026-03-15T12:02:00.000Z',
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      AttachmentUploadEnvelopeOutputSchema.safeParse({
+        uploadId: 'attachment_1',
+        itemId: 'item_doc_1',
+        fileName: 'document.pdf',
+        contentType: 'application/pdf',
+        size: 1024,
+        uploadedAt: '2026-03-15T12:01:00.000Z',
+        attachedAt: '2026-03-15T12:02:00.000Z',
+        encryptedEnvelope: 'encrypted_payload',
       }).success,
     ).toBe(true);
   });
@@ -262,5 +306,106 @@ describe('contracts schemas', () => {
         deletedAt: '2026-03-15T12:10:00.000Z',
       }).success,
     ).toBe(false);
+  });
+
+  it('validates versioned JSON export payloads', () => {
+    const result = VaultJsonExportV1Schema.safeParse({
+      version: 'vaultlite.export.v1',
+      exportedAt: '2026-03-18T12:00:00.000Z',
+      source: {
+        app: 'vaultlite-web',
+        schemaVersion: 1,
+        username: 'alice',
+        deploymentFingerprint: 'development_deployment',
+      },
+      vault: {
+        items: [
+          {
+            itemId: 'item_1',
+            itemType: 'login',
+            revision: 3,
+            createdAt: '2026-03-18T11:00:00.000Z',
+            updatedAt: '2026-03-18T11:30:00.000Z',
+            payload: {
+              title: 'Email',
+              username: 'alice@example.com',
+              password: 'opaque',
+              urls: ['https://example.com'],
+              notes: '',
+              customFields: [],
+            },
+          },
+        ],
+        tombstones: [],
+        counts: {
+          items: 1,
+          tombstones: 0,
+        },
+      },
+      uiState: {
+        favorites: ['item_1'],
+        folderAssignments: {
+          item_1: 'personal',
+        },
+        folders: [{ id: 'personal', name: 'Personal' }],
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('validates encrypted backup package schema', () => {
+    expect(
+      BackupManifestV1Schema.safeParse({
+        itemCount: 1,
+        tombstoneCount: 0,
+        uiStateIncluded: true,
+        attachmentMode: 'none',
+        attachmentCount: 0,
+        attachmentBytes: 0,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      EncryptedBackupPackageV1Schema.safeParse({
+        version: 'vaultlite.backup.v1',
+        createdAt: '2026-03-18T12:00:00.000Z',
+        source: {
+          app: 'vaultlite-web',
+          schemaVersion: 1,
+          username: 'alice',
+          deploymentFingerprint: 'development_deployment',
+        },
+        manifest: {
+          itemCount: 1,
+          tombstoneCount: 0,
+          uiStateIncluded: true,
+          attachmentMode: 'none',
+          attachmentCount: 0,
+          attachmentBytes: 0,
+        },
+        kdf: {
+          algorithm: 'argon2id',
+          memory: 65536,
+          passes: 3,
+          parallelism: 1,
+          dkLen: 32,
+          salt: 'A'.repeat(22),
+        },
+        encryption: {
+          algorithm: 'aes-256-gcm',
+          nonce: 'B'.repeat(16),
+          aad: 'vaultlite.backup.v1',
+        },
+        payload: {
+          ciphertext: 'C'.repeat(22),
+          authTag: 'D'.repeat(22),
+          plaintextSha256: 'E'.repeat(43),
+        },
+        vault: {
+          attachments: [],
+        },
+      }).success,
+    ).toBe(true);
   });
 });

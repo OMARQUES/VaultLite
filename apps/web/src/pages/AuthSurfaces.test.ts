@@ -40,6 +40,10 @@ function createSessionStore() {
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    getRuntimeMetadata: vi.fn().mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+    }),
     handleUnauthorized: vi.fn(),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),

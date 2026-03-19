@@ -46,6 +46,10 @@ function createSessionStore() {
     bootstrapDevice: vi.fn(),
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
+    getRuntimeMetadata: vi.fn().mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+    }),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
@@ -319,5 +323,41 @@ describe('AdminConsolePage', () => {
 
     expect(authClientMock.suspendAdminUser).toHaveBeenCalledWith('user_2');
     expect(wrapper.text()).not.toContain('Suspend omarques2?');
+  });
+
+  test('closes deprovision confirmation dialog after successful mutation', async () => {
+    authClientMock.listAdminUsers.mockResolvedValue({
+      users: [
+        {
+          userId: 'user_2',
+          username: 'omarques2',
+          role: 'user',
+          lifecycleState: 'active',
+          createdAt: '2026-03-18T12:00:00.000Z',
+          trustedDevicesCount: 1,
+        },
+      ],
+    });
+
+    const { wrapper } = await mountAdminAt('/admin/users/user_2');
+    await flushPromises();
+
+    const deprovisionButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Deprovision');
+    expect(deprovisionButton).toBeDefined();
+    await deprovisionButton!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Deprovision omarques2?');
+    const confirmDeprovisionButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Deprovision user');
+    expect(confirmDeprovisionButton).toBeDefined();
+    await confirmDeprovisionButton!.trigger('click');
+    await flushPromises();
+
+    expect(authClientMock.deprovisionAdminUser).toHaveBeenCalledWith('user_2');
+    expect(wrapper.text()).not.toContain('Deprovision omarques2?');
   });
 });

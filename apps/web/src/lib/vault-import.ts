@@ -1,0 +1,1492 @@
+import { unzipSync } from 'fflate';
+
+import type { VaultItemType } from '@vaultlite/contracts';
+import { encryptAttachmentBlobPayload, encryptVaultItemPayload } from './browser-crypto';
+import { loadDecryptedVaultDataset, type DecryptedVaultDataset } from './data-portability';
+import type { SessionStore } from './session-store';
+import type { VaultLiteVaultClient } from './vault-client';
+import { loadVaultUiState, saveVaultUiState, type VaultUiState } from './vault-ui-state';
+
+export type SupportedImportFormat =
+  | 'vaultlite_login_csv_v1'
+  | 'bitwarden_csv_v1'
+  | 'onepassword_1pux_v1'
+  | 'bitwarden_json_v1'
+  | 'bitwarden_zip_v1';
+
+export type ImportPreviewStatus =
+  | 'valid'
+  | 'duplicate'
+  | 'invalid'
+  | 'unsupported_type'
+  | 'skipped_non_login'
+  | 'skipped_encrypted_export'
+  | 'possible_duplicate_requires_review';
+
+export interface ParsedImportAttachment {
+  fileName: string;
+  contentType: string;
+  size: number;
+  bytes: Uint8Array | null;
+  sourcePath: string | null;
+  attachmentFingerprint: string | null;
+  errorCode: string | null;
+}
+
+export interface ParsedImportCustomField {
+  label: string;
+  value: string;
+}
+
+export interface ParsedImportCandidate {
+  sourceFormat: SupportedImportFormat;
+  sourceRef: string;
+  sourceItemId: string | null;
+  itemType: Extract<VaultItemType, 'login' | 'document' | 'secure_note'>;
+  title: string;
+  notes: string;
+  content: string;
+  username: string;
+  password: string;
+  totp: string;
+  urls: string[];
+  favoriteHint: boolean;
+  folderHint: string | null;
+  archivedHint: boolean;
+  customFields: ParsedImportCustomField[];
+  attachments: ParsedImportAttachment[];
+  provenance: Record<string, unknown>;
+  dedupeKey: string | null;
+  status: ImportPreviewStatus;
+  reason: string | null;
+  rowIndex: number;
+  existingItemId: string | null;
+}
+
+export interface ImportPreviewRow {
+  rowIndex: number;
+  sourceFormat: SupportedImportFormat;
+  sourceRef: string;
+  itemType: Extract<VaultItemType, 'login' | 'document' | 'secure_note'>;
+  title: string;
+  username: string;
+  firstUrl: string;
+  attachmentCount: number;
+  status: ImportPreviewStatus;
+  reason: string | null;
+}
+
+export interface VaultImportPreview {
+  format: SupportedImportFormat;
+  totalRows: number;
+  validRows: number;
+  duplicateRows: number;
+  invalidRows: number;
+  unsupportedRows: number;
+  reviewRequiredRows: number;
+  attachmentRows: number;
+  attachmentCount: number;
+  candidates: ParsedImportCandidate[];
+  rows: ImportPreviewRow[];
+}
+
+type VaultImportExecutionRowStatus =
+  | 'created'
+  | 'skipped_duplicate'
+  | 'skipped_review_required'
+  | 'failed'
+  | 'retry_missing_attachments_for_existing_item';
+
+export interface VaultImportExecutionRow {
+  rowIndex: number;
+  sourceRef: string;
+  status: VaultImportExecutionRowStatus;
+  itemId: string | null;
+  reason: string | null;
+  attachmentsCreated: number;
+  attachmentsFailed: number;
+}
+
+export interface VaultImportExecutionResult {
+  created: number;
+  skipped: number;
+  failed: number;
+  attachmentsCreated: number;
+  attachmentsFailed: number;
+  records: VaultImportExecutionRow[];
+  report: {
+    generatedAt: string;
+    format: SupportedImportFormat;
+    totalRows: number;
+    created: number;
+    skipped: number;
+    failed: number;
+    attachmentsCreated: number;
+    attachmentsFailed: number;
+    rows: VaultImportExecutionRow[];
+  };
+}
+
+export interface VaultImportLimits {
+  maxImportFileBytes: number;
+  maxArchiveUncompressedBytes: number;
+  maxZipEntries: number;
+  maxImportItems: number;
+  maxImportAttachments: number;
+  maxAttachmentSize: number;
+  maxInMemoryWorkingSet: number;
+}
+
+const LIMITS: VaultImportLimits = {
+  maxImportFileBytes: 300 * 1024 * 1024,
+  maxArchiveUncompressedBytes: 600 * 1024 * 1024,
+  maxZipEntries: 20000,
+  maxImportItems: 2000,
+  maxImportAttachments: 1000,
+  maxAttachmentSize: 25 * 1024 * 1024,
+  maxInMemoryWorkingSet: 120 * 1024 * 1024,
+};
+
+const IMPORT_CREATE_CONCURRENCY = 5;
+const ATTACHMENTS_PER_ITEM_CONCURRENCY = 2;
+const RETRY_ATTEMPTS = 2;
+const HISTORY_RETENTION_DAYS = 30;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+type ImportExecutionHistoryRecord = {
+  id: string;
+  scope: string;
+  sourceFormat: SupportedImportFormat;
+  sourceRef: string;
+  sourceItemId: string | null;
+  dedupeKey: string | null;
+  attachmentFingerprint: string;
+  status: 'attached' | 'failed';
+  createdItemId: string | null;
+  errorCode: string | null;
+  timestamp: string;
+};
+
+const fallbackHistory = new Map<string, ImportExecutionHistoryRecord>();
+const historyDbName = 'vaultlite_import_history_v1';
+const historyStoreName = 'records';
+
+function normalizeCell(value: string | null | undefined): string {
+  return (value ?? '').trim();
+}
+
+function normalizeForKey(value: string | null | undefined): string {
+  return normalizeCell(value).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeUrlForKey(value: string | null | undefined): string {
+  const raw = normalizeCell(value);
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/+$/u, '') : parsed.pathname;
+    return `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${path}${parsed.search}${parsed.hash}`;
+  } catch {
+    return normalizeForKey(raw);
+  }
+}
+
+function sanitizeFileName(name: string, fallback: string): string {
+  const cleaned = normalizeCell(name).replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ');
+  return cleaned.length > 0 ? cleaned.slice(0, 180) : fallback;
+}
+
+function inferContentTypeFromFileName(name: string): string {
+  const lowered = name.toLowerCase();
+  if (lowered.endsWith('.pdf')) return 'application/pdf';
+  if (lowered.endsWith('.png')) return 'image/png';
+  if (lowered.endsWith('.jpg') || lowered.endsWith('.jpeg')) return 'image/jpeg';
+  if (lowered.endsWith('.gif')) return 'image/gif';
+  if (lowered.endsWith('.txt')) return 'text/plain';
+  if (lowered.endsWith('.json')) return 'application/json';
+  if (lowered.endsWith('.csv')) return 'text/csv';
+  return 'application/octet-stream';
+}
+
+function parseBoolean(value: string | null | undefined): boolean {
+  const normalized = normalizeForKey(value);
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'y';
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  bytes.forEach((value) => {
+    binary += String.fromCharCode(value);
+  });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/u, '');
+}
+
+async function sha256Base64Url(value: Uint8Array | string): Promise<string> {
+  const bytes = typeof value === 'string' ? textEncoder.encode(value) : Uint8Array.from(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return bytesToBase64Url(new Uint8Array(digest));
+}
+
+function buildSourceRef(format: SupportedImportFormat, sourceItemId: string | null, rowIndex: number): string {
+  return `${format}:${sourceItemId ?? `row_${rowIndex}`}`;
+}
+
+function buildLoginDedupeKey(input: { title: string; username: string; firstUrl: string }): string {
+  return `login|${normalizeForKey(input.title)}|${normalizeForKey(input.username)}|${normalizeUrlForKey(input.firstUrl)}`;
+}
+
+async function buildSecureNoteDedupeKey(input: { title: string; content: string }): Promise<string> {
+  return `secure_note|${normalizeForKey(input.title)}|${await sha256Base64Url(normalizeForKey(input.content))}`;
+}
+
+function buildDocumentFallbackDedupeKey(input: {
+  title: string;
+  fileName: string;
+  size: number;
+  sourceFormat: SupportedImportFormat;
+  sourceItemId: string;
+}): string {
+  return `document|${normalizeForKey(input.title)}|${normalizeForKey(input.fileName)}|${input.size}|${input.sourceFormat}|${input.sourceItemId}`;
+}
+
+function parseCsvRows(csvText: string): string[][] {
+  const rows: string[][] = [];
+  const normalized = csvText.replace(/^\uFEFF/u, '');
+  let currentCell = '';
+  let currentRow: string[] = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index] ?? '';
+    const nextCharacter = normalized[index + 1] ?? '';
+    if (character === '"') {
+      if (inQuotes && nextCharacter === '"') {
+        currentCell += '"';
+        index += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && character === ',') {
+      currentRow.push(currentCell);
+      currentCell = '';
+      continue;
+    }
+    if (!inQuotes && (character === '\n' || character === '\r')) {
+      currentRow.push(currentCell);
+      currentCell = '';
+      if (character === '\r' && nextCharacter === '\n') {
+        index += 1;
+      }
+      if (currentRow.some((entry) => entry.trim().length > 0)) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
+      continue;
+    }
+    currentCell += character;
+  }
+
+  currentRow.push(currentCell);
+  if (currentRow.some((entry) => entry.trim().length > 0)) {
+    rows.push(currentRow);
+  }
+  return rows;
+}
+
+function detectCsvFormat(headers: string[]): SupportedImportFormat {
+  const normalizedHeaders = headers.map((header) => normalizeForKey(header));
+  if (normalizedHeaders.includes('title') && normalizedHeaders.includes('username') && normalizedHeaders.includes('password')) {
+    return 'vaultlite_login_csv_v1';
+  }
+  if (normalizedHeaders.includes('name') && normalizedHeaders.includes('login_username') && normalizedHeaders.includes('login_password')) {
+    return 'bitwarden_csv_v1';
+  }
+  throw new Error('unsupported_import_format');
+}
+
+function ensureSafeZipPath(path: string): void {
+  if (path.startsWith('/') || path.startsWith('\\') || /^[a-z]:/iu.test(path) || path.includes('../') || path.includes('..\\')) {
+    throw new Error('zip_slip_detected');
+  }
+}
+
+function parseZipEntries(input: Uint8Array): Map<string, Uint8Array> {
+  const parsed = unzipSync(input);
+  const keys = Object.keys(parsed);
+  if (keys.length > LIMITS.maxZipEntries) {
+    throw new Error('zip_entry_limit_exceeded');
+  }
+  const entries = new Map<string, Uint8Array>();
+  let uncompressed = 0;
+  let workingSet = 0;
+  for (const key of keys) {
+    ensureSafeZipPath(key);
+    const content = parsed[key];
+    if (!content) continue;
+    uncompressed += content.byteLength;
+    workingSet += content.byteLength;
+    if (uncompressed > LIMITS.maxArchiveUncompressedBytes) throw new Error('archive_uncompressed_limit_exceeded');
+    if (workingSet > LIMITS.maxInMemoryWorkingSet) throw new Error('import_memory_budget_exceeded');
+    entries.set(key.replace(/\\/g, '/'), content);
+  }
+  return entries;
+}
+
+function coerceRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function flattenStructuredValues(value: unknown, output: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    value.forEach((entry) => flattenStructuredValues(entry, output));
+    return output;
+  }
+  if (value && typeof value === 'object') {
+    Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
+      if (entry && typeof entry === 'object') {
+        flattenStructuredValues(entry, output);
+      } else if (typeof entry === 'string' && normalizeCell(entry)) {
+        output.push(`${key}: ${normalizeCell(entry)}`);
+      }
+    });
+    return output;
+  }
+  if (typeof value === 'string' && normalizeCell(value)) {
+    output.push(normalizeCell(value));
+  }
+  return output;
+}
+
+function isTransientUploadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes('status 5') || message.includes('network') || message.includes('failed to fetch');
+}
+
+async function withAttachmentRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientUploadError(error) || attempt >= RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+}
+
+function getImportScope(deploymentFingerprint: string, username: string): string {
+  return `${deploymentFingerprint}:${username}`;
+}
+
+async function openHistoryDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return null;
+  return new Promise((resolve) => {
+    const request = indexedDB.open(historyDbName, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(historyStoreName)) {
+        const store = db.createObjectStore(historyStoreName, { keyPath: 'id' });
+        store.createIndex('scope', 'scope', { unique: false });
+        store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+    };
+    request.onerror = () => resolve(null);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function historyRecordId(input: {
+  scope: string;
+  sourceFormat: SupportedImportFormat;
+  sourceRef: string;
+  sourceItemId: string | null;
+  dedupeKey: string | null;
+  attachmentFingerprint: string;
+}): string {
+  return [
+    input.scope,
+    input.sourceFormat,
+    input.sourceRef,
+    input.sourceItemId ?? '',
+    input.dedupeKey ?? '',
+    input.attachmentFingerprint,
+  ].join('|');
+}
+
+async function loadHistory(scope: string): Promise<Map<string, ImportExecutionHistoryRecord>> {
+  const min = new Date(Date.now() - HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const fallback = new Map<string, ImportExecutionHistoryRecord>();
+  fallbackHistory.forEach((record, key) => {
+    if (record.scope === scope && record.timestamp >= min) fallback.set(key, record);
+  });
+  const db = await openHistoryDb();
+  if (!db) return fallback;
+  return new Promise((resolve) => {
+    const tx = db.transaction(historyStoreName, 'readonly');
+    const store = tx.objectStore(historyStoreName);
+    const request = store.getAll();
+    request.onerror = () => resolve(fallback);
+    request.onsuccess = () => {
+      const map = new Map<string, ImportExecutionHistoryRecord>();
+      (request.result as ImportExecutionHistoryRecord[])
+        .filter((entry) => entry.scope === scope && entry.timestamp >= min)
+        .forEach((entry) => map.set(entry.id, entry));
+      resolve(map);
+    };
+  });
+}
+
+async function saveHistory(record: ImportExecutionHistoryRecord): Promise<void> {
+  fallbackHistory.set(record.id, record);
+  const db = await openHistoryDb();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    const tx = db.transaction(historyStoreName, 'readwrite');
+    tx.objectStore(historyStoreName).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
+function copyUiState(state: VaultUiState): VaultUiState {
+  return {
+    favorites: [...state.favorites],
+    folderAssignments: { ...state.folderAssignments },
+    folders: [...state.folders],
+  };
+}
+
+function getOrCreateFolderId(input: { state: VaultUiState; folderName: string }): string {
+  const normalizedTarget = normalizeForKey(input.folderName);
+  const existing = input.state.folders.find((folder) => normalizeForKey(folder.name) === normalizedTarget);
+  if (existing) return existing.id;
+  const idBase = normalizedTarget.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+  const generatedId = `${idBase || 'folder'}-${Math.random().toString(36).slice(2, 7)}`;
+  input.state.folders.push({ id: generatedId, name: input.folderName.trim() });
+  return generatedId;
+}
+
+function applyUiStateHints(input: {
+  username: string;
+  createdRows: Array<{ itemId: string; favorite: boolean; folder: string | null }>;
+}): void {
+  if (input.createdRows.length === 0) return;
+  const next = copyUiState(loadVaultUiState(input.username));
+  for (const row of input.createdRows) {
+    if (row.favorite && !next.favorites.includes(row.itemId)) {
+      next.favorites.push(row.itemId);
+    }
+    if (row.folder) {
+      const folderId = getOrCreateFolderId({ state: next, folderName: row.folder });
+      next.folderAssignments[row.itemId] = folderId;
+    }
+  }
+  saveVaultUiState(input.username, next);
+}
+
+export function getVaultImportLimits(): VaultImportLimits {
+  return { ...LIMITS };
+}
+
+function extractHostTitle(urlValue: string): string {
+  const first = normalizeCell(urlValue).split(/\s*[,\n;]\s*/u).find((entry) => entry.length > 0);
+  if (!first) return '';
+  try {
+    const withProtocol = /^https?:\/\//iu.test(first) ? first : `https://${first}`;
+    return new URL(withProtocol).hostname.replace(/^www\./iu, '');
+  } catch {
+    return first;
+  }
+}
+
+function extractFirstUrl(urlValue: string): string {
+  const first = normalizeCell(urlValue).split(/\s*[,\n;]\s*/u).find((entry) => entry.length > 0);
+  return first ?? '';
+}
+
+function createHeaderIndex(headers: string[]): Map<string, number> {
+  const indexMap = new Map<string, number>();
+  headers.forEach((header, index) => {
+    indexMap.set(normalizeForKey(header), index);
+  });
+  return indexMap;
+}
+
+function readCell(row: string[], headers: Map<string, number>, key: string): string {
+  const index = headers.get(key);
+  if (typeof index !== 'number') return '';
+  return row[index] ?? '';
+}
+
+function ensureFileSize(file: File): void {
+  if (file.size > LIMITS.maxImportFileBytes) {
+    throw new Error('import_file_size_exceeded');
+  }
+}
+
+async function parseCsvImport(input: {
+  csvText: string;
+  format: Extract<SupportedImportFormat, 'vaultlite_login_csv_v1' | 'bitwarden_csv_v1'>;
+}): Promise<ParsedImportCandidate[]> {
+  const rows = parseCsvRows(input.csvText);
+  if (rows.length < 2) throw new Error('csv_missing_rows');
+  const [headers, ...dataRows] = rows;
+  const headerIndex = createHeaderIndex(headers ?? []);
+  const candidates: ParsedImportCandidate[] = [];
+
+  for (let rowOffset = 0; rowOffset < dataRows.length; rowOffset += 1) {
+    const row = dataRows[rowOffset] ?? [];
+    const rowIndex = rowOffset + 2;
+    if (input.format === 'bitwarden_csv_v1') {
+      const typeValue = normalizeForKey(readCell(row, headerIndex, 'type'));
+      if (typeValue && typeValue !== 'login') {
+        candidates.push({
+          sourceFormat: input.format,
+          sourceRef: buildSourceRef(input.format, null, rowIndex),
+          sourceItemId: null,
+          itemType: 'login',
+          title: '',
+          notes: '',
+          content: '',
+          username: '',
+          password: '',
+          totp: '',
+          urls: [],
+          favoriteHint: false,
+          folderHint: null,
+          archivedHint: false,
+          customFields: [],
+          attachments: [],
+          provenance: {},
+          dedupeKey: null,
+          status: 'skipped_non_login',
+          reason: 'non_login_type',
+          rowIndex,
+          existingItemId: null,
+        });
+        continue;
+      }
+    }
+
+    const titleSource =
+      input.format === 'vaultlite_login_csv_v1'
+        ? readCell(row, headerIndex, 'title')
+        : readCell(row, headerIndex, 'name');
+    const username =
+      input.format === 'vaultlite_login_csv_v1'
+        ? readCell(row, headerIndex, 'username')
+        : readCell(row, headerIndex, 'login_username');
+    const password =
+      input.format === 'vaultlite_login_csv_v1'
+        ? readCell(row, headerIndex, 'password')
+        : readCell(row, headerIndex, 'login_password');
+    const urlValue =
+      input.format === 'vaultlite_login_csv_v1'
+        ? readCell(row, headerIndex, 'url')
+        : readCell(row, headerIndex, 'login_uri');
+    const notes = readCell(row, headerIndex, 'notes');
+    const folder = readCell(row, headerIndex, 'folder');
+    const favorite = parseBoolean(readCell(row, headerIndex, 'favorite'));
+    const title = normalizeCell(titleSource) || extractHostTitle(urlValue);
+    const firstUrl = extractFirstUrl(urlValue);
+
+    const isEmpty =
+      !title && !normalizeCell(username) && !normalizeCell(password) && !normalizeCell(firstUrl) && !normalizeCell(notes);
+    const status: ImportPreviewStatus = isEmpty ? 'invalid' : title ? 'valid' : 'invalid';
+    const reason = isEmpty ? 'empty_row' : title ? null : 'missing_title';
+
+    candidates.push({
+      sourceFormat: input.format,
+      sourceRef: buildSourceRef(input.format, null, rowIndex),
+      sourceItemId: null,
+      itemType: 'login',
+      title: title || '',
+      notes: normalizeCell(notes),
+      content: '',
+      username: normalizeCell(username),
+      password: normalizeCell(password),
+      totp: '',
+      urls: firstUrl ? [firstUrl] : [],
+      favoriteHint: favorite,
+      folderHint: normalizeCell(folder) || null,
+      archivedHint: false,
+      customFields: [],
+      attachments: [],
+      provenance: {},
+      dedupeKey: null,
+      status,
+      reason,
+      rowIndex,
+      existingItemId: null,
+    });
+  }
+  return candidates;
+}
+
+function buildExistingDedupeIndex(dataset: DecryptedVaultDataset): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const item of dataset.items) {
+    if (item.itemType === 'login') {
+      const payload = item.payload as Partial<{ title: string; username: string; urls: string[] }>;
+      const key = buildLoginDedupeKey({
+        title: String(payload.title ?? ''),
+        username: String(payload.username ?? ''),
+        firstUrl: Array.isArray(payload.urls) ? String(payload.urls[0] ?? '') : '',
+      });
+      index.set(key, item.itemId);
+      continue;
+    }
+    if (item.itemType === 'secure_note') {
+      const payload = item.payload as Partial<{ title: string; content: string }>;
+      const key = `secure_note|${normalizeForKey(String(payload.title ?? ''))}|${normalizeForKey(String(payload.content ?? ''))}`;
+      index.set(key, item.itemId);
+    }
+  }
+  return index;
+}
+
+function formatRows(format: SupportedImportFormat, candidates: ParsedImportCandidate[]): ImportPreviewRow[] {
+  return candidates.map((candidate) => ({
+    rowIndex: candidate.rowIndex,
+    sourceFormat: format,
+    sourceRef: candidate.sourceRef,
+    itemType: candidate.itemType,
+    title: candidate.title,
+    username: candidate.username,
+    firstUrl: candidate.urls[0] ?? '',
+    attachmentCount: candidate.attachments.length,
+    status: candidate.status,
+    reason: candidate.reason,
+  }));
+}
+
+async function finalizeCandidates(
+  format: SupportedImportFormat,
+  candidates: ParsedImportCandidate[],
+  dataset: DecryptedVaultDataset,
+): Promise<VaultImportPreview> {
+  if (candidates.length > LIMITS.maxImportItems) {
+    throw new Error('import_item_limit_exceeded');
+  }
+
+  const existing = buildExistingDedupeIndex(dataset);
+  const seen = new Set<string>();
+  let attachmentCount = 0;
+  for (const candidate of candidates) {
+    attachmentCount += candidate.attachments.length;
+    if (candidate.status !== 'valid') continue;
+
+    if (candidate.itemType === 'login') {
+      candidate.dedupeKey = buildLoginDedupeKey({
+        title: candidate.title,
+        username: candidate.username,
+        firstUrl: candidate.urls[0] ?? '',
+      });
+    } else if (candidate.itemType === 'secure_note') {
+      candidate.dedupeKey = await buildSecureNoteDedupeKey({
+        title: candidate.title,
+        content: candidate.content,
+      });
+    } else {
+      const attachmentHash = candidate.attachments.find((entry) => entry.attachmentFingerprint)?.attachmentFingerprint ?? null;
+      if (attachmentHash) {
+        candidate.dedupeKey = `document|${normalizeForKey(candidate.title)}|${attachmentHash}`;
+      } else if (candidate.sourceItemId) {
+        const firstAttachment = candidate.attachments[0];
+        candidate.dedupeKey = buildDocumentFallbackDedupeKey({
+          title: candidate.title,
+          fileName: firstAttachment?.fileName ?? candidate.title,
+          size: firstAttachment?.size ?? 0,
+          sourceFormat: candidate.sourceFormat,
+          sourceItemId: candidate.sourceItemId,
+        });
+      } else {
+        candidate.status = 'possible_duplicate_requires_review';
+        candidate.reason = 'possible_duplicate_requires_review';
+      }
+    }
+
+    if (!candidate.dedupeKey) continue;
+    if (existing.has(candidate.dedupeKey)) {
+      candidate.status = 'duplicate';
+      candidate.reason = 'duplicate_item';
+      candidate.existingItemId = existing.get(candidate.dedupeKey) ?? null;
+      continue;
+    }
+    if (seen.has(candidate.dedupeKey)) {
+      candidate.status = 'duplicate';
+      candidate.reason = 'duplicate_item';
+      continue;
+    }
+    seen.add(candidate.dedupeKey);
+  }
+
+  if (attachmentCount > LIMITS.maxImportAttachments) {
+    throw new Error('import_attachment_limit_exceeded');
+  }
+
+  return {
+    format,
+    totalRows: candidates.length,
+    validRows: candidates.filter((entry) => entry.status === 'valid').length,
+    duplicateRows: candidates.filter((entry) => entry.status === 'duplicate').length,
+    invalidRows: candidates.filter((entry) => entry.status === 'invalid').length,
+    unsupportedRows: candidates.filter((entry) => entry.status === 'unsupported_type').length,
+    reviewRequiredRows: candidates.filter((entry) => entry.status === 'possible_duplicate_requires_review').length,
+    attachmentRows: candidates.filter((entry) => entry.attachments.length > 0).length,
+    attachmentCount,
+    candidates,
+    rows: formatRows(format, candidates),
+  };
+}
+
+function findZipEntryName(entries: Map<string, Uint8Array>, expected: string): string | null {
+  if (entries.has(expected)) return expected;
+  const normalizedExpected = expected.replace(/\\/g, '/').toLowerCase();
+  return Array.from(entries.keys()).find((key) => key.toLowerCase() === normalizedExpected) ?? null;
+}
+
+function findZipEntry(entries: Map<string, Uint8Array>, expected: string): Uint8Array | null {
+  const key = findZipEntryName(entries, expected);
+  return key ? entries.get(key) ?? null : null;
+}
+
+function resolveBitwardenZipAttachmentPath(input: {
+  entries: Map<string, Uint8Array>;
+  itemId: string;
+  attachmentId: string | null;
+  fileName: string;
+}): { status: 'resolved'; path: string } | { status: 'missing' } | { status: 'ambiguous' } {
+  const keys = Array.from(input.entries.keys());
+
+  if (input.attachmentId) {
+    const byId = keys.filter((key) => key === input.attachmentId || key.endsWith(`/${input.attachmentId}`));
+    if (byId.length === 1) return { status: 'resolved', path: byId[0] ?? '' };
+    if (byId.length > 1) return { status: 'ambiguous' };
+  }
+
+  const fullPath = `attachments/${input.itemId}/${input.fileName}`;
+  const byItemPath = findZipEntryName(input.entries, fullPath);
+  if (byItemPath) return { status: 'resolved', path: byItemPath };
+
+  const byFileName = keys.filter((key) => key.endsWith(`/attachments/${input.fileName}`) || key === `attachments/${input.fileName}`);
+  if (byFileName.length === 1) return { status: 'resolved', path: byFileName[0] ?? '' };
+  if (byFileName.length > 1) return { status: 'ambiguous' };
+
+  return { status: 'missing' };
+}
+
+function isBitwardenLikeJson(root: Record<string, unknown>): boolean {
+  return Array.isArray(root.items) || Array.isArray(root.ciphers) || root.encrypted === true;
+}
+
+async function parseBitwardenJsonImport(input: {
+  jsonText: string;
+  format: Extract<SupportedImportFormat, 'bitwarden_json_v1' | 'bitwarden_zip_v1'>;
+  zipEntries?: Map<string, Uint8Array>;
+}): Promise<ParsedImportCandidate[]> {
+  const root = JSON.parse(input.jsonText) as Record<string, unknown>;
+  if (root.encrypted === true) {
+    throw new Error('encrypted_export_not_supported');
+  }
+  const folders = new Map<string, string>();
+  if (Array.isArray(root.folders)) {
+    root.folders.forEach((entry) => {
+      const folder = coerceRecord(entry);
+      const folderId = normalizeCell(String(folder.id ?? ''));
+      if (folderId) folders.set(folderId, normalizeCell(String(folder.name ?? '')));
+    });
+  }
+
+  const sourceItems = Array.isArray(root.items) ? root.items : Array.isArray(root.ciphers) ? root.ciphers : [];
+  const candidates: ParsedImportCandidate[] = [];
+  for (let index = 0; index < sourceItems.length; index += 1) {
+    const rowIndex = index + 1;
+    const item = coerceRecord(sourceItems[index]);
+    const itemId = normalizeCell(String(item.id ?? '')) || null;
+    const sourceRef = buildSourceRef(input.format, itemId, rowIndex);
+    const type = Number(item.type ?? -1);
+    const favoriteHint = Boolean(item.favorite);
+    const folderHint = folders.get(normalizeCell(String(item.folderId ?? ''))) ?? null;
+    const customFields: ParsedImportCustomField[] = (Array.isArray(item.fields) ? item.fields : [])
+      .map((field) => coerceRecord(field))
+      .map((field) => ({
+        label: normalizeCell(String(field.name ?? field.label ?? '')),
+        value: normalizeCell(String(field.value ?? '')),
+      }))
+      .filter((field) => field.label.length > 0);
+
+    if (type === 1) {
+      const login = coerceRecord(item.login);
+      const title = normalizeCell(String(item.name ?? '')) || extractHostTitle(String(login.username ?? ''));
+      const urls = Array.isArray(login.uris)
+        ? login.uris
+            .map((entry) => normalizeCell(String(coerceRecord(entry).uri ?? '')))
+            .filter((entry) => entry.length > 0)
+        : [];
+      const attachments: ParsedImportAttachment[] = [];
+      for (const attachmentEntry of Array.isArray(item.attachments) ? item.attachments : []) {
+        const attachment = coerceRecord(attachmentEntry);
+        const fileName = sanitizeFileName(String(attachment.fileName ?? 'attachment.bin'), 'attachment.bin');
+        const attachmentId = normalizeCell(String(attachment.id ?? '')) || null;
+        if (!input.zipEntries) continue;
+        const resolved = resolveBitwardenZipAttachmentPath({
+          entries: input.zipEntries,
+          itemId: itemId ?? '',
+          attachmentId,
+          fileName,
+        });
+        if (resolved.status === 'ambiguous') {
+          attachments.push({
+            fileName,
+            contentType: inferContentTypeFromFileName(fileName),
+            size: 0,
+            bytes: null,
+            sourcePath: null,
+            attachmentFingerprint: null,
+            errorCode: 'ambiguous_attachment_path',
+          });
+          continue;
+        }
+        if (resolved.status === 'missing') {
+          attachments.push({
+            fileName,
+            contentType: inferContentTypeFromFileName(fileName),
+            size: 0,
+            bytes: null,
+            sourcePath: null,
+            attachmentFingerprint: null,
+            errorCode: 'failed_attachment_missing_file',
+          });
+          continue;
+        }
+        const bytes = input.zipEntries.get(resolved.path) ?? null;
+        attachments.push({
+          fileName,
+          contentType: inferContentTypeFromFileName(fileName),
+          size: bytes?.byteLength ?? 0,
+          bytes,
+          sourcePath: resolved.path,
+          attachmentFingerprint: bytes ? await sha256Base64Url(bytes) : null,
+          errorCode: bytes ? null : 'failed_attachment_missing_file',
+        });
+      }
+
+      candidates.push({
+        sourceFormat: input.format,
+        sourceRef,
+        sourceItemId: itemId,
+        itemType: 'login',
+        title,
+        notes: normalizeCell(String(item.notes ?? '')),
+        content: '',
+        username: normalizeCell(String(login.username ?? '')),
+        password: normalizeCell(String(login.password ?? '')),
+        totp: normalizeCell(String(login.totp ?? '')),
+        urls,
+        favoriteHint,
+        folderHint,
+        archivedHint: false,
+        customFields,
+        attachments,
+        provenance: { format: input.format },
+        dedupeKey: null,
+        status: title ? 'valid' : 'invalid',
+        reason: title ? null : 'missing_title',
+        rowIndex,
+        existingItemId: null,
+      });
+      continue;
+    }
+
+    if (type === 2) {
+      candidates.push({
+        sourceFormat: input.format,
+        sourceRef,
+        sourceItemId: itemId,
+        itemType: 'secure_note',
+        title: normalizeCell(String(item.name ?? '')) || 'Secure note',
+        notes: '',
+        content: normalizeCell(String(item.notes ?? '')),
+        username: '',
+        password: '',
+        totp: '',
+        urls: [],
+        favoriteHint,
+        folderHint,
+        archivedHint: false,
+        customFields,
+        attachments: [],
+        provenance: { format: input.format },
+        dedupeKey: null,
+        status: 'valid',
+        reason: null,
+        rowIndex,
+        existingItemId: null,
+      });
+      continue;
+    }
+
+    candidates.push({
+      sourceFormat: input.format,
+      sourceRef,
+      sourceItemId: itemId,
+      itemType: 'login',
+      title: normalizeCell(String(item.name ?? '')),
+      notes: '',
+      content: '',
+      username: '',
+      password: '',
+      totp: '',
+      urls: [],
+      favoriteHint: false,
+      folderHint: null,
+      archivedHint: false,
+      customFields: [],
+      attachments: [],
+      provenance: { format: input.format },
+      dedupeKey: null,
+      status: 'unsupported_type',
+      reason: 'unsupported_type',
+      rowIndex,
+      existingItemId: null,
+    });
+  }
+  return candidates;
+}
+
+function find1PasswordItems(root: unknown): Array<Record<string, unknown>> {
+  const output: Array<Record<string, unknown>> = [];
+  const queue: unknown[] = [root];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+    if (Array.isArray(current)) {
+      current.forEach((entry) => queue.push(entry));
+      continue;
+    }
+    if (typeof current !== 'object') continue;
+    const record = current as Record<string, unknown>;
+    if (record.overview && record.details) output.push(record);
+    Object.values(record).forEach((entry) => {
+      if (entry && typeof entry === 'object') queue.push(entry);
+    });
+  }
+  return output;
+}
+
+async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Array> }): Promise<ParsedImportCandidate[]> {
+  const exportData = findZipEntry(input.zipEntries, 'export.data');
+  if (!exportData) throw new Error('unsupported_import_format');
+  const parsed = JSON.parse(textDecoder.decode(exportData));
+  const items = find1PasswordItems(parsed);
+  const candidates: ParsedImportCandidate[] = [];
+
+  for (let index = 0; index < items.length; index += 1) {
+    const rowIndex = index + 1;
+    const item = items[index];
+    const overview = coerceRecord(item.overview);
+    const details = coerceRecord(item.details);
+    const sourceItemId = normalizeCell(String(item.uuid ?? item.id ?? '')) || null;
+    const sourceRef = buildSourceRef('onepassword_1pux_v1', sourceItemId, rowIndex);
+    const archivedHint = normalizeForKey(String(item.state ?? '')) === 'archived';
+    const favoriteHint = Number(item.favIndex ?? 0) > 0;
+    const folderHint = normalizeCell(String(item.vaultName ?? item.vault ?? '')) || null;
+    const customFields = archivedHint ? [{ label: 'Imported archived', value: 'true' }] : [];
+    const documentAttributes = coerceRecord(details.documentAttributes);
+    const documentId = normalizeCell(String(documentAttributes.documentId ?? ''));
+    const documentFileName = normalizeCell(String(documentAttributes.fileName ?? ''));
+
+    if (documentId || documentFileName) {
+      const title = normalizeCell(String(overview.title ?? '')) || 'Imported document';
+      const body = [
+        normalizeCell(String(details.notesPlain ?? '')),
+        flattenStructuredValues(details.sections).join('\n'),
+      ]
+        .filter((entry) => entry.length > 0)
+        .join('\n\n');
+      const attachments: ParsedImportAttachment[] = [];
+      if (documentId && documentFileName) {
+        const preferred = `files/${documentId}__${documentFileName}`;
+        const path =
+          findZipEntryName(input.zipEntries, preferred) ??
+          Array.from(input.zipEntries.keys()).find((key) => key.endsWith(`${documentId}__${documentFileName}`)) ??
+          null;
+        const bytes = path ? input.zipEntries.get(path) ?? null : null;
+        attachments.push({
+          fileName: sanitizeFileName(documentFileName, 'document.bin'),
+          contentType: inferContentTypeFromFileName(documentFileName),
+          size: bytes?.byteLength ?? 0,
+          bytes,
+          sourcePath: path,
+          attachmentFingerprint: bytes ? await sha256Base64Url(bytes) : null,
+          errorCode: bytes ? null : 'failed_attachment_missing_file',
+        });
+      }
+
+      candidates.push({
+        sourceFormat: 'onepassword_1pux_v1',
+        sourceRef,
+        sourceItemId,
+        itemType: 'document',
+        title,
+        notes: '',
+        content: body,
+        username: '',
+        password: '',
+        totp: '',
+        urls: [],
+        favoriteHint,
+        folderHint,
+        archivedHint,
+        customFields,
+        attachments,
+        provenance: { format: 'onepassword_1pux_v1' },
+        dedupeKey: null,
+        status: 'valid',
+        reason: null,
+        rowIndex,
+        existingItemId: null,
+      });
+      continue;
+    }
+
+    const loginFields = Array.isArray(details.loginFields) ? details.loginFields.map((entry) => coerceRecord(entry)) : [];
+    const usernameField = loginFields.find((entry) => normalizeForKey(String(entry.designation ?? '')) === 'username');
+    const passwordField = loginFields.find((entry) => normalizeForKey(String(entry.designation ?? '')) === 'password');
+    const urls = Array.isArray(overview.urls)
+      ? overview.urls
+          .map((entry) => normalizeCell(String(coerceRecord(entry).url ?? '')))
+          .filter((entry) => entry.length > 0)
+      : [];
+    const fallbackUrl = normalizeCell(String(overview.url ?? ''));
+    if (fallbackUrl && !urls.includes(fallbackUrl)) urls.push(fallbackUrl);
+    const title = normalizeCell(String(overview.title ?? '')) || extractHostTitle(urls[0] ?? '');
+
+    candidates.push({
+      sourceFormat: 'onepassword_1pux_v1',
+      sourceRef,
+      sourceItemId,
+      itemType: 'login',
+      title,
+      notes: [
+        normalizeCell(String(details.notesPlain ?? '')),
+        flattenStructuredValues(details.sections).join('\n'),
+      ]
+        .filter((entry) => entry.length > 0)
+        .join('\n\n'),
+      content: '',
+      username: normalizeCell(String(usernameField?.value ?? overview.subtitle ?? '')),
+      password: normalizeCell(String(passwordField?.value ?? '')),
+      totp: '',
+      urls,
+      favoriteHint,
+      folderHint,
+      archivedHint,
+      customFields,
+      attachments: [],
+      provenance: { format: 'onepassword_1pux_v1' },
+      dedupeKey: null,
+      status: title ? 'valid' : 'invalid',
+      reason: title ? null : 'missing_title',
+      rowIndex,
+      existingItemId: null,
+    });
+  }
+
+  return candidates;
+}
+
+export async function parseVaultImportFile(input: {
+  file: File;
+  sessionStore: SessionStore;
+  vaultClient: VaultLiteVaultClient;
+}): Promise<VaultImportPreview> {
+  ensureFileSize(input.file);
+  const dataset = await loadDecryptedVaultDataset({
+    sessionStore: input.sessionStore,
+    vaultClient: input.vaultClient,
+  });
+  const lowerName = input.file.name.toLowerCase();
+
+  if (lowerName.endsWith('.csv')) {
+    const csvText = await input.file.text();
+    const format = detectCsvFormat(parseCsvRows(csvText)[0] ?? []) as Extract<
+      SupportedImportFormat,
+      'vaultlite_login_csv_v1' | 'bitwarden_csv_v1'
+    >;
+    return finalizeCandidates(format, await parseCsvImport({ csvText, format }), dataset);
+  }
+
+  if (lowerName.endsWith('.json')) {
+    const jsonText = await input.file.text();
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    if (!isBitwardenLikeJson(parsed)) throw new Error('unsupported_import_format');
+    return finalizeCandidates('bitwarden_json_v1', await parseBitwardenJsonImport({
+      jsonText,
+      format: 'bitwarden_json_v1',
+    }), dataset);
+  }
+
+  if (lowerName.endsWith('.zip') || lowerName.endsWith('.1pux')) {
+    const entries = parseZipEntries(new Uint8Array(await input.file.arrayBuffer()));
+    const is1Pux = Boolean(findZipEntry(entries, 'export.data')) && Boolean(findZipEntry(entries, 'export.attributes'));
+    if (is1Pux || lowerName.endsWith('.1pux')) {
+      return finalizeCandidates('onepassword_1pux_v1', await parse1Password1PuxImport({ zipEntries: entries }), dataset);
+    }
+    const jsonEntry =
+      findZipEntryName(entries, 'export.json') ??
+      Array.from(entries.keys()).find((key) => key.toLowerCase().endsWith('.json')) ??
+      null;
+    if (!jsonEntry) throw new Error('unsupported_import_format');
+    const jsonBytes = entries.get(jsonEntry);
+    if (!jsonBytes) throw new Error('unsupported_import_format');
+    return finalizeCandidates('bitwarden_zip_v1', await parseBitwardenJsonImport({
+      jsonText: textDecoder.decode(jsonBytes),
+      format: 'bitwarden_zip_v1',
+      zipEntries: entries,
+    }), dataset);
+  }
+
+  throw new Error('unsupported_import_format');
+}
+
+function mapCandidatePayload(candidate: ParsedImportCandidate): Record<string, unknown> {
+  const customFields = [...candidate.customFields];
+  if (candidate.archivedHint && !customFields.some((entry) => normalizeForKey(entry.label) === 'imported archived')) {
+    customFields.push({ label: 'Imported archived', value: 'true' });
+  }
+  if (candidate.itemType === 'login') {
+    return {
+      title: candidate.title,
+      username: candidate.username,
+      password: candidate.password,
+      urls: candidate.urls,
+      notes: candidate.notes,
+      customFields,
+    };
+  }
+  return {
+    title: candidate.title,
+    content: candidate.itemType === 'secure_note' ? candidate.content : candidate.content,
+    customFields,
+  };
+}
+
+async function uploadAttachmentsForCandidate(input: {
+  candidate: ParsedImportCandidate;
+  itemId: string;
+  accountKey: string;
+  vaultClient: VaultLiteVaultClient;
+  scope: string;
+}): Promise<{ created: number; failed: number }> {
+  if (input.candidate.attachments.length === 0) return { created: 0, failed: 0 };
+
+  let created = 0;
+  let failed = 0;
+  let cursor = 0;
+  const attachments = input.candidate.attachments;
+
+  async function worker() {
+    while (cursor < attachments.length) {
+      const index = cursor;
+      cursor += 1;
+      const attachment = attachments[index];
+      if (!attachment || !attachment.attachmentFingerprint || !attachment.bytes || attachment.errorCode) {
+        failed += 1;
+        continue;
+      }
+      if (attachment.size > LIMITS.maxAttachmentSize) {
+        failed += 1;
+        continue;
+      }
+
+      const historyId = historyRecordId({
+        scope: input.scope,
+        sourceFormat: input.candidate.sourceFormat,
+        sourceRef: input.candidate.sourceRef,
+        sourceItemId: input.candidate.sourceItemId,
+        dedupeKey: input.candidate.dedupeKey,
+        attachmentFingerprint: attachment.attachmentFingerprint,
+      });
+
+      try {
+        await withAttachmentRetry(async () => {
+          const init = await input.vaultClient.initAttachmentUpload({
+            itemId: input.itemId,
+            fileName: sanitizeFileName(attachment.fileName, `${input.itemId}.bin`),
+            contentType: attachment.contentType || inferContentTypeFromFileName(attachment.fileName),
+            size: attachment.size,
+            idempotencyKey: `import-attachment:${input.candidate.sourceRef}:${attachment.attachmentFingerprint}`,
+          });
+          const encryptedEnvelope = await encryptAttachmentBlobPayload({
+            accountKey: input.accountKey,
+            plaintext: attachment.bytes!.buffer.slice(
+              attachment.bytes!.byteOffset,
+              attachment.bytes!.byteOffset + attachment.bytes!.byteLength,
+            ) as ArrayBuffer,
+            contentType: attachment.contentType || inferContentTypeFromFileName(attachment.fileName),
+          });
+          await withAttachmentRetry(async () =>
+            input.vaultClient.uploadAttachmentContent(init.uploadId, {
+              uploadToken: init.uploadToken,
+              encryptedEnvelope,
+            }),
+          );
+          await withAttachmentRetry(async () => input.vaultClient.finalizeAttachmentUpload(init.uploadId, input.itemId));
+        });
+        created += 1;
+        await saveHistory({
+          id: historyId,
+          scope: input.scope,
+          sourceFormat: input.candidate.sourceFormat,
+          sourceRef: input.candidate.sourceRef,
+          sourceItemId: input.candidate.sourceItemId,
+          dedupeKey: input.candidate.dedupeKey,
+          attachmentFingerprint: attachment.attachmentFingerprint,
+          status: 'attached',
+          createdItemId: input.itemId,
+          errorCode: null,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        failed += 1;
+        await saveHistory({
+          id: historyId,
+          scope: input.scope,
+          sourceFormat: input.candidate.sourceFormat,
+          sourceRef: input.candidate.sourceRef,
+          sourceItemId: input.candidate.sourceItemId,
+          dedupeKey: input.candidate.dedupeKey,
+          attachmentFingerprint: attachment.attachmentFingerprint,
+          status: 'failed',
+          createdItemId: input.itemId,
+          errorCode: error instanceof Error ? error.message : 'failed_attachment_upload',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(ATTACHMENTS_PER_ITEM_CONCURRENCY, attachments.length)) }, () => worker()),
+  );
+  return { created, failed };
+}
+
+export async function executeVaultImport(input: {
+  preview: VaultImportPreview;
+  sessionStore: SessionStore;
+  vaultClient: VaultLiteVaultClient;
+  onProgress?: (progress: {
+    processed: number;
+    total: number;
+    created: number;
+    skipped: number;
+    failed: number;
+    attachmentsCreated: number;
+    attachmentsFailed: number;
+  }) => void;
+}): Promise<VaultImportExecutionResult> {
+  const runtimeMetadata = await input.sessionStore.getRuntimeMetadata();
+  const unlocked = input.sessionStore.getUnlockedVaultContext();
+  const scope = getImportScope(runtimeMetadata.deploymentFingerprint, unlocked.username);
+  const history = await loadHistory(scope);
+
+  const validRows = input.preview.candidates.filter((candidate) => candidate.status === 'valid');
+  const skippedRows = input.preview.candidates.filter((candidate) => candidate.status !== 'valid');
+  const records: VaultImportExecutionRow[] = [];
+  let created = 0;
+  let skipped = 0;
+  let failed = 0;
+  let attachmentsCreated = 0;
+  let attachmentsFailed = 0;
+  let processed = 0;
+  const total = validRows.length;
+  const createdUiStateRows: Array<{ itemId: string; favorite: boolean; folder: string | null }> = [];
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < validRows.length) {
+      const index = cursor;
+      cursor += 1;
+      const candidate = validRows[index];
+      if (!candidate) continue;
+      try {
+        const encryptedPayload = await encryptVaultItemPayload({
+          accountKey: unlocked.accountKey,
+          itemType: candidate.itemType,
+          payload: mapCandidatePayload(candidate),
+        });
+        const createdItem = await input.vaultClient.createItem({
+          itemType: candidate.itemType,
+          encryptedPayload,
+        });
+        const attachmentStats = await uploadAttachmentsForCandidate({
+          candidate,
+          itemId: createdItem.itemId,
+          accountKey: unlocked.accountKey,
+          vaultClient: input.vaultClient,
+          scope,
+        });
+        attachmentsCreated += attachmentStats.created;
+        attachmentsFailed += attachmentStats.failed;
+        created += 1;
+        createdUiStateRows.push({
+          itemId: createdItem.itemId,
+          favorite: candidate.favoriteHint,
+          folder: candidate.folderHint,
+        });
+        records.push({
+          rowIndex: candidate.rowIndex,
+          sourceRef: candidate.sourceRef,
+          status: 'created',
+          itemId: createdItem.itemId,
+          reason: null,
+          attachmentsCreated: attachmentStats.created,
+          attachmentsFailed: attachmentStats.failed,
+        });
+      } catch (error) {
+        failed += 1;
+        records.push({
+          rowIndex: candidate.rowIndex,
+          sourceRef: candidate.sourceRef,
+          status: 'failed',
+          itemId: null,
+          reason: error instanceof Error ? error.message : String(error),
+          attachmentsCreated: 0,
+          attachmentsFailed: candidate.attachments.length,
+        });
+      } finally {
+        processed += 1;
+        input.onProgress?.({
+          processed,
+          total,
+          created,
+          skipped,
+          failed,
+          attachmentsCreated,
+          attachmentsFailed,
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(IMPORT_CREATE_CONCURRENCY, validRows.length || 1)) }, () => worker()),
+  );
+
+  for (const candidate of skippedRows) {
+    if (candidate.status === 'possible_duplicate_requires_review') {
+      skipped += 1;
+      records.push({
+        rowIndex: candidate.rowIndex,
+        sourceRef: candidate.sourceRef,
+        status: 'skipped_review_required',
+        itemId: null,
+        reason: candidate.reason ?? 'possible_duplicate_requires_review',
+        attachmentsCreated: 0,
+        attachmentsFailed: 0,
+      });
+      continue;
+    }
+
+    if (candidate.status === 'duplicate' && candidate.existingItemId && candidate.attachments.length > 0) {
+      let retriedCreated = 0;
+      let retriedFailed = 0;
+      for (const attachment of candidate.attachments) {
+        if (!attachment.attachmentFingerprint || !attachment.bytes) continue;
+        const key = historyRecordId({
+          scope,
+          sourceFormat: candidate.sourceFormat,
+          sourceRef: candidate.sourceRef,
+          sourceItemId: candidate.sourceItemId,
+          dedupeKey: candidate.dedupeKey,
+          attachmentFingerprint: attachment.attachmentFingerprint,
+        });
+        const previous = history.get(key);
+        if (!previous || previous.status !== 'failed' || previous.createdItemId !== candidate.existingItemId) continue;
+        const retried = await uploadAttachmentsForCandidate({
+          candidate: { ...candidate, attachments: [attachment] },
+          itemId: candidate.existingItemId,
+          accountKey: unlocked.accountKey,
+          vaultClient: input.vaultClient,
+          scope,
+        });
+        retriedCreated += retried.created;
+        retriedFailed += retried.failed;
+      }
+      if (retriedCreated > 0 || retriedFailed > 0) {
+        attachmentsCreated += retriedCreated;
+        attachmentsFailed += retriedFailed;
+        skipped += 1;
+        records.push({
+          rowIndex: candidate.rowIndex,
+          sourceRef: candidate.sourceRef,
+          status: 'retry_missing_attachments_for_existing_item',
+          itemId: candidate.existingItemId,
+          reason: null,
+          attachmentsCreated: retriedCreated,
+          attachmentsFailed: retriedFailed,
+        });
+        continue;
+      }
+    }
+
+    skipped += 1;
+    records.push({
+      rowIndex: candidate.rowIndex,
+      sourceRef: candidate.sourceRef,
+      status: 'skipped_duplicate',
+      itemId: candidate.existingItemId,
+      reason: candidate.reason ?? candidate.status,
+      attachmentsCreated: 0,
+      attachmentsFailed: 0,
+    });
+  }
+
+  applyUiStateHints({
+    username: unlocked.username,
+    createdRows: createdUiStateRows,
+  });
+
+  const sorted = records.sort((left, right) => left.rowIndex - right.rowIndex);
+  return {
+    created,
+    skipped,
+    failed,
+    attachmentsCreated,
+    attachmentsFailed,
+    records: sorted,
+    report: {
+      generatedAt: new Date().toISOString(),
+      format: input.preview.format,
+      totalRows: input.preview.totalRows,
+      created,
+      skipped,
+      failed,
+      attachmentsCreated,
+      attachmentsFailed,
+      rows: sorted,
+    },
+  };
+}
+
+export function estimateBackupPackageSize(input: { canonicalPayloadBytes: number }): number {
+  const fixedPackageOverheadBytes = 8192;
+  const base64urlLen = (value: number) => Math.ceil((value * 4) / 3);
+  return (
+    fixedPackageOverheadBytes +
+    base64urlLen(input.canonicalPayloadBytes) +
+    base64urlLen(16) +
+    base64urlLen(32)
+  );
+}

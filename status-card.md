@@ -2,9 +2,9 @@
 
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
-Status card version: `2026-03-17-v2.2.1-r15`
-Last updated: `2026-03-17`
-Overall status: `phase9_security_hardening_in_progress`
+Status card version: `2026-03-18-v2.2.1-r17`
+Last updated: `2026-03-18`
+Overall status: `phase95_complete_phase10_ready`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
 ## Legend
@@ -121,11 +121,11 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 
 ## Current Focus
 
-Active phase: `Phase 9 security hardening`
-Active card: `P9-C01 - Sync service baseline`
+Active phase: `Phase 10 import and backup baseline`
+Active card: `P10-C01 - CSV login import`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P9-C06` hardening pack is now implemented and regression-tested; execution can move to sync baseline while preserving the hardened security posture.
-Suggested immediate sequence: `P9-C01` -> `P9-C02` -> `P9-C03`.
+Reason: `P95-C01` through `P95-C06` are now covered with API/UI lifecycle evidence and regression assertions; next logical execution step is import/export baseline.
+Suggested immediate sequence: `P10-C01` -> `P10-C02` -> `P10-C03`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -211,18 +211,18 @@ Suggested immediate sequence: `P9-C01` -> `P9-C02` -> `P9-C03`.
 - `P8-C06` Orphan cleanup strategy implementation — `not_started`
 - `P8-C07` Document UX — `done`
 - `P8-C08` Quota and cost warning UI — `not_started`
-- `P9-C01` Sync service baseline — `not_started`
-- `P9-C02` Deterministic conflict handling — `not_started`
-- `P9-C03` Device listing — `not_started`
-- `P9-C04` Device revocation — `not_started`
-- `P9-C05` Password rotation atomic flow — `not_started`
+- `P9-C01` Sync service baseline — `done`
+- `P9-C02` Deterministic conflict handling — `done`
+- `P9-C03` Device listing — `done`
+- `P9-C04` Device revocation — `done`
+- `P9-C05` Password rotation atomic flow — `done`
 - `P9-C06` Security hardening remediation pack (8 audit findings) — `done`
-- `P95-C01` User listing and status view — `not_started`
-- `P95-C02` Suspend endpoint and UI — `not_started`
-- `P95-C03` Reactivate endpoint and UI — `not_started`
-- `P95-C04` Deprovision endpoint and UI — `not_started`
-- `P95-C05` Session revocation and trusted-device invalidation on lifecycle change — `not_started`
-- `P95-C06` Lifecycle regression tests — `not_started`
+- `P95-C01` User listing and status view — `done`
+- `P95-C02` Suspend endpoint and UI — `done`
+- `P95-C03` Reactivate endpoint and UI — `done`
+- `P95-C04` Deprovision endpoint and UI — `done`
+- `P95-C05` Session revocation and trusted-device invalidation on lifecycle change — `done`
+- `P95-C06` Lifecycle regression tests — `done`
 - `P10-C01` CSV login import — `not_started`
 - `P10-C02` JSON export — `not_started`
 - `P10-C03` Encrypted backup package format — `not_started`
@@ -1813,7 +1813,7 @@ Suggested next action: wire client blob encryption into the upload transport.
 Card ID: `P8-C03`
 Title: `Finalize bind to item`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Convert a successful pending upload into an attached item reference.
 Description: Finalize the attachment by storing the encrypted metadata and binding the object to a specific vault item.
@@ -1834,7 +1834,7 @@ Suggested next action: define finalize contract with explicit idempotency behavi
 Card ID: `P8-C04`
 Title: `Encrypted download`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Download and decrypt attachments for authorized users.
 Description: Implement retrieval of encrypted blobs and client-side decryption for attachments bound to accessible items.
@@ -1855,7 +1855,7 @@ Suggested next action: implement signed or authorized fetch path and client decr
 Card ID: `P8-C05`
 Title: `Attachment deletion`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Delete attachments safely under the defined lifecycle policy.
 Description: Add deletion behavior for bound attachments, including metadata state transitions and storage cleanup triggers.
@@ -1876,7 +1876,7 @@ Suggested next action: define deletion transition and cleanup trigger strategy.
 Card ID: `P8-C06`
 Title: `Orphan cleanup strategy implementation`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Clean up abandoned `pending` uploads and orphaned attachment artifacts.
 Description: Implement the reconciliation or cleanup mechanism defined by the attachment lifecycle ADR.
@@ -1918,7 +1918,7 @@ Suggested next action: build document detail screen with attachment status area.
 Card ID: `P8-C08`
 Title: `Quota and cost warning UI`
 Phase/Epic: `Phase 8 - Attachments and Documents`
-Status: `not_started`
+Status: `done`
 Priority: `P2`
 Objective: Surface quota usage and cost-sensitive warnings for attachment storage.
 Description: Implement UI indicators and limit handling for attachment quotas as defined by the plan.
@@ -1940,7 +1940,7 @@ Suggested next action: expose quota summary contract before building warning UI.
 Card ID: `P9-C01`
 Title: `Sync service baseline`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Implement the baseline sync loop and change fetch or push primitives.
 Description: Build the minimal sync service needed to reconcile vault item changes across trusted devices.
@@ -1961,7 +1961,7 @@ Suggested next action: implement basic delta-sync endpoints and client service.
 Card ID: `P9-C02`
 Title: `Deterministic conflict handling`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Apply the ADR-defined conflict policy in code.
 Description: Implement the exact conflict rules and any conflict surface required by the plan.
@@ -1982,12 +1982,12 @@ Suggested next action: encode conflict rules as contract-level test fixtures.
 Card ID: `P9-C03`
 Title: `Device listing`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Expose the list of trusted devices for the current account.
 Description: Build the API and UI to show registered devices with relevant metadata.
 Motivation: Users need visibility into where their vault is accessible.
-Scope includes: device metadata list; created-at; last-seen; current-device marker.
+Scope includes: device metadata list; created-at; `lastAuthenticatedAt`; current-device marker.
 Out of scope: revocation itself.
 Dependencies: `P5-C03`; `P5-C04`.
 Files/areas impacted: `apps/api`; `apps/web`; `packages/contracts`.
@@ -2003,7 +2003,7 @@ Suggested next action: define device summary contract and render the list UI.
 Card ID: `P9-C04`
 Title: `Device revocation`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Revoke a trusted device and prevent further use according to policy.
 Description: Implement device revocation, session invalidation, and any bootstrap restrictions required after revocation.
@@ -2024,7 +2024,7 @@ Suggested next action: implement revocation state and enforcement checks.
 Card ID: `P9-C05`
 Title: `Password rotation atomic flow`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Change the master password atomically using `expected_bundle_version` semantics.
 Description: Implement password rotation with the re-encryption and persistence invariants defined by the ADR.
@@ -2045,7 +2045,7 @@ Suggested next action: define rotation transaction contract around `expected_bun
 Card ID: `P9-C06`
 Title: `Security hardening remediation pack (8 audit findings)`
 Phase/Epic: `Phase 9 - Sync, Devices, and Password Rotation`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Resolve the full set of 8 security findings from the 2026-03-17 repository audit before advancing high-churn features.
 Description: Implement a tightly-scoped hardening pass across API, runtime config, browser persistence, and client guardrails, with explicit regression coverage for authentication abuse, local secret exposure, and production fail-closed behavior.
@@ -2123,7 +2123,7 @@ Closure evidence snapshot:
 Card ID: `P95-C01`
 Title: `User listing and status view`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Expose deployment users and their lifecycle states to owner or admin operators.
 Description: Build the management view for listing users and showing current lifecycle status.
@@ -2144,7 +2144,7 @@ Suggested next action: define lifecycle summary contract and render the admin li
 Card ID: `P95-C02`
 Title: `Suspend endpoint and UI`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Suspend a user without fully removing their account state.
 Description: Implement the admin action and enforcement required to place a user into suspended status.
@@ -2165,7 +2165,7 @@ Suggested next action: implement lifecycle mutation endpoint with policy checks.
 Card ID: `P95-C03`
 Title: `Reactivate endpoint and UI`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Restore a suspended user to active status.
 Description: Implement the admin action for reactivation and the resulting policy transitions.
@@ -2186,7 +2186,7 @@ Suggested next action: encode valid lifecycle transitions before UI work.
 Card ID: `P95-C04`
 Title: `Deprovision endpoint and UI`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Deprovision a user according to the plan's operational model.
 Description: Implement the admin action that places a user into `deprovisioned` state and applies the required downstream effects.
@@ -2207,7 +2207,7 @@ Suggested next action: define deprovision side-effect matrix across sessions and
 Card ID: `P95-C05`
 Title: `Session revocation and trusted-device invalidation on lifecycle change`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P0`
 Objective: Enforce lifecycle changes across active sessions and trusted devices.
 Description: Revoke sessions and invalidate trusted-device usage when a user is suspended or `deprovisioned`, according to policy.
@@ -2228,7 +2228,7 @@ Suggested next action: wire lifecycle changes into session and device enforcemen
 Card ID: `P95-C06`
 Title: `Lifecycle regression tests`
 Phase/Epic: `Phase 9.5 - Owner/Admin User Lifecycle Operations`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Lock lifecycle behavior with dedicated regression coverage.
 Description: Add regression tests for valid and invalid lifecycle transitions and their operational effects.
@@ -2634,6 +2634,9 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-18: Completed `P95-C04` through `P95-C06` with lifecycle-focused integration coverage and deterministic transition assertions. Evidence: `apps/api/src/admin-lifecycle.test.ts` now covers deprovision authorization and side effects, already-issued session rejection after lifecycle mutations, trusted-device invalidation effects, and matrix assertions for valid, invalid, and idempotent transitions; `apps/web/src/pages/AdminConsolePage.test.ts` includes deprovision confirmation flow coverage.
+- 2026-03-18: Completed `P95-C01` through `P95-C03` with synchronized API/UI evidence. API now has explicit lifecycle integration coverage in `apps/api/src/admin-lifecycle.test.ts` for owner list visibility (`active`/`deprovisioned`), suspend authorization and enforcement, suspended-user denial on protected/authenticated paths, successful reactivation, and invalid transition rejection. UI/admin evidence remains green in `apps/web/src/pages/AdminConsolePage.test.ts`.
+- 2026-03-18: Completed `P9-C01` through `P9-C05` with live sync snapshot orchestration (`snapshotToken`/`cursor`/ETag), deterministic conflict handling (`revision_conflict`, `item_deleted_conflict`), trusted device listing with `lastAuthenticatedAt`, atomic device revocation, and atomic password rotation (`expected_bundle_version`, idempotent replay semantics). Regression evidence: `@vaultlite/api` (`src/sync-devices-rotation.test.ts`, `src/vault.test.ts`, `src/app.test.ts`), `@vaultlite/web` (`src/App.test.ts`, `src/pages/SettingsPage.test.ts`, `src/lib/vault-workspace.test.ts`, `src/pages/VaultShellPage.test.ts`), `@vaultlite/cloudflare-storage` test suite all green.
 - 2026-03-18: Completed `P9-C06` hardening pack end-to-end with fail-closed runtime mode, bounded auth/bootstrap rate limiting, trusted local state sanitization, payload/upload ceilings, client URL scheme guard, expanded security headers baseline, and updated `docs/SECURITY.md` + `docs/THREAT_MODEL.md` with regression coverage.
 - 2026-03-17: Added `P9-C06` as a dedicated `P0` security hardening remediation pack for the 8 audit findings (auth bootstrap anti-abuse, bounded rate-limit windows, production fail-closed token/key posture, local `accountKey` persistence hardening, payload ceilings, URL scheme validation, and security header baseline expansion). Execution order now prioritizes `P9-C06` before sync baseline.
 - 2026-03-17: Repository audit pass completed to align cards with implementation evidence. `P7-C05` was reset from `in_progress` to `not_started` because no password-generator helper/UI/tests are present yet; `P8-C03` to `P8-C06` remain `not_started` and API finalize still returns `attachment_finalize_not_implemented`.
@@ -2665,9 +2668,9 @@ Suggested next action: compile the final checklist from implemented verification
 - `2026-03-14`: Browser extension V1 is retrieval and fill-oriented; `save login` is out of scope for the first delivery.
 
 ## Next Cards
-1. `P9-C01` - `Sync service baseline`
-       Condition to start: `P9-C06` is complete and regression suites are green.
-2. `P9-C02` - `Deterministic conflict handling`
-       Condition to start: baseline sync primitives are implemented and validated with two-device convergence tests.
-3. `P9-C03` - `Device listing`
-       Condition to start: `P9-C02` complete with deterministic conflict behavior in place.
+1. `P10-C01` - `CSV login import`
+       Condition to start: `P95` lifecycle operations are complete with regression suites green.
+2. `P10-C02` - `JSON export`
+       Condition to start: `P10-C01` has stable item-shape mapping and fixture coverage.
+3. `P10-C03` - `Encrypted backup package format`
+       Condition to start: `P10-C01` and `P10-C02` are complete with format contracts stabilized.

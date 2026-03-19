@@ -78,6 +78,10 @@ function createSessionStore() {
         platform: 'web',
       },
     }),
+    getRuntimeMetadata: vi.fn().mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+    }),
     handleUnauthorized: vi.fn(),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
@@ -118,6 +122,15 @@ async function mountSettingsPage() {
 }
 
 describe('SettingsPage', () => {
+  test('renders data portability actions in settings', async () => {
+    const { wrapper } = await mountSettingsPage();
+
+    expect(wrapper.text()).toContain('Data portability');
+    expect(wrapper.text()).toContain('Import vault file');
+    expect(wrapper.text()).toContain('Export JSON');
+    expect(wrapper.text()).toContain('Create encrypted backup');
+  });
+
   test('renders trusted devices with explicit lastAuthenticated label', async () => {
     const { wrapper, sessionStore } = await mountSettingsPage();
 

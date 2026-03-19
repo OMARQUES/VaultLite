@@ -2,14 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ACCOUNT_KDF_PROFILE,
+  BACKUP_KDF_PROFILE,
   assertSupportedVersion,
   canonicalizeAccountKitPayload,
+  createBackupPackageV1,
+  decryptBackupPayload,
   decryptBlobEnvelope,
   decryptVaultEnvelope,
+  deriveBackupKey,
   deriveMasterKey,
+  encryptBackupPayload,
   generateAccountKitKeyPair,
   generateAccountKey,
   normalizeAccountKey,
+  parseAndValidateBackupPackageV1,
   signAccountKitPayload,
   verifyAccountKitSignature,
   encryptBlobEnvelope,
@@ -124,5 +130,107 @@ describe('crypto primitives', () => {
       signature,
       publicKey: keyPair.publicKey,
     })).toBe(false);
+  });
+
+  it('encrypts and decrypts backup payloads with deterministic nonce', () => {
+    const { key } = deriveBackupKey({
+      passphrase: 'StrongBackupPassphrase!',
+      salt: Buffer.alloc(16, 4),
+    });
+    const encrypted = encryptBackupPayload({
+      key,
+      plaintext: '{"version":"vaultlite.export.v1"}',
+      nonce: Buffer.alloc(12, 5),
+    });
+
+    const decrypted = decryptBackupPayload({
+      key,
+      ciphertext: encrypted.ciphertext,
+      authTag: encrypted.authTag,
+      nonce: encrypted.nonce,
+    });
+
+    expect(BACKUP_KDF_PROFILE).toMatchObject({
+      algorithm: 'argon2id',
+      memory: 65536,
+      passes: 3,
+      parallelism: 1,
+      dkLen: 32,
+    });
+    expect(decrypted).toBe('{"version":"vaultlite.export.v1"}');
+  });
+
+  it('creates and validates encrypted backup packages', () => {
+    const backupPackage = createBackupPackageV1({
+      passphrase: 'StrongBackupPassphrase!',
+      exportPayload: {
+        version: 'vaultlite.export.v1',
+        exportedAt: '2026-03-18T12:00:00.000Z',
+        source: {
+          app: 'vaultlite-web',
+          schemaVersion: 1,
+          username: 'alice',
+          deploymentFingerprint: 'development_deployment',
+        },
+        vault: {
+          items: [
+            {
+              itemId: 'item_1',
+              itemType: 'login',
+              revision: 1,
+              createdAt: '2026-03-18T11:00:00.000Z',
+              updatedAt: '2026-03-18T11:30:00.000Z',
+              payload: {
+                title: 'Email',
+                username: 'alice@example.com',
+                password: 'opaque',
+                urls: ['https://example.com'],
+                notes: '',
+                customFields: [],
+              },
+            },
+          ],
+          tombstones: [],
+          counts: {
+            items: 1,
+            tombstones: 0,
+          },
+        },
+        uiState: {
+          favorites: ['item_1'],
+          folderAssignments: {
+            item_1: 'personal',
+          },
+          folders: [{ id: 'personal', name: 'Personal' }],
+        },
+      },
+      source: {
+        app: 'vaultlite-web',
+        schemaVersion: 1,
+        username: 'alice',
+        deploymentFingerprint: 'development_deployment',
+      },
+      manifest: {
+        itemCount: 1,
+        tombstoneCount: 0,
+        uiStateIncluded: true,
+        attachmentMode: 'none',
+        attachmentCount: 0,
+        attachmentBytes: 0,
+      },
+      createdAt: '2026-03-18T12:01:00.000Z',
+      salt: Buffer.alloc(16, 6),
+      nonce: Buffer.alloc(12, 7),
+    });
+
+    const parsed = parseAndValidateBackupPackageV1({
+      packageJson: backupPackage,
+      passphrase: 'StrongBackupPassphrase!',
+    });
+
+    expect(parsed.package.version).toBe('vaultlite.backup.v1');
+    expect(parsed.package.vault.attachments).toEqual([]);
+    expect(parsed.exportPayload.version).toBe('vaultlite.export.v1');
+    expect(parsed.exportPayload.vault.counts.items).toBe(1);
   });
 });

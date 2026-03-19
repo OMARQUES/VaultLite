@@ -1,6 +1,7 @@
 export * from './account-key';
 export * from './account-kit';
 export * from './blob-envelope';
+export * from './backup-package';
 export * from './base64';
 export * from './kdf';
 export * from './test-vectors';

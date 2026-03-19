@@ -2,12 +2,14 @@
 defineProps<{
   open: boolean;
   title: string;
+  modalClass?: string;
+  backdropClass?: string;
 }>();
 </script>
 
 <template>
-  <div v-if="open" class="dialog-backdrop" role="presentation">
-    <div class="dialog-modal" role="dialog" aria-modal="true" :aria-label="title">
+  <div v-if="open" class="dialog-backdrop" :class="backdropClass" role="presentation">
+    <div class="dialog-modal" :class="modalClass" role="dialog" aria-modal="true" :aria-label="title">
       <div class="dialog-modal__header">
         <h2>{{ title }}</h2>
       </div>

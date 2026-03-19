@@ -100,6 +100,7 @@ export interface SessionStore {
     currentPassword: string;
     nextPassword: string;
   }): Promise<PasswordRotationCompleteOutput>;
+  getRuntimeMetadata(): Promise<RuntimeMetadata>;
   handleUnauthorized(input?: {
     reasonCode?: string | null;
     message?: string | null;
@@ -786,6 +787,9 @@ export function createSessionStore(input: {
       });
 
       return rotationResponse;
+    },
+    async getRuntimeMetadata() {
+      return ensureRuntimeMetadata();
     },
     setAutoLockAfterMs(value: number) {
       if (!isValidAutoLockAfterMs(value)) {

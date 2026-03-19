@@ -466,6 +466,7 @@ describe('createVaultLiteApi', () => {
       },
       body: JSON.stringify({
         itemId: 'item_doc_1',
+        fileName: 'document-1.pdf',
         contentType: 'application/pdf',
         size: 25 * 1024 * 1024 + 1,
         idempotencyKey: 'idem-attachment-size-limit',
@@ -502,6 +503,7 @@ describe('createVaultLiteApi', () => {
       },
       body: JSON.stringify({
         itemId: 'item_doc_2',
+        fileName: 'document-2.pdf',
         contentType: 'application/pdf',
         size: 10,
         idempotencyKey: 'idem-attachment-envelope-mismatch',
@@ -562,6 +564,7 @@ describe('createVaultLiteApi', () => {
       },
       body: JSON.stringify({
         itemId: 'item_doc_3',
+        fileName: 'document-3.pdf',
         contentType: 'application/pdf',
         size: 10,
         idempotencyKey: 'idem-attachment-envelope-too-large',
@@ -591,6 +594,188 @@ describe('createVaultLiteApi', () => {
     expect(await response.json()).toEqual({
       ok: false,
       code: 'upload_envelope_too_large',
+    });
+  });
+
+  test('finalizes uploaded attachments with idempotent canonical result semantics', async () => {
+    const { app, storage } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    await storage.vaultItems.create({
+      itemId: 'item_doc_finalize_1',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_finalize_1',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+
+    const initResponse = await app.request('/api/attachments/uploads/init', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemId: 'item_doc_finalize_1',
+        fileName: 'finalize-1.pdf',
+        contentType: 'application/pdf',
+        size: 6,
+        idempotencyKey: 'idem-attachment-finalize',
+      }),
+    });
+    expect(initResponse.status).toBe(201);
+    const initPayload = (await initResponse.json()) as { uploadId: string; uploadToken: string };
+
+    const envelope = {
+      version: 'blob.v1',
+      algorithm: 'aes-256-gcm',
+      nonce: toBase64UrlUtf8('nonce-finalize'),
+      ciphertext: toBase64UrlUtf8('ABCDEF'),
+      authTag: toBase64UrlUtf8('tag-finalize'),
+      contentType: 'application/pdf',
+      originalSize: 6,
+    };
+
+    const uploadResponse = await app.request(`/api/attachments/uploads/${initPayload.uploadId}/content`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        uploadToken: initPayload.uploadToken,
+        encryptedEnvelope: toBase64UrlUtf8(JSON.stringify(envelope)),
+      }),
+    });
+    expect(uploadResponse.status).toBe(200);
+
+    const finalizeResponse = await app.request('/api/attachments/uploads/finalize', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        uploadId: initPayload.uploadId,
+        itemId: 'item_doc_finalize_1',
+      }),
+    });
+    expect(finalizeResponse.status).toBe(200);
+    expect(await finalizeResponse.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        result: 'success_changed',
+        upload: expect.objectContaining({
+          uploadId: initPayload.uploadId,
+          itemId: 'item_doc_finalize_1',
+          fileName: 'finalize-1.pdf',
+          lifecycleState: 'attached',
+        }),
+      }),
+    );
+
+    const replay = await app.request('/api/attachments/uploads/finalize', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        uploadId: initPayload.uploadId,
+        itemId: 'item_doc_finalize_1',
+      }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        result: 'success_no_op',
+      }),
+    );
+
+    const envelopeResponse = await app.request(
+      `/api/attachments/uploads/${initPayload.uploadId}/envelope`,
+      {
+        method: 'GET',
+        headers: {
+          cookie: ownerCookies,
+        },
+      },
+    );
+    expect(envelopeResponse.status).toBe(200);
+    expect(await envelopeResponse.json()).toEqual(
+      expect.objectContaining({
+        uploadId: initPayload.uploadId,
+        itemId: 'item_doc_finalize_1',
+        fileName: 'finalize-1.pdf',
+        encryptedEnvelope: toBase64UrlUtf8(JSON.stringify(envelope)),
+      }),
+    );
+  });
+
+  test('rejects finalize when upload is reused against another item', async () => {
+    const { app, storage } = await createAppFixture();
+    const { ownerCookies, ownerCsrf, ownerUserId } = await initializeDeployment(app);
+
+    await storage.vaultItems.create({
+      itemId: 'item_doc_finalize_2',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_finalize_2',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+    await storage.vaultItems.create({
+      itemId: 'item_doc_finalize_other',
+      ownerUserId,
+      itemType: 'document',
+      revision: 1,
+      encryptedPayload: 'bundle_payload_doc_finalize_other',
+      createdAt: '2026-03-17T12:00:00.000Z',
+      updatedAt: '2026-03-17T12:00:00.000Z',
+    });
+
+    const initResponse = await app.request('/api/attachments/uploads/init', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        itemId: 'item_doc_finalize_2',
+        fileName: 'finalize-2.pdf',
+        contentType: 'application/pdf',
+        size: 5,
+        idempotencyKey: 'idem-attachment-finalize-mismatch',
+      }),
+    });
+    expect(initResponse.status).toBe(201);
+    const initPayload = (await initResponse.json()) as { uploadId: string };
+
+    const finalizeResponse = await app.request('/api/attachments/uploads/finalize', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        uploadId: initPayload.uploadId,
+        itemId: 'item_doc_finalize_other',
+      }),
+    });
+    expect(finalizeResponse.status).toBe(409);
+    expect(await finalizeResponse.json()).toEqual({
+      ok: false,
+      code: 'attachment_already_bound_to_other_item',
     });
   });
 

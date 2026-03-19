@@ -27,6 +27,7 @@ describe('cloudflare migration loading', () => {
       '0005_bootstrap_admin_foundation',
       '0006_auth_rate_limit_window_end',
       '0007_vault_tombstone_restore_payload',
+      '0008_attachment_filename_attached_at',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });
@@ -59,6 +60,45 @@ describe('cloudflare migration loading', () => {
       migrations.reduce((count, migration) => count + migration.statements.length, 0),
     );
     expect(run.mock.calls.length).toBeGreaterThan(migrations.length);
+  });
+
+  test('ignores duplicate column errors for ALTER TABLE ADD COLUMN migrations', async () => {
+    const run = vi.fn((statement: string) => {
+      if (statement.includes('ALTER TABLE attachment_blobs ADD COLUMN file_name')) {
+        throw new Error('duplicate column name: file_name: SQLITE_ERROR');
+      }
+      return Promise.resolve(undefined);
+    });
+
+    await expect(
+      applyCloudflareMigrations({
+        prepare(statement: string) {
+          return {
+            bind() {
+              return this;
+            },
+            first() {
+              throw new Error(`Unexpected first() for ${statement}`);
+            },
+            all() {
+              throw new Error(`Unexpected all() for ${statement}`);
+            },
+            run() {
+              return run(statement);
+            },
+          };
+        },
+        exec() {
+          throw new Error('Unexpected exec() in migration test');
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(
+      run.mock.calls.some(([statement]) =>
+        String(statement).includes('ALTER TABLE attachment_blobs ADD COLUMN attached_at'),
+      ),
+    ).toBe(true);
   });
 
   test('rejects invalid migration filenames before applying anything', async () => {
