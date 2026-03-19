@@ -2,9 +2,9 @@
 
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
-Status card version: `2026-03-18-v2.2.1-r17`
-Last updated: `2026-03-18`
-Overall status: `phase95_complete_phase10_ready`
+Status card version: `2026-03-19-v2.2.1-r18`
+Last updated: `2026-03-19`
+Overall status: `phase10_complete_phase11_ready`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
 ## Legend
@@ -121,11 +121,11 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 
 ## Current Focus
 
-Active phase: `Phase 10 import and backup baseline`
-Active card: `P10-C05 - Restore format docs`
+Active phase: `Phase 11 extension baseline`
+Active card: `P11-C01 - Extension unlock`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P10-C01` through `P10-C04` are implemented in repo, including VaultLite self-reimport for `vaultlite.export.v1` and `vaultlite.backup.v1`; docs and validation evidence are being finalized.
-Suggested immediate sequence: `P10-C05` -> `P10-C06`.
+Reason: `P10-C01` through `P10-C06` are aligned with implemented import/export/backup behavior and validation coverage; next logical phase is extension unlock baseline.
+Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -223,12 +223,12 @@ Suggested immediate sequence: `P10-C05` -> `P10-C06`.
 - `P95-C04` Deprovision endpoint and UI — `done`
 - `P95-C05` Session revocation and trusted-device invalidation on lifecycle change — `done`
 - `P95-C06` Lifecycle regression tests — `done`
-- `P10-C01` CSV login import — `done`
+- `P10-C01` Vault import baseline — `done`
 - `P10-C02` JSON export — `done`
 - `P10-C03` Encrypted backup package format — `done`
 - `P10-C04` Attachment-inclusive manifest — `done`
-- `P10-C05` Restore format docs — `in_progress`
-- `P10-C06` Backup validation tests — `in_progress`
+- `P10-C05` Restore format docs — `done`
+- `P10-C06` Backup validation tests — `done`
 - `P11-C01` Extension unlock — `not_started`
 - `P11-C02` Credential listing — `not_started`
 - `P11-C03` Manual fill — `not_started`
@@ -2266,7 +2266,7 @@ Acceptance criteria: supported formats import deterministically into encrypted i
 Risks / cautions: malformed CSV handling must fail safely.
 Notes for Codex/dev: keep importer format-specific instead of overly generic and keep passphrase memory-only for backup import.
 Evidence required to mark done: `apps/web/src/lib/vault-import.test.ts` passing with coverage for VaultLite export/backup detection, passphrase requirement, and encrypted-envelope attachment replay.
-Suggested next action: finalize restore semantics docs and validation evidence (`P10-C05`, `P10-C06`).
+Suggested next action: start `P11-C01` extension unlock baseline.
 
 ### P10-C02 - JSON export
 Card ID: `P10-C02`
@@ -2335,7 +2335,7 @@ Suggested next action: add attachment entry schema to backup manifest.
 Card ID: `P10-C05`
 Title: `Restore format docs`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `in_progress`
+Status: `done`
 Priority: `P1`
 Objective: Document the restore expectations and format semantics for exported and backup data.
 Description: Write the operational and developer documentation needed to understand supported restore paths and constraints.
@@ -2349,14 +2349,14 @@ Required tests: documentation review against backup fixtures.
 Acceptance criteria: restore behavior and limitations are explicit and aligned with the actual format.
 Risks / cautions: undocumented restore constraints will create support incidents.
 Notes for Codex/dev: documentation must match implemented package versioning rules exactly.
-Evidence required to mark done: committed restore documentation cross-checked with fixtures.
-Suggested next action: draft restore document from implemented manifest schema.
+Evidence required to mark done: `docs/IMPORT_FORMATS.md`, `docs/EXPORT_JSON_FORMAT.md`, and `docs/BACKUP_FORMAT.md` updated with self-reimport semantics and backup passphrase/integrity constraints.
+Suggested next action: continue with extension readiness (`P11-C01`).
 
 ### P10-C06 - Backup validation tests
 Card ID: `P10-C06`
 Title: `Backup validation tests`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `in_progress`
+Status: `done`
 Priority: `P1`
 Objective: Validate backup generation and restore expectations with automated tests.
 Description: Add automated coverage that checks manifest correctness, package integrity, and fixture compatibility.
@@ -2370,8 +2370,8 @@ Required tests: Add validation tests using committed backup fixtures for manifes
 Acceptance criteria: backups are validated automatically against committed expectations.
 Risks / cautions: weak fixture coverage will miss incompatibility drift.
 Notes for Codex/dev: keep fixed test fixtures under version control.
-Evidence required to mark done: Passing backup validation suite plus committed canonical backup fixtures used by the tests.
-Suggested next action: commit canonical backup fixtures and validation tests.
+Evidence required to mark done: passing tests for `apps/web/src/lib/data-portability.test.ts`, `apps/web/src/lib/vault-import.test.ts`, full `@vaultlite/web` suite, plus contracts and crypto validation suites.
+Suggested next action: start `P11-C01` extension unlock baseline.
 ## Phase 11
 
 ### P11-C01 - Extension unlock
@@ -2668,9 +2668,9 @@ Suggested next action: compile the final checklist from implemented verification
 - `2026-03-14`: Browser extension V1 is retrieval and fill-oriented; `save login` is out of scope for the first delivery.
 
 ## Next Cards
-1. `P10-C01` - `CSV login import`
-       Condition to start: `P95` lifecycle operations are complete with regression suites green.
-2. `P10-C02` - `JSON export`
-       Condition to start: `P10-C01` has stable item-shape mapping and fixture coverage.
-3. `P10-C03` - `Encrypted backup package format`
-       Condition to start: `P10-C01` and `P10-C02` are complete with format contracts stabilized.
+1. `P11-C01` - `Extension unlock`
+       Condition to start: `P10` portability stack is complete and stable in web.
+2. `P11-C02` - `Credential listing`
+       Condition to start: `P11-C01` has trusted-device unlock and storage policy guardrails implemented.
+3. `P11-C03` - `Manual fill`
+       Condition to start: `P11-C02` provides deterministic credential selection behavior.
