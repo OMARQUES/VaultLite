@@ -7,6 +7,9 @@ Version: `vaultlite.backup.v1`
 
 Provide a portable encrypted package with deterministic metadata and strong cryptographic defaults.
 
+This format is accepted by `/settings -> Import vault data` as
+`vaultlite_encrypted_backup_v1` and requires the backup passphrase.
+
 ## Envelope
 
 ```json

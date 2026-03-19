@@ -122,10 +122,10 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 ## Current Focus
 
 Active phase: `Phase 10 import and backup baseline`
-Active card: `P10-C01 - CSV login import`
+Active card: `P10-C05 - Restore format docs`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P95-C01` through `P95-C06` are now covered with API/UI lifecycle evidence and regression assertions; next logical execution step is import/export baseline.
-Suggested immediate sequence: `P10-C01` -> `P10-C02` -> `P10-C03`.
+Reason: `P10-C01` through `P10-C04` are implemented in repo, including VaultLite self-reimport for `vaultlite.export.v1` and `vaultlite.backup.v1`; docs and validation evidence are being finalized.
+Suggested immediate sequence: `P10-C05` -> `P10-C06`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -223,12 +223,12 @@ Suggested immediate sequence: `P10-C01` -> `P10-C02` -> `P10-C03`.
 - `P95-C04` Deprovision endpoint and UI — `done`
 - `P95-C05` Session revocation and trusted-device invalidation on lifecycle change — `done`
 - `P95-C06` Lifecycle regression tests — `done`
-- `P10-C01` CSV login import — `not_started`
-- `P10-C02` JSON export — `not_started`
-- `P10-C03` Encrypted backup package format — `not_started`
-- `P10-C04` Attachment-inclusive manifest — `not_started`
-- `P10-C05` Restore format docs — `not_started`
-- `P10-C06` Backup validation tests — `not_started`
+- `P10-C01` CSV login import — `done`
+- `P10-C02` JSON export — `done`
+- `P10-C03` Encrypted backup package format — `done`
+- `P10-C04` Attachment-inclusive manifest — `done`
+- `P10-C05` Restore format docs — `in_progress`
+- `P10-C06` Backup validation tests — `in_progress`
 - `P11-C01` Extension unlock — `not_started`
 - `P11-C02` Credential listing — `not_started`
 - `P11-C03` Manual fill — `not_started`
@@ -2247,32 +2247,32 @@ Suggested next action: create table-driven lifecycle transition tests.
 
 ## Phase 10
 
-### P10-C01 - CSV login import
+### P10-C01 - Vault import baseline
 Card ID: `P10-C01`
-Title: `CSV login import`
+Title: `Vault import baseline`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `done`
 Priority: `P2`
-Objective: Import login records from approved CSV formats into encrypted vault items.
-Description: Build the parsing, mapping, preview, and import flow for login CSV ingestion.
+Objective: Import records from approved VaultLite/Bitwarden/1Password formats into encrypted vault items.
+Description: Build and harden parsing, mapping, preview, dedupe, and execution for CSV/JSON/ZIP/1PUX inputs, including VaultLite self-reimport (`vaultlite.export.v1` and `vaultlite.backup.v1`).
 Motivation: Migration from existing password tools is a practical adoption requirement.
-Scope includes: parser; mapping validation; preview; import execution.
-Out of scope: document and attachment import.
+Scope includes: parser; mapping validation; preview; import execution; attachment rebind path; backup passphrase-gated decrypt path.
+Out of scope: encrypted third-party exports and unsupported item classes beyond current matrix.
 Dependencies: `P7-C01`; `P2-C04`.
 Files/areas impacted: `apps/web`; import helpers; `packages/contracts`.
-Deliverables: CSV import flow and format documentation.
-Required tests: Add unit tests for CSV parsing and field mapping, plus integration tests covering supported import success, malformed CSV rejection, and duplicate-entry handling if defined.
-Acceptance criteria: supported CSV imports produce correct encrypted login items.
+Deliverables: vault import flow and format documentation.
+Required tests: parser/mapping tests for CSV + JSON + ZIP + 1PUX + VaultLite export/backup; execution tests for duplicate handling, review-required rows, and backup attachment replay.
+Acceptance criteria: supported formats import deterministically into encrypted items with canonical dedupe and report outputs.
 Risks / cautions: malformed CSV handling must fail safely.
-Notes for Codex/dev: keep importer format-specific instead of overly generic.
-Evidence required to mark done: Committed import fixtures, passing parser tests, and one end-to-end import execution using a supported CSV sample.
-Suggested next action: define supported CSV mapping contract and sample fixtures.
+Notes for Codex/dev: keep importer format-specific instead of overly generic and keep passphrase memory-only for backup import.
+Evidence required to mark done: `apps/web/src/lib/vault-import.test.ts` passing with coverage for VaultLite export/backup detection, passphrase requirement, and encrypted-envelope attachment replay.
+Suggested next action: finalize restore semantics docs and validation evidence (`P10-C05`, `P10-C06`).
 
 ### P10-C02 - JSON export
 Card ID: `P10-C02`
 Title: `JSON export`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Export vault data to the approved JSON format.
 Description: Build the export path for structured vault data in the project's defined JSON schema.
@@ -2293,7 +2293,7 @@ Suggested next action: define export schema types and serializer.
 Card ID: `P10-C03`
 Title: `Encrypted backup package format`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Define and implement the encrypted backup package format for vault portability.
 Description: Build the package structure and generation path for encrypted backups.
@@ -2314,7 +2314,7 @@ Suggested next action: define manifest schema before coding packager.
 Card ID: `P10-C04`
 Title: `Attachment-inclusive manifest`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `done`
 Priority: `P1`
 Objective: Extend backup metadata to include attachment references and integrity data.
 Description: Add attachment manifest entries so backups can represent vault items plus bound blobs coherently.
@@ -2335,7 +2335,7 @@ Suggested next action: add attachment entry schema to backup manifest.
 Card ID: `P10-C05`
 Title: `Restore format docs`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `in_progress`
 Priority: `P1`
 Objective: Document the restore expectations and format semantics for exported and backup data.
 Description: Write the operational and developer documentation needed to understand supported restore paths and constraints.
@@ -2356,7 +2356,7 @@ Suggested next action: draft restore document from implemented manifest schema.
 Card ID: `P10-C06`
 Title: `Backup validation tests`
 Phase/Epic: `Phase 10 - Import, Export, and Backup Format`
-Status: `not_started`
+Status: `in_progress`
 Priority: `P1`
 Objective: Validate backup generation and restore expectations with automated tests.
 Description: Add automated coverage that checks manifest correctness, package integrity, and fixture compatibility.

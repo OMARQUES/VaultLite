@@ -26,13 +26,13 @@ const backupModalOpen = ref(false);
   <section class="panel-card panel-card--compact settings-section">
     <h2>Data portability</h2>
     <p class="module-empty-hint">
-      Import vault data from CSV/JSON/ZIP/1PUX, generate plaintext exports, and create encrypted backups.
+      Import vault data from VaultLite export/backup files and CSV/JSON/ZIP/1PUX, generate plaintext exports, and create encrypted backups.
     </p>
 
     <div class="data-portability-grid">
       <DataPortabilityCard
         title="Import vault data"
-        description="Supported formats: VaultLite CSV, Bitwarden CSV/JSON/ZIP, and 1Password 1PUX."
+        description="Supported formats: VaultLite export/backup, VaultLite CSV, Bitwarden CSV/JSON/ZIP, and 1Password 1PUX."
         cta-label="Import vault file"
         @action="importModalOpen = true"
       />

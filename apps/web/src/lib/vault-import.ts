@@ -1,8 +1,17 @@
 import { unzipSync } from 'fflate';
 
-import type { VaultItemType } from '@vaultlite/contracts';
+import {
+  EncryptedBackupPackageV1Schema,
+  VaultJsonExportV1Schema,
+  type BackupAttachmentEntryV1,
+  type VaultItemType,
+} from '@vaultlite/contracts';
 import { encryptAttachmentBlobPayload, encryptVaultItemPayload } from './browser-crypto';
-import { loadDecryptedVaultDataset, type DecryptedVaultDataset } from './data-portability';
+import {
+  decryptEncryptedBackupPackageV1,
+  loadDecryptedVaultDataset,
+  type DecryptedVaultDataset,
+} from './data-portability';
 import type { SessionStore } from './session-store';
 import type { VaultLiteVaultClient } from './vault-client';
 import { loadVaultUiState, saveVaultUiState, type VaultUiState } from './vault-ui-state';
@@ -12,7 +21,9 @@ export type SupportedImportFormat =
   | 'bitwarden_csv_v1'
   | 'onepassword_1pux_v1'
   | 'bitwarden_json_v1'
-  | 'bitwarden_zip_v1';
+  | 'bitwarden_zip_v1'
+  | 'vaultlite_json_export_v1'
+  | 'vaultlite_encrypted_backup_v1';
 
 export type ImportPreviewStatus =
   | 'valid'
@@ -28,6 +39,7 @@ export interface ParsedImportAttachment {
   contentType: string;
   size: number;
   bytes: Uint8Array | null;
+  encryptedEnvelope: string | null;
   sourcePath: string | null;
   attachmentFingerprint: string | null;
   errorCode: string | null;
@@ -631,7 +643,7 @@ async function parseCsvImport(input: {
   return candidates;
 }
 
-function buildExistingDedupeIndex(dataset: DecryptedVaultDataset): Map<string, string> {
+async function buildExistingDedupeIndex(dataset: DecryptedVaultDataset): Promise<Map<string, string>> {
   const index = new Map<string, string>();
   for (const item of dataset.items) {
     if (item.itemType === 'login') {
@@ -646,7 +658,10 @@ function buildExistingDedupeIndex(dataset: DecryptedVaultDataset): Map<string, s
     }
     if (item.itemType === 'secure_note') {
       const payload = item.payload as Partial<{ title: string; content: string }>;
-      const key = `secure_note|${normalizeForKey(String(payload.title ?? ''))}|${normalizeForKey(String(payload.content ?? ''))}`;
+      const key = await buildSecureNoteDedupeKey({
+        title: String(payload.title ?? ''),
+        content: String(payload.content ?? ''),
+      });
       index.set(key, item.itemId);
     }
   }
@@ -677,7 +692,7 @@ async function finalizeCandidates(
     throw new Error('import_item_limit_exceeded');
   }
 
-  const existing = buildExistingDedupeIndex(dataset);
+  const existing = await buildExistingDedupeIndex(dataset);
   const seen = new Set<string>();
   let attachmentCount = 0;
   for (const candidate of candidates) {
@@ -850,6 +865,7 @@ async function parseBitwardenJsonImport(input: {
             contentType: inferContentTypeFromFileName(fileName),
             size: 0,
             bytes: null,
+            encryptedEnvelope: null,
             sourcePath: null,
             attachmentFingerprint: null,
             errorCode: 'ambiguous_attachment_path',
@@ -862,6 +878,7 @@ async function parseBitwardenJsonImport(input: {
             contentType: inferContentTypeFromFileName(fileName),
             size: 0,
             bytes: null,
+            encryptedEnvelope: null,
             sourcePath: null,
             attachmentFingerprint: null,
             errorCode: 'failed_attachment_missing_file',
@@ -874,6 +891,7 @@ async function parseBitwardenJsonImport(input: {
           contentType: inferContentTypeFromFileName(fileName),
           size: bytes?.byteLength ?? 0,
           bytes,
+          encryptedEnvelope: null,
           sourcePath: resolved.path,
           attachmentFingerprint: bytes ? await sha256Base64Url(bytes) : null,
           errorCode: bytes ? null : 'failed_attachment_missing_file',
@@ -1026,6 +1044,7 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
           contentType: inferContentTypeFromFileName(documentFileName),
           size: bytes?.byteLength ?? 0,
           bytes,
+          encryptedEnvelope: null,
           sourcePath: path,
           attachmentFingerprint: bytes ? await sha256Base64Url(bytes) : null,
           errorCode: bytes ? null : 'failed_attachment_missing_file',
@@ -1105,10 +1124,154 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
   return candidates;
 }
 
+function parseVaultLiteCustomFields(payload: Record<string, unknown>): ParsedImportCustomField[] {
+  const raw = Array.isArray(payload.customFields) ? payload.customFields : [];
+  return raw
+    .map((entry) => coerceRecord(entry))
+    .map((entry) => ({
+      label: normalizeCell(String(entry.label ?? entry.name ?? '')),
+      value: normalizeCell(String(entry.value ?? '')),
+    }))
+    .filter((entry) => entry.label.length > 0);
+}
+
+function normalizeVaultLiteAttachmentEntry(entry: BackupAttachmentEntryV1): ParsedImportAttachment {
+  return {
+    fileName: sanitizeFileName(entry.fileName, 'attachment.bin'),
+    contentType: normalizeCell(entry.contentType) || inferContentTypeFromFileName(entry.fileName),
+    size: entry.size,
+    bytes: null,
+    encryptedEnvelope: entry.envelope,
+    sourcePath: entry.uploadId,
+    attachmentFingerprint: entry.envelopeSha256,
+    errorCode: null,
+  };
+}
+
+async function parseVaultLiteExportImport(input: {
+  exportPayload: unknown;
+  format: Extract<SupportedImportFormat, 'vaultlite_json_export_v1' | 'vaultlite_encrypted_backup_v1'>;
+  attachmentsByItemId?: Map<string, BackupAttachmentEntryV1[]>;
+}): Promise<ParsedImportCandidate[]> {
+  const parsed = VaultJsonExportV1Schema.parse(input.exportPayload);
+  const foldersById = new Map((parsed.uiState?.folders ?? []).map((folder) => [folder.id, folder.name]));
+  const favorites = new Set(parsed.uiState?.favorites ?? []);
+  const candidates: ParsedImportCandidate[] = [];
+
+  for (let index = 0; index < parsed.vault.items.length; index += 1) {
+    const item = parsed.vault.items[index];
+    if (!item) continue;
+    const rowIndex = index + 1;
+    const sourceRef = buildSourceRef(input.format, item.itemId, rowIndex);
+    const payload = coerceRecord(item.payload);
+    const itemType = item.itemType;
+
+    if (itemType !== 'login' && itemType !== 'document' && itemType !== 'secure_note') {
+      candidates.push({
+        sourceFormat: input.format,
+        sourceRef,
+        sourceItemId: item.itemId,
+        itemType: 'login',
+        title: normalizeCell(String(payload.title ?? item.itemId)),
+        notes: '',
+        content: '',
+        username: '',
+        password: '',
+        totp: '',
+        urls: [],
+        favoriteHint: favorites.has(item.itemId),
+        folderHint: null,
+        archivedHint: false,
+        customFields: [],
+        attachments: [],
+        provenance: { format: input.format },
+        dedupeKey: null,
+        status: 'unsupported_type',
+        reason: `unsupported_type:${itemType}`,
+        rowIndex,
+        existingItemId: null,
+      });
+      continue;
+    }
+
+    const urls = Array.isArray(payload.urls)
+      ? payload.urls.map((entry) => normalizeCell(String(entry))).filter((entry) => entry.length > 0)
+      : [];
+    const title = normalizeCell(String(payload.title ?? '')) || extractHostTitle(urls[0] ?? '');
+    const folderId = parsed.uiState?.folderAssignments?.[item.itemId] ?? null;
+    const folderHint = folderId ? foldersById.get(folderId) ?? null : null;
+    const backupAttachments = input.attachmentsByItemId?.get(item.itemId) ?? [];
+
+    candidates.push({
+      sourceFormat: input.format,
+      sourceRef,
+      sourceItemId: item.itemId,
+      itemType,
+      title,
+      notes: normalizeCell(String(payload.notes ?? '')),
+      content: normalizeCell(String(payload.content ?? '')),
+      username: normalizeCell(String(payload.username ?? '')),
+      password: normalizeCell(String(payload.password ?? '')),
+      totp: normalizeCell(String(payload.totp ?? '')),
+      urls,
+      favoriteHint: favorites.has(item.itemId),
+      folderHint,
+      archivedHint: false,
+      customFields: parseVaultLiteCustomFields(payload),
+      attachments: backupAttachments.map((entry) => normalizeVaultLiteAttachmentEntry(entry)),
+      provenance: { format: input.format },
+      dedupeKey: null,
+      status: title ? 'valid' : 'invalid',
+      reason: title ? null : 'missing_title',
+      rowIndex,
+      existingItemId: null,
+    });
+  }
+
+  return candidates;
+}
+
+async function parseVaultLiteEncryptedBackupImport(input: {
+  parsedJson: Record<string, unknown>;
+  passphrase: string | null;
+}): Promise<{ exportPayload: unknown; attachmentsByItemId: Map<string, BackupAttachmentEntryV1[]> }> {
+  if (!input.passphrase) {
+    throw new Error('backup_passphrase_required');
+  }
+  const rawVersion = normalizeCell(String(input.parsedJson.version ?? ''));
+  if (rawVersion && rawVersion !== 'vaultlite.backup.v1') {
+    throw new Error('unsupported_backup_version');
+  }
+  const backupPackage = EncryptedBackupPackageV1Schema.parse(input.parsedJson);
+  try {
+    const decrypted = await decryptEncryptedBackupPackageV1({
+      backupPackage,
+      passphrase: input.passphrase,
+    });
+    const attachmentsByItemId = new Map<string, BackupAttachmentEntryV1[]>();
+    for (const attachment of backupPackage.vault.attachments) {
+      const bucket = attachmentsByItemId.get(attachment.itemId) ?? [];
+      bucket.push(attachment);
+      attachmentsByItemId.set(attachment.itemId, bucket);
+    }
+    return {
+      exportPayload: decrypted,
+      attachmentsByItemId,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('backup_payload_integrity_mismatch')) {
+      throw new Error('backup_payload_integrity_mismatch');
+    }
+    throw new Error('backup_decrypt_failed');
+  }
+}
+
 export async function parseVaultImportFile(input: {
   file: File;
   sessionStore: SessionStore;
   vaultClient: VaultLiteVaultClient;
+  backupPassphrase?: string;
 }): Promise<VaultImportPreview> {
   ensureFileSize(input.file);
   const dataset = await loadDecryptedVaultDataset({
@@ -1126,9 +1289,41 @@ export async function parseVaultImportFile(input: {
     return finalizeCandidates(format, await parseCsvImport({ csvText, format }), dataset);
   }
 
-  if (lowerName.endsWith('.json')) {
+  if (lowerName.endsWith('.json') || lowerName.endsWith('.vlbk')) {
     const jsonText = await input.file.text();
     const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    const version = normalizeCell(String(parsed.version ?? ''));
+    if (version === 'vaultlite.export.v1') {
+      return finalizeCandidates(
+        'vaultlite_json_export_v1',
+        await parseVaultLiteExportImport({
+          exportPayload: parsed,
+          format: 'vaultlite_json_export_v1',
+        }),
+        dataset,
+      );
+    }
+    if (version.startsWith('vaultlite.export.') && version !== 'vaultlite.export.v1') {
+      throw new Error('unsupported_export_version');
+    }
+    if (version === 'vaultlite.backup.v1') {
+      const backupImport = await parseVaultLiteEncryptedBackupImport({
+        parsedJson: parsed,
+        passphrase: normalizeCell(input.backupPassphrase),
+      });
+      return finalizeCandidates(
+        'vaultlite_encrypted_backup_v1',
+        await parseVaultLiteExportImport({
+          exportPayload: backupImport.exportPayload,
+          format: 'vaultlite_encrypted_backup_v1',
+          attachmentsByItemId: backupImport.attachmentsByItemId,
+        }),
+        dataset,
+      );
+    }
+    if (version.startsWith('vaultlite.backup.') && version !== 'vaultlite.backup.v1') {
+      throw new Error('unsupported_backup_version');
+    }
     if (!isBitwardenLikeJson(parsed)) throw new Error('unsupported_import_format');
     return finalizeCandidates('bitwarden_json_v1', await parseBitwardenJsonImport({
       jsonText,
@@ -1200,11 +1395,15 @@ async function uploadAttachmentsForCandidate(input: {
       const index = cursor;
       cursor += 1;
       const attachment = attachments[index];
-      if (!attachment || !attachment.attachmentFingerprint || !attachment.bytes || attachment.errorCode) {
+      if (!attachment || !attachment.attachmentFingerprint || attachment.errorCode) {
         failed += 1;
         continue;
       }
       if (attachment.size > LIMITS.maxAttachmentSize) {
+        failed += 1;
+        continue;
+      }
+      if (!attachment.bytes && !attachment.encryptedEnvelope) {
         failed += 1;
         continue;
       }
@@ -1227,14 +1426,16 @@ async function uploadAttachmentsForCandidate(input: {
             size: attachment.size,
             idempotencyKey: `import-attachment:${input.candidate.sourceRef}:${attachment.attachmentFingerprint}`,
           });
-          const encryptedEnvelope = await encryptAttachmentBlobPayload({
-            accountKey: input.accountKey,
-            plaintext: attachment.bytes!.buffer.slice(
-              attachment.bytes!.byteOffset,
-              attachment.bytes!.byteOffset + attachment.bytes!.byteLength,
-            ) as ArrayBuffer,
-            contentType: attachment.contentType || inferContentTypeFromFileName(attachment.fileName),
-          });
+          const encryptedEnvelope = attachment.encryptedEnvelope
+            ? attachment.encryptedEnvelope
+            : await encryptAttachmentBlobPayload({
+                accountKey: input.accountKey,
+                plaintext: attachment.bytes!.buffer.slice(
+                  attachment.bytes!.byteOffset,
+                  attachment.bytes!.byteOffset + attachment.bytes!.byteLength,
+                ) as ArrayBuffer,
+                contentType: attachment.contentType || inferContentTypeFromFileName(attachment.fileName),
+              });
           await withAttachmentRetry(async () =>
             input.vaultClient.uploadAttachmentContent(init.uploadId, {
               uploadToken: init.uploadToken,
@@ -1403,7 +1604,7 @@ export async function executeVaultImport(input: {
       let retriedCreated = 0;
       let retriedFailed = 0;
       for (const attachment of candidate.attachments) {
-        if (!attachment.attachmentFingerprint || !attachment.bytes) continue;
+        if (!attachment.attachmentFingerprint || (!attachment.bytes && !attachment.encryptedEnvelope)) continue;
         const key = historyRecordId({
           scope,
           sourceFormat: candidate.sourceFormat,

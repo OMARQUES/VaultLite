@@ -31,6 +31,7 @@ const emit = defineEmits<{
 const steps = ['Upload', 'Validate', 'Preview', 'Import'] as const;
 const activeStep = ref<(typeof steps)[number]>('Upload');
 const selectedFile = ref<File | null>(null);
+const backupPassphrase = ref('');
 const preview = ref<VaultImportPreview | null>(null);
 const importResult = ref<VaultImportExecutionResult | null>(null);
 const parseBusy = ref(false);
@@ -59,6 +60,7 @@ const uploadSummary = computed(() => {
 function resetState() {
   activeStep.value = 'Upload';
   selectedFile.value = null;
+  backupPassphrase.value = '';
   preview.value = null;
   importResult.value = null;
   parseBusy.value = false;
@@ -82,6 +84,21 @@ function humanizeImportError(error: unknown): string {
   }
   if (raw.includes('unsupported_import_format')) {
     return 'This file format is not supported for import.';
+  }
+  if (raw.includes('unsupported_export_version')) {
+    return 'This VaultLite export version is not supported in this build.';
+  }
+  if (raw.includes('unsupported_backup_version')) {
+    return 'This encrypted backup version is not supported in this build.';
+  }
+  if (raw.includes('backup_passphrase_required')) {
+    return 'Enter the backup passphrase to import this encrypted backup package.';
+  }
+  if (raw.includes('backup_decrypt_failed')) {
+    return 'We could not decrypt this backup package. Check the passphrase and try again.';
+  }
+  if (raw.includes('backup_payload_integrity_mismatch')) {
+    return 'This backup package failed integrity validation and cannot be imported.';
   }
   if (raw.includes('import_file_size_exceeded')) {
     return 'This file is too large for import.';
@@ -115,7 +132,7 @@ function humanizeImportError(error: unknown): string {
 
 async function validateSelectedFile() {
   if (!selectedFile.value) {
-    errorMessage.value = 'Choose a CSV file to continue.';
+    errorMessage.value = 'Choose an import file to continue.';
     return;
   }
   parseBusy.value = true;
@@ -128,6 +145,7 @@ async function validateSelectedFile() {
       file: selectedFile.value,
       sessionStore: props.sessionStore,
       vaultClient: props.vaultClient,
+      backupPassphrase: backupPassphrase.value,
     });
     activeStep.value = 'Validate';
   } catch (error) {
@@ -197,6 +215,7 @@ function closeModal() {
 function onFileChanged(event: Event) {
   const input = event.target as HTMLInputElement;
   selectedFile.value = input.files?.[0] ?? null;
+  backupPassphrase.value = '';
   preview.value = null;
   importResult.value = null;
   activeStep.value = 'Upload';
@@ -229,7 +248,7 @@ function moveToPreview() {
           <input
             class="sr-only"
             type="file"
-            accept=".csv,.json,.zip,.1pux,text/csv,application/json,application/zip"
+            accept=".csv,.json,.zip,.1pux,.vlbk,.vlbk.json,text/csv,application/json,application/zip"
             @change="onFileChanged"
           >
           <strong>Select import file</strong>
@@ -238,6 +257,17 @@ function moveToPreview() {
             Max file size: {{ Math.round(limits.maxImportFileBytes / 1024 / 1024) }} MB · Max items:
             {{ limits.maxImportItems }}
           </small>
+        </label>
+        <label class="field">
+          <span>Backup passphrase (encrypted backup only)</span>
+          <input
+            v-model="backupPassphrase"
+            class="field__input"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Enter passphrase only when importing vaultlite.backup.v1"
+          >
         </label>
         <div class="import-wizard__actions">
           <SecondaryButton type="button" @click="closeModal">Cancel</SecondaryButton>
@@ -279,7 +309,7 @@ function moveToPreview() {
           </div>
         </dl>
         <p v-if="(preview?.validRows ?? 0) === 0" class="module-empty-hint">
-          No valid login rows found in this file.
+          No valid rows found in this file.
         </p>
         <div class="import-wizard__actions">
           <SecondaryButton type="button" @click="activeStep = 'Upload'">Back</SecondaryButton>

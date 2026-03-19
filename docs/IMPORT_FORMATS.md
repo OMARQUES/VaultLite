@@ -5,11 +5,43 @@ Status: `active`
 ## Vault import (`P10-C01`)
 
 Supported formats:
+- `vaultlite_json_export_v1`
+- `vaultlite_encrypted_backup_v1`
 - `vaultlite_login_csv_v1`
 - `bitwarden_csv_v1`
 - `onepassword_1pux_v1`
 - `bitwarden_json_v1`
 - `bitwarden_zip_v1`
+
+### `vaultlite_json_export_v1`
+
+Detected from JSON payloads with:
+- `version: "vaultlite.export.v1"`
+
+Supported item types in this cycle:
+- `login`
+- `document`
+- `secure_note`
+
+Behavior:
+- preserves `uiState` hints (`favorites` and folder assignment names) for imported rows
+- unsupported item types are marked `unsupported_type`
+- duplicate handling follows canonical `skip` policy
+
+### `vaultlite_encrypted_backup_v1`
+
+Detected from JSON payloads with:
+- `version: "vaultlite.backup.v1"`
+
+Requirements:
+- backup passphrase is required in import wizard
+- package is decrypted locally in-browser (no plaintext upload to backend)
+
+Behavior:
+- decrypted payload is processed using `vaultlite_json_export_v1` mapping
+- attachment envelopes from backup are replayed through upload init/content/finalize
+- wrong passphrase returns `backup_decrypt_failed`
+- integrity mismatch returns `backup_payload_integrity_mismatch`
 
 ### `vaultlite_login_csv_v1`
 

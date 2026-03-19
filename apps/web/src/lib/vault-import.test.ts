@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import type { SessionStore } from './session-store';
 import type { VaultLiteVaultClient } from './vault-client';
+import { createEncryptedBackupPackageV1 } from './data-portability';
 import {
   executeVaultImport,
   parseVaultImportFile,
@@ -159,6 +160,273 @@ describe('vault import', () => {
     expect(preview.format).toBe('bitwarden_json_v1');
     expect(preview.validRows).toBe(2);
     expect(preview.rows.some((row) => row.itemType === 'secure_note')).toBe(true);
+  });
+
+  test('parses vaultlite JSON export format', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const file = new File(
+      [
+        JSON.stringify({
+          version: 'vaultlite.export.v1',
+          exportedAt: '2026-03-19T00:00:00.000Z',
+          source: {
+            app: 'vaultlite-web',
+            schemaVersion: 1,
+            username: 'alice',
+            deploymentFingerprint: 'development_deployment',
+          },
+          vault: {
+            items: [
+              {
+                itemId: 'item_1',
+                itemType: 'login',
+                revision: 1,
+                createdAt: '2026-03-19T00:00:00.000Z',
+                updatedAt: '2026-03-19T00:00:00.000Z',
+                payload: {
+                  title: 'Email',
+                  username: 'alice@example.com',
+                  password: 'secret',
+                  urls: ['https://example.com'],
+                  notes: 'Primary account',
+                  customFields: [],
+                },
+              },
+            ],
+            tombstones: [],
+            counts: {
+              items: 1,
+              tombstones: 0,
+            },
+          },
+          uiState: {
+            favorites: ['item_1'],
+            folderAssignments: {
+              item_1: 'folder_1',
+            },
+            folders: [{ id: 'folder_1', name: 'Personal' }],
+          },
+        }),
+      ],
+      'vaultlite-export.json',
+      { type: 'application/json' },
+    );
+
+    const preview = await parseVaultImportFile({
+      file,
+      sessionStore,
+      vaultClient,
+    });
+
+    expect(preview.format).toBe('vaultlite_json_export_v1');
+    expect(preview.validRows).toBe(1);
+    expect(preview.rows[0]?.title).toBe('Email');
+  });
+
+  test('requires passphrase and parses vaultlite encrypted backup package', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const exportPayload = {
+      version: 'vaultlite.export.v1' as const,
+      exportedAt: '2026-03-19T00:00:00.000Z',
+      source: {
+        app: 'vaultlite-web' as const,
+        schemaVersion: 1,
+        username: 'alice',
+        deploymentFingerprint: 'development_deployment',
+      },
+      vault: {
+        items: [
+          {
+            itemId: 'item_1',
+            itemType: 'login' as const,
+            revision: 1,
+            createdAt: '2026-03-19T00:00:00.000Z',
+            updatedAt: '2026-03-19T00:00:00.000Z',
+            payload: {
+              title: 'Email',
+              username: 'alice@example.com',
+              password: 'secret',
+              urls: ['https://example.com'],
+              notes: '',
+              customFields: [],
+            },
+          },
+        ],
+        tombstones: [],
+        counts: {
+          items: 1,
+          tombstones: 0,
+        },
+      },
+      uiState: null,
+    };
+
+    const backupPassphrase = 'BackupPassphrase_123!';
+    const backup = await createEncryptedBackupPackageV1({
+      passphrase: backupPassphrase,
+      exportPayload,
+      source: exportPayload.source,
+    });
+    const file = new File([JSON.stringify(backup)], 'vaultlite-backup.vlbk.json', {
+      type: 'application/json',
+    });
+
+    await expect(
+      parseVaultImportFile({
+        file,
+        sessionStore,
+        vaultClient,
+      }),
+    ).rejects.toThrow('backup_passphrase_required');
+
+    const preview = await parseVaultImportFile({
+      file,
+      sessionStore,
+      vaultClient,
+      backupPassphrase,
+    });
+    expect(preview.format).toBe('vaultlite_encrypted_backup_v1');
+    expect(preview.validRows).toBe(1);
+
+    await expect(
+      parseVaultImportFile({
+        file,
+        sessionStore,
+        vaultClient,
+        backupPassphrase: 'wrong-passphrase',
+      }),
+    ).rejects.toThrow('backup_decrypt_failed');
+  }, 20000);
+
+  test('imports backup attachments using existing encrypted envelopes', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const initAttachmentUpload = vi.mocked(vaultClient.initAttachmentUpload);
+    const uploadAttachmentContent = vi.mocked(vaultClient.uploadAttachmentContent);
+    const finalizeAttachmentUpload = vi.mocked(vaultClient.finalizeAttachmentUpload);
+
+    initAttachmentUpload.mockResolvedValue({
+      uploadId: 'upload_1',
+      itemId: 'item_created_1',
+      fileName: 'report.pdf',
+      lifecycleState: 'pending',
+      contentType: 'application/pdf',
+      size: 5,
+      expiresAt: '2026-03-19T00:10:00.000Z',
+      uploadedAt: null,
+      attachedAt: null,
+      createdAt: '2026-03-19T00:00:00.000Z',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+      uploadToken: 'token_1',
+    });
+    uploadAttachmentContent.mockResolvedValue({
+      uploadId: 'upload_1',
+      itemId: 'item_created_1',
+      fileName: 'report.pdf',
+      lifecycleState: 'uploaded',
+      contentType: 'application/pdf',
+      size: 5,
+      expiresAt: '2026-03-19T00:10:00.000Z',
+      uploadedAt: '2026-03-19T00:00:01.000Z',
+      attachedAt: null,
+      createdAt: '2026-03-19T00:00:00.000Z',
+      updatedAt: '2026-03-19T00:00:01.000Z',
+    });
+    finalizeAttachmentUpload.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      upload: {
+        uploadId: 'upload_1',
+        itemId: 'item_created_1',
+        fileName: 'report.pdf',
+        lifecycleState: 'attached',
+        contentType: 'application/pdf',
+        size: 5,
+        expiresAt: '2026-03-19T00:10:00.000Z',
+        uploadedAt: '2026-03-19T00:00:01.000Z',
+        attachedAt: '2026-03-19T00:00:02.000Z',
+        createdAt: '2026-03-19T00:00:00.000Z',
+        updatedAt: '2026-03-19T00:00:02.000Z',
+      },
+    });
+
+    const preview: VaultImportPreview = {
+      format: 'vaultlite_encrypted_backup_v1',
+      totalRows: 1,
+      validRows: 1,
+      duplicateRows: 0,
+      invalidRows: 0,
+      unsupportedRows: 0,
+      reviewRequiredRows: 0,
+      attachmentRows: 1,
+      attachmentCount: 1,
+      rows: [
+        {
+          rowIndex: 1,
+          sourceFormat: 'vaultlite_encrypted_backup_v1',
+          sourceRef: 'vaultlite_encrypted_backup_v1:item_1',
+          itemType: 'document',
+          title: 'Doc',
+          username: '',
+          firstUrl: '',
+          attachmentCount: 1,
+          status: 'valid',
+          reason: null,
+        },
+      ],
+      candidates: [
+        {
+          sourceFormat: 'vaultlite_encrypted_backup_v1',
+          sourceRef: 'vaultlite_encrypted_backup_v1:item_1',
+          sourceItemId: 'item_1',
+          itemType: 'document',
+          title: 'Doc',
+          notes: '',
+          content: 'content',
+          username: '',
+          password: '',
+          totp: '',
+          urls: [],
+          favoriteHint: false,
+          folderHint: null,
+          archivedHint: false,
+          customFields: [],
+          attachments: [
+            {
+              fileName: 'report.pdf',
+              contentType: 'application/pdf',
+              size: 5,
+              bytes: null,
+              encryptedEnvelope: 'encrypted-envelope-value',
+              sourcePath: null,
+              attachmentFingerprint: 'fingerprint_1',
+              errorCode: null,
+            },
+          ],
+          provenance: {},
+          dedupeKey: 'document|doc|fingerprint_1',
+          status: 'valid',
+          reason: null,
+          rowIndex: 1,
+          existingItemId: null,
+        },
+      ],
+    };
+
+    const result = await executeVaultImport({
+      preview,
+      sessionStore,
+      vaultClient,
+    });
+
+    expect(result.created).toBe(1);
+    expect(result.attachmentsCreated).toBe(1);
+    expect(uploadAttachmentContent).toHaveBeenCalledWith('upload_1', {
+      uploadToken: 'token_1',
+      encryptedEnvelope: 'encrypted-envelope-value',
+    });
   });
 
   test('marks review-required rows as skipped_review_required during execution', async () => {

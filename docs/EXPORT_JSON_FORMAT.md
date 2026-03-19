@@ -10,6 +10,9 @@ Deterministic plaintext export for portability and tooling.
 This format is intentionally plaintext.
 Treat exported files as sensitive.
 
+This format is also accepted by `/settings -> Import vault data` as
+`vaultlite_json_export_v1`.
+
 ## Top-level shape
 
 ```json
