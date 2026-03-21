@@ -222,14 +222,21 @@ describe('App shell', () => {
 
     expect(wrapper.find('[data-testid="vault-shell"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain('Security');
-    expect(wrapper.text()).toContain('Account Kit');
-    expect(wrapper.text()).toContain('Auto-lock after');
-    expect(wrapper.text()).toContain('Reissue Account Kit');
-    expect(wrapper.text()).toContain('Password rotation');
-    expect(wrapper.text()).toContain('Trusted devices');
+    expect(wrapper.text()).toContain('Settings');
+    expect(wrapper.text()).toContain('Overview');
+    expect(wrapper.find('.settings-shell-page__nav').exists()).toBe(false);
     expect(wrapper.text()).not.toContain('Onboarding');
     expect(wrapper.text()).not.toContain('Auth');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
+  test('supports authenticated settings subroutes under the same shell', async () => {
+    const { wrapper, sessionStore } = await mountAppAt('/settings/security', 'ready');
+
+    expect(wrapper.find('[data-testid="vault-shell"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="public-shell"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('Security');
+    expect(wrapper.text()).toContain('Password rotation');
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
   });
 
@@ -270,5 +277,14 @@ describe('App shell', () => {
     expect(sessionStore.handleUnauthorized).toHaveBeenCalledTimes(1);
     expect(window.location.pathname).toBe('/unlock');
     expect(window.location.search).toContain('reason=account_suspended');
+  });
+
+  test('redirects out of /vault when session phase downgrades to local unlock after mount', async () => {
+    const { sessionStore } = await mountAppAt('/vault', 'ready');
+
+    sessionStore.state.phase = 'local_unlock_required';
+    await flushPromises();
+
+    expect(window.location.pathname).toBe('/unlock');
   });
 });

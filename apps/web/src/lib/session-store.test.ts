@@ -71,6 +71,22 @@ function createMockDependencies() {
         deploymentFingerprint: 'deployment_fp_v1',
       }),
       signOnboardingAccountKit: vi.fn(),
+      recentReauth: vi.fn().mockResolvedValue({
+        ok: true,
+        validUntil: '2026-03-19T12:05:00.000Z',
+      }),
+      listExtensionLinkPending: vi.fn().mockResolvedValue({
+        ok: true,
+        requests: [],
+      }),
+      approveExtensionLink: vi.fn().mockResolvedValue({
+        ok: true,
+        result: 'success_changed',
+      }),
+      rejectExtensionLink: vi.fn().mockResolvedValue({
+        ok: true,
+        result: 'success_changed',
+      }),
     },
     trustedLocalStateStore: {
       load: vi.fn().mockResolvedValue({
@@ -428,5 +444,62 @@ describe('createSessionStore', () => {
 
     expect(reissued.signature).toBe('reissued_signature');
     expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
+  });
+
+  test('approveExtensionLink requires recent reauth and sends trusted package with approval nonce', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.recentReauth = vi.fn().mockResolvedValue({
+      ok: true,
+      validUntil: '2026-03-19T12:30:00.000Z',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await store.localUnlock({
+      username: 'alice',
+      password: 'correct-password',
+    });
+
+    await store.approveExtensionLink({
+      requestId: 'request_1234567890123456',
+      password: 'CurrentPassword!1',
+    });
+
+    expect(dependencies.authClient.recentReauth).toHaveBeenCalledTimes(1);
+    expect(dependencies.authClient.approveExtensionLink).toHaveBeenCalledWith({
+      requestId: 'request_1234567890123456',
+      approvalNonce: 'R'.repeat(16),
+      package: {
+        authSalt: 'AAAAAAAAAAAAAAAAAAAAAA',
+        encryptedAccountBundle: 'bundle',
+        accountKeyWrapped: 'wrapped',
+        localUnlockEnvelope: {
+          version: 'local-unlock.v1',
+          nonce: 'AAAAAAAAAAAAAAAA',
+          ciphertext: 'BBBBBBBBBBBBBBBB',
+        },
+      },
+    });
+  });
+
+  test('rejectExtensionLink enforces recent reauth before rejecting pending request', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.recentReauth = vi.fn().mockResolvedValue({
+      ok: true,
+      validUntil: '2026-03-19T12:30:00.000Z',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await store.restoreSession();
+    await store.rejectExtensionLink({
+      requestId: 'request_abcdefghijklmn',
+      password: 'CurrentPassword!1',
+      rejectionReasonCode: 'user_rejected',
+    });
+
+    expect(dependencies.authClient.recentReauth).toHaveBeenCalledTimes(1);
+    expect(dependencies.authClient.rejectExtensionLink).toHaveBeenCalledWith({
+      requestId: 'request_abcdefghijklmn',
+      rejectionReasonCode: 'user_rejected',
+    });
   });
 });

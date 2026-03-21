@@ -28,6 +28,8 @@ describe('cloudflare migration loading', () => {
       '0006_auth_rate_limit_window_end',
       '0007_vault_tombstone_restore_payload',
       '0008_attachment_filename_attached_at',
+      '0009_extension_pairings',
+      '0010_extension_link_requests',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

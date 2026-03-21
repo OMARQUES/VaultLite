@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VaultLite Options</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1220;
+        --panel: #131d31;
+        --panel-2: #1a2742;
+        --text: #e5ecfb;
+        --muted: #9fb0cf;
+        --border: #2b3b5f;
+        --accent: #2f7df0;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(160deg, #0f1c37, #0b1220 45%);
+        color: var(--text);
+        font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+      }
+
+      .layout {
+        max-width: 820px;
+        margin: 32px auto;
+        padding: 0 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      h1 {
+        margin: 0;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+      }
+
+      .hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 12px;
+      }
+
+      label span {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      input {
+        height: 40px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0e1527;
+        color: var(--text);
+        padding: 0 10px;
+      }
+
+      .actions {
+        margin-top: 12px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        height: 38px;
+        padding: 0 12px;
+        background: var(--panel-2);
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: linear-gradient(180deg, #3f8bf2, #2f72dc);
+        border-color: #2c6dd4;
+        font-weight: 600;
+      }
+
+      .btn-danger {
+        border-color: #8b4242;
+        color: #ffd2d2;
+      }
+
+      .notice {
+        margin-top: 10px;
+        border: 1px solid #3c537f;
+        border-radius: 10px;
+        padding: 10px 12px;
+        color: #b8c8e9;
+        background: rgba(62, 83, 129, 0.2);
+        font-size: 13px;
+      }
+
+      .status {
+        border-radius: 10px;
+        padding: 10px 12px;
+        border: 1px solid transparent;
+        font-size: 13px;
+      }
+
+      .status[data-tone='warning'] {
+        background: rgba(145, 101, 48, 0.22);
+        border-color: #936b38;
+      }
+
+      .status[data-tone='danger'] {
+        background: rgba(148, 53, 53, 0.2);
+        border-color: #8f4646;
+      }
+
+      .status[data-tone='success'] {
+        background: rgba(49, 112, 78, 0.25);
+        border-color: #347853;
+      }
+
+      .kv {
+        margin-top: 10px;
+        display: grid;
+        grid-template-columns: 160px 1fr;
+        gap: 8px;
+        font-size: 13px;
+      }
+
+      .kv dt {
+        color: var(--muted);
+      }
+
+      .kv dd {
+        margin: 0;
+      }
+
+      .icon-form-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .icon-list {
+        margin: 10px 0 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 8px;
+      }
+
+      .icon-row {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px;
+        background: rgba(18, 31, 55, 0.55);
+      }
+
+      .icon-row__preview {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        object-fit: cover;
+        background: #0e1527;
+      }
+
+      .icon-row__host {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="layout">
+      <header>
+        <h1>VaultLite extension options</h1>
+        <p class="hint">Configure server trust context and secure local extension state.</p>
+      </header>
+
+      <section class="panel">
+        <p class="hint">Server URL must be HTTPS. HTTP is allowed only for local loopback development.</p>
+        <p class="hint" style="margin-top:8px">Pairing code is entered in the extension popup (or full-page unlock), not in this Options page.</p>
+        <label>
+          <span>Server URL</span>
+          <input id="serverUrlInput" autocomplete="off" placeholder="https://vaultlite.example.com" />
+        </label>
+        <div class="actions">
+          <button id="saveServerUrlBtn" class="btn-primary" type="button">Save server URL</button>
+          <button id="openWebSettingsBtn" type="button">Open web settings</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <p class="hint">Changing server after pairing requires clearing trusted local state.</p>
+        <div class="actions">
+          <button id="resetTrustedStateBtn" type="button" class="btn-danger">Reset trusted state</button>
+        </div>
+        <p class="notice">
+          This removes local trusted data and in-memory extension session. You will need a new trusted-device request.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 style="margin-top:0">Current extension state</h2>
+        <dl class="kv">
+          <dt>Phase</dt>
+          <dd id="phaseValue">—</dd>
+          <dt>User</dt>
+          <dd id="usernameValue">—</dd>
+          <dt>Device</dt>
+          <dd id="deviceValue">—</dd>
+          <dt>Session expires</dt>
+          <dd id="sessionExpiresValue">—</dd>
+          <dt>Trusted local state</dt>
+          <dd id="trustedStateValue">—</dd>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2 style="margin-top:0">Manual site icons</h2>
+        <p class="hint">Import custom icons with MIME/size validation and 64x64 normalization.</p>
+        <div class="icon-form-grid">
+          <label>
+            <span>Site host</span>
+            <input id="iconHostInput" autocomplete="off" placeholder="example.com" />
+          </label>
+          <label>
+            <span>Icon URL</span>
+            <input id="iconUrlInput" autocomplete="off" placeholder="https://example.com/favicon.png" />
+          </label>
+          <label>
+            <span>Icon file</span>
+            <input id="iconFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon" />
+          </label>
+          <div class="actions">
+            <button id="importIconFromUrlBtn" type="button">Import URL</button>
+            <button id="importIconFromFileBtn" type="button">Import file</button>
+          </div>
+        </div>
+        <ul id="manualIconList" class="icon-list"></ul>
+      </section>
+
+      <div id="statusBanner" class="status" data-tone="warning" hidden></div>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

@@ -33,6 +33,18 @@ function createSessionStore() {
     confirmRecentReauth: vi.fn().mockResolvedValue({
       validUntil: '2026-03-18T12:05:00.000Z',
     }),
+    listExtensionLinkPending: vi.fn().mockResolvedValue({
+      ok: true,
+      requests: [],
+    }),
+    approveExtensionLink: vi.fn().mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+    }),
+    rejectExtensionLink: vi.fn().mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+    }),
     listDevices: vi.fn().mockResolvedValue({
       devices: [
         {
@@ -94,7 +106,10 @@ function createSessionStore() {
   };
 }
 
-async function mountSettingsPage() {
+async function mountSettingsPage(input?: {
+  initialRoute?: string;
+  section?: 'overview' | 'security' | 'devices' | 'extension' | 'data' | 'advanced';
+}) {
   const sessionStore = createSessionStore();
   const router = createRouter({
     history: createMemoryHistory(),
@@ -104,10 +119,13 @@ async function mountSettingsPage() {
     ],
   });
 
-  await router.push('/settings');
+  await router.push(input?.initialRoute ?? '/settings');
   await router.isReady();
 
   const wrapper = mount(SettingsPage, {
+    props: {
+      section: input?.section ?? 'overview',
+    },
     global: {
       plugins: [router],
       provide: {
@@ -122,17 +140,17 @@ async function mountSettingsPage() {
 }
 
 describe('SettingsPage', () => {
-  test('renders data portability actions in settings', async () => {
-    const { wrapper } = await mountSettingsPage();
+  test('renders overview quick cards by default', async () => {
+    const { wrapper } = await mountSettingsPage({ section: 'overview' });
 
-    expect(wrapper.text()).toContain('Data portability');
-    expect(wrapper.text()).toContain('Import vault file');
-    expect(wrapper.text()).toContain('Export JSON');
-    expect(wrapper.text()).toContain('Create encrypted backup');
+    expect(wrapper.text()).toContain('Current session');
+    expect(wrapper.text()).toContain('Trusted devices');
+    expect(wrapper.text()).toContain('Browser extension');
+    expect(wrapper.text()).toContain('Backup & export');
   });
 
-  test('renders trusted devices with explicit lastAuthenticated label', async () => {
-    const { wrapper, sessionStore } = await mountSettingsPage();
+  test('renders trusted devices with explicit lastAuthenticated label in devices section', async () => {
+    const { wrapper, sessionStore } = await mountSettingsPage({ section: 'devices' });
 
     expect(sessionStore.listDevices).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain('Trusted devices');
@@ -143,7 +161,7 @@ describe('SettingsPage', () => {
   });
 
   test('revokes non-current device after recent reauth confirmation', async () => {
-    const { wrapper, sessionStore } = await mountSettingsPage();
+    const { wrapper, sessionStore } = await mountSettingsPage({ section: 'devices' });
 
     const revokeButton = wrapper
       .findAll('button')
@@ -170,7 +188,14 @@ describe('SettingsPage', () => {
   });
 
   test('submits password rotation with validated form', async () => {
-    const { wrapper, sessionStore } = await mountSettingsPage();
+    const { wrapper, sessionStore } = await mountSettingsPage({ section: 'security' });
+
+    const passwordTab = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Password rotation');
+    expect(passwordTab).toBeDefined();
+    await passwordTab!.trigger('click');
+    await flushPromises();
 
     const currentPasswordInput = wrapper.find('input[autocomplete="current-password"]');
     const newPasswordInputs = wrapper.findAll('input[autocomplete="new-password"]');
@@ -193,10 +218,17 @@ describe('SettingsPage', () => {
   });
 
   test('shows a human error when password rotation fails', async () => {
-    const { wrapper, sessionStore } = await mountSettingsPage();
+    const { wrapper, sessionStore } = await mountSettingsPage({ section: 'security' });
     sessionStore.rotatePassword.mockRejectedValueOnce(
       new Error('Request failed with status 409 (stale_bundle_version)'),
     );
+
+    const passwordTab = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Password rotation');
+    expect(passwordTab).toBeDefined();
+    await passwordTab!.trigger('click');
+    await flushPromises();
 
     const currentPasswordInput = wrapper.find('input[autocomplete="current-password"]');
     const newPasswordInputs = wrapper.findAll('input[autocomplete="new-password"]');
@@ -211,5 +243,41 @@ describe('SettingsPage', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('Your account changed in another session. Refresh and try again.');
+  });
+
+  test('shows only one security subsection at a time through tabs', async () => {
+    const { wrapper } = await mountSettingsPage({ section: 'security' });
+
+    expect(wrapper.text()).toContain('Session');
+    expect(wrapper.text()).not.toContain('Rotating password revokes older sessions and keeps trusted devices active.');
+
+    const passwordTab = wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Password rotation');
+    expect(passwordTab).toBeDefined();
+    await passwordTab!.trigger('click');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Rotating password revokes older sessions and keeps trusted devices active.');
+    expect(wrapper.text()).not.toContain('Auto-lock after');
+  });
+
+  test('renders LTS-only extension connection guidance', async () => {
+    const { wrapper } = await mountSettingsPage({ section: 'extension' });
+
+    expect(wrapper.text()).toContain('Connect extension');
+    expect(wrapper.text()).toContain('Connect with trusted device');
+    expect(wrapper.text()).not.toContain('Generate pairing code');
+    expect(wrapper.text()).not.toContain('Connect automatically');
+    expect(wrapper.text()).not.toContain('Pairing code:');
+  });
+
+  test('renders data portability actions in data section', async () => {
+    const { wrapper } = await mountSettingsPage({ section: 'data' });
+
+    expect(wrapper.text()).toContain('Data portability');
+    expect(wrapper.text()).toContain('Import vault file');
+    expect(wrapper.text()).toContain('Export JSON');
+    expect(wrapper.text()).toContain('Create encrypted backup');
   });
 });

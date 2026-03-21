@@ -1,6 +1,8 @@
 import type {
   DeviceListOutput,
   DeviceRevokeOutput,
+  ExtensionLinkActionOutput,
+  ExtensionLinkPendingListOutput,
   PasswordRotationCompleteOutput,
   RuntimeMetadata,
 } from '@vaultlite/contracts';
@@ -94,6 +96,16 @@ export interface SessionStore {
   }): Promise<{
     validUntil: string;
   }>;
+  listExtensionLinkPending(): Promise<ExtensionLinkPendingListOutput>;
+  approveExtensionLink(input: {
+    requestId: string;
+    password: string;
+  }): Promise<ExtensionLinkActionOutput>;
+  rejectExtensionLink(input: {
+    requestId: string;
+    password: string;
+    rejectionReasonCode?: string;
+  }): Promise<ExtensionLinkActionOutput>;
   listDevices(): Promise<DeviceListOutput>;
   revokeDevice(deviceId: string): Promise<DeviceRevokeOutput>;
   rotatePassword(input: {
@@ -207,6 +219,43 @@ export function createSessionStore(input: {
     }
 
     return runtimeMetadata;
+  }
+
+  async function requireTrustedLocalStateForExtensionTrust(password: string): Promise<{
+    authSalt: string;
+    encryptedAccountBundle: string;
+    accountKeyWrapped: string;
+    localUnlockEnvelope: {
+      version: 'local-unlock.v1';
+      nonce: string;
+      ciphertext: string;
+    };
+  }> {
+    if (!state.username || !state.userId || !readyState || state.phase !== 'ready') {
+      throw new Error('Extension pairing requires unlocked state');
+    }
+
+    const trustedLocalState = await input.trustedLocalStateStore.load(state.username);
+    if (!trustedLocalState || (state.deviceId && trustedLocalState.deviceId !== state.deviceId)) {
+      throw new Error('This device is no longer trusted for this account. Add the device again.');
+    }
+
+    const pairingLocalUnlockEnvelope = await createLocalUnlockEnvelope({
+      password,
+      authSalt: trustedLocalState.authSalt,
+      payload: {
+        accountKey: readyState.accountKey,
+        encryptedAccountBundle: trustedLocalState.encryptedAccountBundle,
+        accountKeyWrapped: trustedLocalState.accountKeyWrapped,
+      },
+    });
+
+    return {
+      authSalt: trustedLocalState.authSalt,
+      encryptedAccountBundle: trustedLocalState.encryptedAccountBundle,
+      accountKeyWrapped: trustedLocalState.accountKeyWrapped,
+      localUnlockEnvelope: pairingLocalUnlockEnvelope,
+    };
   }
 
   async function refreshBootstrapStateInternal() {
@@ -689,6 +738,35 @@ export function createSessionStore(input: {
       return {
         validUntil: response.validUntil,
       };
+    },
+    async listExtensionLinkPending() {
+      if (!state.username || !state.userId) {
+        throw new Error('Extension link requests require an authenticated user');
+      }
+      return input.authClient.listExtensionLinkPending();
+    },
+    async approveExtensionLink(inputData) {
+      const extensionTrustPackage = await requireTrustedLocalStateForExtensionTrust(inputData.password);
+      await this.confirmRecentReauth({
+        password: inputData.password,
+      });
+      return input.authClient.approveExtensionLink({
+        requestId: inputData.requestId,
+        approvalNonce: createRandomBase64Url(16),
+        package: extensionTrustPackage,
+      });
+    },
+    async rejectExtensionLink(inputData) {
+      if (!state.username || !state.userId) {
+        throw new Error('Extension link requests require an authenticated user');
+      }
+      await this.confirmRecentReauth({
+        password: inputData.password,
+      });
+      return input.authClient.rejectExtensionLink({
+        requestId: inputData.requestId,
+        rejectionReasonCode: inputData.rejectionReasonCode,
+      });
     },
     async listDevices() {
       if (!state.username || !state.userId) {

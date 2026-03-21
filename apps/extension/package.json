@@ -3,9 +3,13 @@
   "name": "@vaultlite/extension",
   "type": "module",
   "scripts": {
-    "test": "cmd /c echo No tests yet for Phase 1 extension scaffold",
+    "test": "vitest run --environment jsdom",
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@vaultlite/contracts": "*"
   },
   "private": true
 }

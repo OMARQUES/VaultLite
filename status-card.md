@@ -2,9 +2,9 @@
 
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
-Status card version: `2026-03-19-v2.2.1-r18`
+Status card version: `2026-03-19-v2.2.1-r19`
 Last updated: `2026-03-19`
-Overall status: `phase10_complete_phase11_ready`
+Overall status: `phase11_in_progress`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
 ## Legend
@@ -122,10 +122,10 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 ## Current Focus
 
 Active phase: `Phase 11 extension baseline`
-Active card: `P11-C01 - Extension unlock`
+Active card: `P11-C01/P11-C02/P11-C03 - review and closure`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P10-C01` through `P10-C06` are aligned with implemented import/export/backup behavior and validation coverage; next logical phase is extension unlock baseline.
-Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03`.
+Reason: `P11` runtime bridge is implemented end-to-end (pairing, local unlock, listing, manual fill) with automated coverage green; final manual extension validation and evidence collation remain to close cards as `done`.
+Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03` manual evidence closure, then `P12-C01`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -229,9 +229,9 @@ Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03`.
 - `P10-C04` Attachment-inclusive manifest — `done`
 - `P10-C05` Restore format docs — `done`
 - `P10-C06` Backup validation tests — `done`
-- `P11-C01` Extension unlock — `not_started`
-- `P11-C02` Credential listing — `not_started`
-- `P11-C03` Manual fill — `not_started`
+- `P11-C01` Extension unlock — `review_needed`
+- `P11-C02` Credential listing — `review_needed`
+- `P11-C03` Manual fill — `review_needed`
 - `P12-C01` Threat-model review update — `not_started`
 - `P12-C02` OPERATIONS.md — `not_started`
 - `P12-C03` RELEASE.md — `not_started`
@@ -2378,7 +2378,7 @@ Suggested next action: start `P11-C01` extension unlock baseline.
 Card ID: `P11-C01`
 Title: `Extension unlock`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P2`
 Objective: Implement the browser extension unlock experience for the approved V1 feature set.
 Description: Build the extension-side unlock flow and trusted-device handling needed to access existing credentials.
@@ -2393,13 +2393,14 @@ Acceptance criteria: extension can unlock an existing account under the approved
 Risks / cautions: extension storage and state handling are easy places to violate the local storage policy.
 Notes for Codex/dev: V1 extension scope is retrieval and fill-oriented, not capture-oriented.
 Evidence required to mark done: Passing extension unlock tests plus evidence that no forbidden auth or session secrets are persisted in extension storage.
-Suggested next action: scaffold extension shell and unlock state flow.
+Implementation snapshot: API now exposes `POST /api/auth/extension/pairing/init` and `POST /api/auth/extension/pairing/complete` with one-time code, hashed challenge storage, rate limiting, and opaque extension bearer rotation support on `GET /api/auth/session/restore`. Web `/settings` includes a “Connect extension” ceremony with recent reauth and one-time code generation. Extension runtime now implements `background.js` authority, `popup.html/js`, `full-page-auth.html/js`, `options.html/js`, strict storage allowlist, and local unlock via `runtime-crypto.js` with `argon2id` profile (`m=65536`, `t=3`, `p=4`, `dkLen=32`).
+Suggested next action: run manual browser validation for pairing/unlock/revoke and record evidence, then mark `done`.
 
 ### P11-C02 - Credential listing
 Card ID: `P11-C02`
 Title: `Credential listing`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P2`
 Objective: Show available credentials in the extension for manual selection.
 Description: Implement the list surface that lets users browse and choose credentials after unlock.
@@ -2414,13 +2415,14 @@ Acceptance criteria: unlocked extension displays accessible credentials reliably
 Risks / cautions: do not over-cache decrypted data in extension storage.
 Notes for Codex/dev: keep list behavior consistent with web search constraints.
 Evidence required to mark done: Passing extension listing tests plus UI evidence of credential rendering without forbidden long-lived decrypted caching.
-Suggested next action: implement credential list using shared vault item selectors.
+Implementation snapshot: extension runtime now consumes `/api/sync/snapshot` from background authority and projects a minimal popup view model (`itemId`, `title`, `usernamePreview`, `urlHostSummary`, `matchFlags`) without persisting decrypted payloads. Search/filter and domain-first ordering are active in `popup.js`, with policy helpers in `apps/extension/src/background-controller.ts` and unit coverage in `apps/extension/src/background-controller.test.ts`.
+Suggested next action: capture manual evidence for empty/match/fallback states and mark `done`.
 
 ### P11-C03 - Manual fill
 Card ID: `P11-C03`
 Title: `Manual fill`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P2`
 Objective: Support explicit user-triggered fill from the extension.
 Description: Build the minimal manual-fill action for selected credentials in supported pages.
@@ -2435,7 +2437,8 @@ Acceptance criteria: user-triggered fill works on approved test pages.
 Risks / cautions: content-script behavior must remain narrowly permissioned.
 Notes for Codex/dev: keep V1 extension scope intentionally narrow; do not smuggle `save login` into this phase.
 Evidence required to mark done: Passing manual-fill tests plus fixture-page evidence showing explicit user-triggered fill only.
-Suggested next action: implement explicit fill action and controlled content-script bridge.
+Implementation snapshot: popup→background→content-script bridge is now wired in runtime files (`apps/extension/popup.js`, `apps/extension/background.js`, `apps/extension/content-script.js`) with explicit user-triggered fill, exact-origin authorization, anti-race revalidation, top-level-only execution, and no autosubmit. Policy modules and unit coverage remain in `apps/extension/src/origin-policy.ts` + `apps/extension/src/fill-engine.ts`.
+Suggested next action: validate fixture pages manually (supported and blocked contexts) and record evidence to close card.
 
 ## Phase 12
 
@@ -2634,6 +2637,8 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-19: Closed the Phase 11 runtime implementation path and moved `P11-C01`/`P11-C02`/`P11-C03` to `review_needed`. Added operational MV3 runtime files (`apps/extension/background.js`, `apps/extension/popup.js`, `apps/extension/options.js`, `apps/extension/full-page-auth.js`, `apps/extension/content-script.js`, `apps/extension/runtime-*.js`) enforcing background-only secret authority, strict sender capability checks, exact-origin fill authorization, anti-race revalidation, and fail-closed lock behavior. Validation evidence: `@vaultlite/api`, `@vaultlite/web`, and `@vaultlite/extension` test suites green; workspace typecheck green; migration validation green; `npm audit --omit=dev` reports 0 vulnerabilities.
+- 2026-03-19: Started Phase 11 implementation (`P11-C01`/`P11-C02`/`P11-C03`) with closed security defaults: website-assisted extension pairing (one-time hashed code + rate limits), opaque extension bearer allowlist (`session/restore`, `sync/snapshot`) with rotation window, extension pairing persistence migration `0009_extension_pairings`, and MV3 isolation helpers in `apps/extension` (background authority, exact-origin fill policy, top-level-only fill engine). Evidence: `apps/api/src/extension-auth.test.ts`, `apps/extension/src/*.test.ts`, full workspace typecheck/test green.
 - 2026-03-18: Completed `P95-C04` through `P95-C06` with lifecycle-focused integration coverage and deterministic transition assertions. Evidence: `apps/api/src/admin-lifecycle.test.ts` now covers deprovision authorization and side effects, already-issued session rejection after lifecycle mutations, trusted-device invalidation effects, and matrix assertions for valid, invalid, and idempotent transitions; `apps/web/src/pages/AdminConsolePage.test.ts` includes deprovision confirmation flow coverage.
 - 2026-03-18: Completed `P95-C01` through `P95-C03` with synchronized API/UI evidence. API now has explicit lifecycle integration coverage in `apps/api/src/admin-lifecycle.test.ts` for owner list visibility (`active`/`deprovisioned`), suspend authorization and enforcement, suspended-user denial on protected/authenticated paths, successful reactivation, and invalid transition rejection. UI/admin evidence remains green in `apps/web/src/pages/AdminConsolePage.test.ts`.
 - 2026-03-18: Completed `P9-C01` through `P9-C05` with live sync snapshot orchestration (`snapshotToken`/`cursor`/ETag), deterministic conflict handling (`revision_conflict`, `item_deleted_conflict`), trusted device listing with `lastAuthenticatedAt`, atomic device revocation, and atomic password rotation (`expected_bundle_version`, idempotent replay semantics). Regression evidence: `@vaultlite/api` (`src/sync-devices-rotation.test.ts`, `src/vault.test.ts`, `src/app.test.ts`), `@vaultlite/web` (`src/App.test.ts`, `src/pages/SettingsPage.test.ts`, `src/lib/vault-workspace.test.ts`, `src/pages/VaultShellPage.test.ts`), `@vaultlite/cloudflare-storage` test suite all green.
@@ -2669,8 +2674,8 @@ Suggested next action: compile the final checklist from implemented verification
 
 ## Next Cards
 1. `P11-C01` - `Extension unlock`
-       Condition to start: `P10` portability stack is complete and stable in web.
+       Condition to finish: manual browser evidence for pairing/unlock/reset/revoke must be captured and attached to the card.
 2. `P11-C02` - `Credential listing`
-       Condition to start: `P11-C01` has trusted-device unlock and storage policy guardrails implemented.
+       Condition to finish: manual evidence must confirm domain-first ordering, empty state, and global fallback behavior without persistent decrypted cache.
 3. `P11-C03` - `Manual fill`
-       Condition to start: `P11-C02` provides deterministic credential selection behavior.
+       Condition to finish: manual fixture evidence must confirm safe no-op in blocked contexts and successful explicit fill in approved contexts.

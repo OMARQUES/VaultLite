@@ -1,0 +1,139 @@
+import { describe, expect, test, vi } from 'vitest';
+
+import { createExtensionApiClient } from '../runtime-api.js';
+
+describe('runtime api client', () => {
+  test('uses no-store cache policy for metadata and snapshot fetches', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ snapshotToken: 'snapshot_1', nextCursor: null, entries: [] }),
+      clone() {
+        return this;
+      },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createExtensionApiClient('http://127.0.0.1:8787');
+
+    await client.getRuntimeMetadata();
+    await client.fetchSnapshot({
+      bearerToken: 'token_1',
+      pageSize: 100,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      cache: 'no-store',
+      credentials: 'omit',
+      method: 'GET',
+    });
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      cache: 'no-store',
+      credentials: 'omit',
+      method: 'GET',
+    });
+  });
+
+  test('calls LTS link endpoints with expected HTTP methods and body', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          requestId: 'req_1',
+          shortCode: 'ABCDEFG2',
+          fingerprintPhrase: 'amber-delta-zenith',
+          expiresAt: '2026-03-20T12:00:00.000Z',
+          interval: 5,
+          serverOrigin: 'http://127.0.0.1:8787',
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          status: 'authorization_pending',
+          interval: 5,
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: 'success_changed',
+          extensionSessionToken: 'token_1',
+          sessionExpiresAt: '2026-03-20T12:30:00.000Z',
+          user: { userId: 'user_1', username: 'alice', role: 'owner', bundleVersion: 0, lifecycleState: 'active' },
+          device: { deviceId: 'device_1', deviceName: 'Browser', platform: 'extension' },
+          package: {
+            authSalt: 'A'.repeat(22),
+            encryptedAccountBundle: 'bundle',
+            accountKeyWrapped: 'wrapped',
+            localUnlockEnvelope: {
+              version: 'local-unlock.v1',
+              nonce: 'B'.repeat(22),
+              ciphertext: 'C'.repeat(43),
+            },
+          },
+        }),
+        clone() {
+          return this;
+        },
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createExtensionApiClient('http://127.0.0.1:8787');
+
+    await client.createLinkRequest({
+      deploymentFingerprint: 'deployment_fp_v1',
+      requestPublicKey: 'pub_key_1',
+      clientNonce: 'nonce_1_nonce_1',
+      deviceNameHint: 'Notebook',
+    });
+    await client.getLinkStatus({
+      requestId: 'request_1_request_1',
+      requestProof: {
+        nonce: 'nonce_status_12345',
+        signature: 'A'.repeat(64),
+      },
+    });
+    await client.consumeLinkRequest({
+      requestId: 'request_1_request_1',
+      requestProof: {
+        nonce: 'nonce_consume_1234',
+        signature: 'B'.repeat(64),
+      },
+      consumeNonce: 'consume_nonce_123',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:8787/api/auth/extension/link/request');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+    expect(fetchMock.mock.calls[1][0]).toBe('http://127.0.0.1:8787/api/auth/extension/link/status');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+    expect(fetchMock.mock.calls[2][0]).toBe('http://127.0.0.1:8787/api/auth/extension/link/consume');
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+  });
+});

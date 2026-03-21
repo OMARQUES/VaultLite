@@ -19,8 +19,6 @@ const props = defineProps<{
   role?: 'owner' | 'user' | null;
   deviceName: string | null;
   onLock?: () => void;
-  onOpenSettings?: () => void;
-  settingsOpen?: boolean;
 }>();
 
 const route = useRoute();
@@ -28,8 +26,22 @@ const router = useRouter();
 const isVaultRoute = computed(() => route.path.startsWith('/vault'));
 const isSettingsRoute = computed(() => route.path.startsWith('/settings'));
 const isAdminRoute = computed(() => route.path.startsWith('/admin'));
+type SettingsSection = 'overview' | 'security' | 'devices' | 'extension' | 'data' | 'advanced';
+const settingsNavigationItems: Array<{
+  key: SettingsSection;
+  label: string;
+  to: string;
+  icon: 'settings' | 'lock' | 'all' | 'vault' | 'document';
+}> = [
+  { key: 'overview', label: 'Overview', to: '/settings', icon: 'settings' },
+  { key: 'security', label: 'Security', to: '/settings/security', icon: 'lock' },
+  { key: 'devices', label: 'Devices', to: '/settings/devices', icon: 'all' },
+  { key: 'extension', label: 'Browser Extension', to: '/settings/extension', icon: 'vault' },
+  { key: 'data', label: 'Import & Export', to: '/settings/data', icon: 'document' },
+  { key: 'advanced', label: 'Advanced', to: '/settings/advanced', icon: 'settings' },
+];
 const showAdminLink = computed(() => props.role === 'owner');
-const ownerSystemShortcut = computed<{
+const footerPrimaryLink = computed<{
   to: string;
   label: 'Admin' | 'Vault';
   icon: 'all' | 'vault';
@@ -51,6 +63,29 @@ const ownerSystemShortcut = computed<{
     isActive: isAdminRoute.value,
   };
 });
+
+const footerSecondaryLink = computed<{
+  to: string;
+  label: 'Settings' | 'Vault';
+  icon: 'settings' | 'vault';
+  isActive: boolean;
+}>(() => {
+  if (isSettingsRoute.value) {
+    return {
+      to: '/vault',
+      label: 'Vault',
+      icon: 'vault',
+      isActive: isVaultRoute.value,
+    };
+  }
+
+  return {
+    to: '/settings',
+    label: 'Settings',
+    icon: 'settings',
+    isActive: isSettingsRoute.value,
+  };
+});
 const activeAdminSection = computed<'overview' | 'invites' | 'users' | 'audit'>(() => {
   if (!isAdminRoute.value) {
     return 'overview';
@@ -63,6 +98,17 @@ const activeAdminSection = computed<'overview' | 'invites' | 'users' | 'audit'>(
   }
   if (route.path.startsWith('/admin/audit')) {
     return 'audit';
+  }
+  return 'overview';
+});
+const activeSettingsSection = computed<SettingsSection>(() => {
+  if (!isSettingsRoute.value) {
+    return 'overview';
+  }
+
+  const rawSection = route.params.section;
+  if (rawSection === 'security' || rawSection === 'devices' || rawSection === 'extension' || rawSection === 'data' || rawSection === 'advanced') {
+    return rawSection;
   }
   return 'overview';
 });
@@ -394,6 +440,25 @@ watch(
           </nav>
         </section>
       </div>
+      <div v-else-if="isSettingsRoute" class="sidebar-nav__vault sidebar-nav__settings">
+        <section class="sidebar-nav__section">
+          <p class="sidebar-nav__section-title">Settings</p>
+          <nav class="sidebar-nav__section-links" aria-label="Settings sections">
+            <RouterLink
+              v-for="item in settingsNavigationItems"
+              :key="item.key"
+              class="sidebar-nav__link sidebar-nav__link--compact"
+              :class="{ 'is-active': activeSettingsSection === item.key }"
+              :to="item.to"
+            >
+              <span class="sidebar-nav__link-main">
+                <AppIcon class="sidebar-nav__icon sidebar-nav__icon--settings" :name="item.icon" :size="17" />
+                <span>{{ item.label }}</span>
+              </span>
+            </RouterLink>
+          </nav>
+        </section>
+      </div>
     </div>
 
     <div class="sidebar-nav__footer">
@@ -401,25 +466,24 @@ watch(
       <RouterLink
         v-if="showAdminLink"
         class="sidebar-nav__link sidebar-nav__link--compact sidebar-nav__link--footer"
-        :class="{ 'is-active': ownerSystemShortcut.isActive }"
-        :to="ownerSystemShortcut.to"
+        :class="{ 'is-active': footerPrimaryLink.isActive }"
+        :to="footerPrimaryLink.to"
       >
         <span class="sidebar-nav__link-main">
-          <AppIcon class="sidebar-nav__icon sidebar-nav__icon--all" :name="ownerSystemShortcut.icon" :size="17" />
-          <span>{{ ownerSystemShortcut.label }}</span>
+          <AppIcon class="sidebar-nav__icon sidebar-nav__icon--all" :name="footerPrimaryLink.icon" :size="17" />
+          <span>{{ footerPrimaryLink.label }}</span>
         </span>
       </RouterLink>
-      <button
+      <RouterLink
         class="sidebar-nav__link sidebar-nav__link--compact sidebar-nav__link--footer"
-        :class="{ 'is-active': props.settingsOpen || isSettingsRoute }"
-        type="button"
-        @click="props.onOpenSettings?.()"
+        :class="{ 'is-active': footerSecondaryLink.isActive }"
+        :to="footerSecondaryLink.to"
       >
         <span class="sidebar-nav__link-main">
-          <AppIcon class="sidebar-nav__icon sidebar-nav__icon--settings" name="settings" :size="17" />
-          <span>Settings</span>
+          <AppIcon class="sidebar-nav__icon sidebar-nav__icon--settings" :name="footerSecondaryLink.icon" :size="17" />
+          <span>{{ footerSecondaryLink.label }}</span>
         </span>
-      </button>
+      </RouterLink>
       <dl class="sidebar-nav__meta">
         <div>
           <dt>User</dt>

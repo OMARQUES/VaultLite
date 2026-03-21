@@ -64,7 +64,12 @@ function assertTables(database) {
 
   const expectedTables = [
     'attachment_blobs',
+    'audit_events',
     'auth_rate_limits',
+    'deployment_state',
+    'extension_link_requests',
+    'extension_pairings',
+    'idempotency_records',
     'invites',
     'sessions',
     'trusted_devices',

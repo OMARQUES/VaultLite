@@ -8,6 +8,16 @@ import {
   AttachmentUploadInitOutputSchema,
   AttachmentUploadListOutputSchema,
   AttachmentUploadRecordSchema,
+  ExtensionLinkActionOutputSchema,
+  ExtensionLinkApproveInputSchema,
+  ExtensionLinkConsumeInputSchema,
+  ExtensionLinkConsumeOutputSchema,
+  ExtensionLinkPendingListOutputSchema,
+  ExtensionLinkRejectInputSchema,
+  ExtensionLinkRequestInputSchema,
+  ExtensionLinkRequestOutputSchema,
+  ExtensionLinkStatusInputSchema,
+  ExtensionLinkStatusOutputSchema,
   AdminInviteCreateInputSchema,
   AdminInviteCreateOutputSchema,
   AdminInviteListOutputSchema,
@@ -60,7 +70,7 @@ import {
   signAccountKitPayload,
   verifyAccountKitSignature,
 } from '@vaultlite/crypto/account-kit';
-import { toBase64Url } from '@vaultlite/crypto/base64';
+import { fromBase64Url, toBase64Url } from '@vaultlite/crypto/base64';
 import type {
   Clock,
   EqualityCsrfValidator,
@@ -75,7 +85,7 @@ import {
   serializeCookie,
 } from '@vaultlite/cloudflare-runtime';
 import { Hono } from 'hono';
-import { createHash, createHmac, timingSafeEqual, type KeyObject } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { ZodError } from 'zod';
 
 const GENERIC_INVALID_CREDENTIALS = GenericAuthFailureSchema.parse({
@@ -104,11 +114,23 @@ type SessionContext = {
   session: SessionRecord;
   user: UserAccountRecord;
   device: DeviceRecord;
+  authMode: 'cookie' | 'extension_bearer';
+  extensionToken: string | null;
 };
 
 const VERIFY_TOKEN_TTL_SECONDS = 10 * 60;
 const RECENT_REAUTH_TTL_SECONDS = 5 * 60;
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
+const EXTENSION_LINK_REQUEST_TTL_SECONDS = 10 * 60;
+const EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS = 5;
+const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
+const EXTENSION_LINK_STATUS_SLOWDOWN_SECONDS = 5;
+const EXTENSION_LINK_REQUEST_IP_ATTEMPT_LIMIT = 15;
+const EXTENSION_LINK_REQUEST_IP_WINDOW_SECONDS = 10 * 60;
+const EXTENSION_LINK_STATUS_ATTEMPT_LIMIT = 1;
+const EXTENSION_LINK_STATUS_WINDOW_SECONDS = EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS;
+const EXTENSION_SESSION_TTL_SECONDS = 30 * 60;
+const EXTENSION_SESSION_ROTATE_THRESHOLD_SECONDS = 10 * 60;
 const BOOTSTRAP_VERIFY_ATTEMPT_LIMIT = 20;
 const BOOTSTRAP_VERIFY_WINDOW_SECONDS = 5 * 60;
 const AUTH_RATE_LIMIT_ATTEMPT_LIMIT = 5;
@@ -218,6 +240,156 @@ function resolveRequestIp(request: Request): string {
 
 function toSubjectHash(value: string): string {
   return sha256Base64Url(value.trim().toLowerCase());
+}
+
+function canonicalizeServerOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol !== 'https:' && protocol !== 'http:') {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function generatePairingCode(): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bytes = randomBytes(8);
+  let code = '';
+  for (let index = 0; index < 8; index += 1) {
+    code += alphabet[bytes[index] % alphabet.length] ?? 'A';
+  }
+  return code;
+}
+
+function issueExtensionLinkRequestId(): string {
+  return toBase64Url(randomBytes(24));
+}
+
+function generateExtensionLinkShortCode(): string {
+  return generatePairingCode();
+}
+
+function generateFingerprintPhrase(): string {
+  const words = [
+    'amber',
+    'anchor',
+    'breeze',
+    'cedar',
+    'comet',
+    'delta',
+    'ember',
+    'frost',
+    'harbor',
+    'ivory',
+    'juniper',
+    'lumen',
+    'matrix',
+    'nova',
+    'onyx',
+    'orbit',
+    'quartz',
+    'raven',
+    'signal',
+    'tundra',
+    'ultra',
+    'vector',
+    'willow',
+    'zenith',
+  ];
+  const picks = [randomBytes(1)[0], randomBytes(1)[0], randomBytes(1)[0]]
+    .map((byte) => words[byte % words.length] ?? 'signal');
+  return `${picks[0]}-${picks[1]}-${picks[2]}`;
+}
+
+function parseBearerToken(authorizationHeader: string | null): string | null {
+  if (!authorizationHeader) {
+    return null;
+  }
+  const match = /^Bearer\s+(.+)$/.exec(authorizationHeader.trim());
+  if (!match) {
+    return null;
+  }
+  const token = match[1]?.trim() ?? '';
+  return token.length > 0 ? token : null;
+}
+
+function issueExtensionSessionToken(): string {
+  return toBase64Url(randomBytes(32));
+}
+
+function extensionLinkSignaturePayload(input: {
+  action: 'status' | 'consume';
+  requestId: string;
+  nonce: string;
+  clientNonce: string;
+  serverOrigin: string;
+  deploymentFingerprint: string;
+}): Uint8Array {
+  const payload = [
+    'vaultlite-extension-link-v1',
+    input.action,
+    input.requestId,
+    input.nonce,
+    input.clientNonce,
+    input.serverOrigin,
+    input.deploymentFingerprint,
+  ].join('|');
+  return new TextEncoder().encode(payload);
+}
+
+function toFixedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const normalized = new Uint8Array(bytes.byteLength);
+  normalized.set(bytes);
+  return normalized.buffer;
+}
+
+async function verifyExtensionLinkProof(input: {
+  requestPublicKey: string;
+  signature: string;
+  action: 'status' | 'consume';
+  requestId: string;
+  nonce: string;
+  clientNonce: string;
+  serverOrigin: string;
+  deploymentFingerprint: string;
+}): Promise<boolean> {
+  try {
+    const keyData = Uint8Array.from(fromBase64Url(input.requestPublicKey));
+    const signature = Uint8Array.from(fromBase64Url(input.signature));
+    const publicKey = await crypto.subtle.importKey(
+      'spki',
+      toFixedArrayBuffer(keyData),
+      {
+        name: 'ECDSA',
+        namedCurve: 'P-256',
+      },
+      false,
+      ['verify'],
+    );
+    const payload = extensionLinkSignaturePayload({
+      action: input.action,
+      requestId: input.requestId,
+      nonce: input.nonce,
+      clientNonce: input.clientNonce,
+      serverOrigin: input.serverOrigin,
+      deploymentFingerprint: input.deploymentFingerprint,
+    });
+    return await crypto.subtle.verify(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256',
+      },
+      publicKey,
+      toFixedArrayBuffer(signature),
+      toFixedArrayBuffer(payload),
+    );
+  } catch {
+    return false;
+  }
 }
 
 function toCanonicalResult(value: CanonicalResult): CanonicalResult {
@@ -752,6 +924,35 @@ async function issueTrustedSession(input: {
   return input.storage.sessions.create(session);
 }
 
+async function issueExtensionSession(input: {
+  storage: VaultLiteStorage;
+  clock: Clock;
+  idGenerator: IdGenerator;
+  user: UserAccountRecord;
+  device: DeviceRecord;
+  rotatedFromSessionId: string | null;
+}): Promise<{ token: string; session: SessionRecord }> {
+  const nowIso = isoNow(input.clock);
+  const token = issueExtensionSessionToken();
+  const tokenHash = sha256Base64Url(token);
+  const session: SessionRecord = {
+    sessionId: tokenHash,
+    userId: input.user.userId,
+    deviceId: input.device.deviceId,
+    csrfToken: input.idGenerator.nextId('csrf_ext'),
+    createdAt: nowIso,
+    expiresAt: addSeconds(nowIso, EXTENSION_SESSION_TTL_SECONDS),
+    recentReauthAt: null,
+    revokedAt: null,
+    rotatedFromSessionId: input.rotatedFromSessionId,
+  };
+  await input.storage.sessions.create(session);
+  return {
+    token,
+    session,
+  };
+}
+
 function buildTrustedSessionRecord(input: {
   clock: Clock;
   idGenerator: IdGenerator;
@@ -805,7 +1006,13 @@ async function resolveAuthenticatedSession(input: {
     return null;
   }
 
-  return { session, user, device };
+  return {
+    session,
+    user,
+    device,
+    authMode: 'cookie',
+    extensionToken: null,
+  };
 }
 
 function hasValidRecentReauth(input: {
@@ -841,6 +1048,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
   const app = new Hono();
   const includeHsts =
     options.runtimeMode === 'production' && resolveServerUrlProtocol(options.serverUrl) === 'https:';
+  const configuredServerOrigin = canonicalizeServerOrigin(options.serverUrl) ?? options.serverUrl;
 
   app.use('*', async (c, next) => {
     await next();
@@ -864,13 +1072,50 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       },
     } satisfies MutableRequestCsrfValidator);
 
-  async function requireAuthenticatedSession(request: Request): Promise<SessionContext | null> {
+  async function resolveExtensionBearerSession(request: Request): Promise<SessionContext | null> {
+    const bearerToken = parseBearerToken(request.headers.get('authorization'));
+    if (!bearerToken) {
+      return null;
+    }
+    const tokenHash = sha256Base64Url(bearerToken);
+    const resolved = await resolveAuthenticatedSession({
+      storage: options.storage,
+      clock: options.clock,
+      sessionId: tokenHash,
+    });
+    if (!resolved || resolved.device.platform !== 'extension') {
+      return null;
+    }
+    return {
+      ...resolved,
+      authMode: 'extension_bearer',
+      extensionToken: bearerToken,
+    };
+  }
+
+  async function requireAuthenticatedSession(
+    request: Request,
+    optionsInput: {
+      allowExtensionBearer?: boolean;
+    } = {},
+  ): Promise<SessionContext | null> {
+    if (optionsInput.allowExtensionBearer) {
+      const bearerSession = await resolveExtensionBearerSession(request);
+      if (bearerSession) {
+        return bearerSession;
+      }
+    }
+
     const cookies = parseCookieHeader(request.headers.get('cookie'));
-    return resolveAuthenticatedSession({
+    const cookieSession = await resolveAuthenticatedSession({
       storage: options.storage,
       clock: options.clock,
       sessionId: cookies.vl_session,
     });
+    if (cookieSession) {
+      return cookieSession;
+    }
+    return null;
   }
 
   function hasValidCsrf(request: Request): boolean {
@@ -913,6 +1158,65 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       sessionContext,
       nowIso,
     };
+  }
+
+  async function requireRecentReauthMutationContext(request: Request): Promise<
+    | {
+        ok: true;
+        sessionContext: SessionContext;
+        nowIso: string;
+      }
+    | {
+        ok: false;
+        response: Response;
+      }
+  > {
+    const sessionContext = await requireAuthenticatedSession(request);
+    if (!sessionContext || sessionContext.authMode !== 'cookie') {
+      return { ok: false, response: jsonResponse(401, { ok: false, code: 'unauthorized' }) };
+    }
+    if (!hasValidCsrf(request)) {
+      return { ok: false, response: jsonResponse(403, { ok: false, code: 'csrf_invalid' }) };
+    }
+    const nowIso = isoNow(options.clock);
+    if (!hasValidRecentReauth({ nowIso, session: sessionContext.session })) {
+      return {
+        ok: false,
+        response: jsonResponse(403, { ok: false, code: 'recent_reauth_required' }),
+      };
+    }
+    return {
+      ok: true,
+      sessionContext,
+      nowIso,
+    };
+  }
+
+  async function requireTrustedRecentReauthMutationContext(request: Request): Promise<
+    | {
+        ok: true;
+        sessionContext: SessionContext;
+        nowIso: string;
+      }
+    | {
+        ok: false;
+        response: Response;
+      }
+  > {
+    const context = await requireRecentReauthMutationContext(request);
+    if (!context.ok) {
+      return context;
+    }
+    const device = await options.storage.devices.findById(context.sessionContext.device.deviceId);
+    if (
+      !device ||
+      device.userId !== context.sessionContext.user.userId ||
+      device.deviceState !== 'active' ||
+      device.revokedAt !== null
+    ) {
+      return { ok: false, response: jsonResponse(403, { ok: false, code: 'device_not_trusted' }) };
+    }
+    return context;
   }
 
   app.get('/api/health', (c) => jsonResponse(200, { status: 'ok' }));
@@ -2207,13 +2511,536 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     return response;
   });
 
-  app.get('/api/auth/session/restore', async (c) => {
-    const deploymentState = await options.storage.deploymentState.get();
-    const cookies = parseCookieHeader(c.req.header('cookie'));
-    const sessionContext = await resolveAuthenticatedSession({
+  app.post('/api/auth/extension/link/request', async (c) => {
+    const nowIso = isoNow(options.clock);
+    const requestIp = resolveRequestIp(c.req.raw);
+    const ipRate = await options.storage.authRateLimits.increment({
+      key: `extension-link:request:ip:${requestIp}`,
+      nowIso,
+      windowSeconds: EXTENSION_LINK_REQUEST_IP_WINDOW_SECONDS,
+    });
+    if (ipRate.attemptCount > EXTENSION_LINK_REQUEST_IP_ATTEMPT_LIMIT) {
+      return jsonResponse(429, { ok: false, code: 'pairing_rate_limited' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 24 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = ExtensionLinkRequestInputSchema.parse(parsedBody.body);
+    if (input.deploymentFingerprint !== options.deploymentFingerprint) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    const requestedServerOrigin = canonicalizeServerOrigin(configuredServerOrigin);
+    if (!requestedServerOrigin || requestedServerOrigin !== configuredServerOrigin) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+
+    const requestId = issueExtensionLinkRequestId();
+    const shortCode = generateExtensionLinkShortCode();
+    const fingerprintPhrase = generateFingerprintPhrase();
+    const expiresAt = addSeconds(nowIso, EXTENSION_LINK_REQUEST_TTL_SECONDS);
+    await options.storage.extensionLinkRequests.create({
+      requestId,
+      userId: null,
+      deploymentFingerprint: options.deploymentFingerprint,
+      serverOrigin: configuredServerOrigin,
+      requestPublicKey: input.requestPublicKey,
+      clientNonce: input.clientNonce,
+      shortCode,
+      fingerprintPhrase,
+      deviceNameHint: input.deviceNameHint?.trim() || null,
+      authSalt: null,
+      encryptedAccountBundle: null,
+      accountKeyWrapped: null,
+      localUnlockEnvelope: null,
+      status: 'pending',
+      createdAt: nowIso,
+      expiresAt,
+      approvedAt: null,
+      approvedByUserId: null,
+      approvedByDeviceId: null,
+      rejectedAt: null,
+      rejectionReasonCode: null,
+      consumedAt: null,
+      consumedByDeviceId: null,
+    });
+
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_extension_link_request',
+      actorUserId: null,
+      targetType: 'extension_link_request',
+      targetId: requestId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+
+    return jsonResponse(
+      200,
+      ExtensionLinkRequestOutputSchema.parse({
+        ok: true,
+        requestId,
+        shortCode,
+        fingerprintPhrase,
+        expiresAt,
+        interval: EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS,
+        serverOrigin: configuredServerOrigin,
+      }),
+    );
+  });
+
+  app.get('/api/auth/extension/link/pending', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    if (!sessionContext || sessionContext.authMode !== 'cookie') {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const nowIso = isoNow(options.clock);
+    const recent = await options.storage.extensionLinkRequests.listRecent(nowIso, 100);
+    const records = recent
+      .filter((record) => record.userId === null || record.userId === sessionContext.user.userId)
+      .map((record) => {
+        const computedStatus =
+          record.expiresAt <= nowIso
+            ? 'expired'
+            : record.status === 'pending' ||
+                record.status === 'approved' ||
+                record.status === 'rejected' ||
+                record.status === 'consumed'
+              ? record.status
+              : 'expired';
+        return {
+          requestId: record.requestId,
+          status: computedStatus,
+          shortCode: record.shortCode,
+          fingerprintPhrase: record.fingerprintPhrase,
+          deviceNameHint: record.deviceNameHint,
+          createdAt: record.createdAt,
+          expiresAt: record.expiresAt,
+          approvedAt: record.approvedAt,
+        };
+      });
+    return jsonResponse(
+      200,
+      ExtensionLinkPendingListOutputSchema.parse({
+        ok: true,
+        requests: records,
+      }),
+    );
+  });
+
+  app.post('/api/auth/extension/link/approve', async (c) => {
+    const context = await requireTrustedRecentReauthMutationContext(c.req.raw);
+    if (!context.ok) {
+      return context.response;
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 64 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = ExtensionLinkApproveInputSchema.parse(parsedBody.body);
+    const requestRecord = await options.storage.extensionLinkRequests.findByRequestId(input.requestId);
+    if (!requestRecord) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (
+      requestRecord.serverOrigin !== configuredServerOrigin ||
+      requestRecord.deploymentFingerprint !== options.deploymentFingerprint
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    if (requestRecord.expiresAt <= context.nowIso) {
+      return jsonResponse(
+        200,
+        ExtensionLinkActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'request_expired',
+        }),
+      );
+    }
+    if (requestRecord.status !== 'pending') {
+      return jsonResponse(
+        200,
+        ExtensionLinkActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'request_not_pending',
+        }),
+      );
+    }
+
+    const approved = await options.storage.extensionLinkRequests.approve({
+      requestId: requestRecord.requestId,
+      expectedStatus: 'pending',
+      approvedAt: context.nowIso,
+      approvedByUserId: context.sessionContext.user.userId,
+      approvedByDeviceId: context.sessionContext.device.deviceId,
+      userId: context.sessionContext.user.userId,
+      authSalt: input.package.authSalt,
+      encryptedAccountBundle: input.package.encryptedAccountBundle,
+      accountKeyWrapped: input.package.accountKeyWrapped,
+      localUnlockEnvelope: JSON.stringify(input.package.localUnlockEnvelope),
+    });
+    if (!approved) {
+      return jsonResponse(
+        200,
+        ExtensionLinkActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'request_not_pending',
+        }),
+      );
+    }
+
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_extension_link_approve',
+      actorUserId: context.sessionContext.user.userId,
+      targetType: 'extension_link_request',
+      targetId: requestRecord.requestId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+
+    return jsonResponse(
+      200,
+      ExtensionLinkActionOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+      }),
+    );
+  });
+
+  app.post('/api/auth/extension/link/reject', async (c) => {
+    const context = await requireTrustedRecentReauthMutationContext(c.req.raw);
+    if (!context.ok) {
+      return context.response;
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 16 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = ExtensionLinkRejectInputSchema.parse(parsedBody.body);
+    const requestRecord = await options.storage.extensionLinkRequests.findByRequestId(input.requestId);
+    if (!requestRecord) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (
+      requestRecord.serverOrigin !== configuredServerOrigin ||
+      requestRecord.deploymentFingerprint !== options.deploymentFingerprint
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    if (requestRecord.expiresAt <= context.nowIso) {
+      return jsonResponse(
+        200,
+        ExtensionLinkActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'request_expired',
+        }),
+      );
+    }
+    const rejected = await options.storage.extensionLinkRequests.reject({
+      requestId: requestRecord.requestId,
+      expectedStatus: 'pending',
+      rejectedAt: context.nowIso,
+      reasonCode: input.rejectionReasonCode ?? 'rejected_by_user',
+    });
+    if (!rejected) {
+      return jsonResponse(
+        200,
+        ExtensionLinkActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'request_not_pending',
+        }),
+      );
+    }
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_extension_link_reject',
+      actorUserId: context.sessionContext.user.userId,
+      targetType: 'extension_link_request',
+      targetId: requestRecord.requestId,
+      result: 'success_changed',
+      reasonCode: input.rejectionReasonCode ?? 'rejected_by_user',
+    });
+    return jsonResponse(
+      200,
+      ExtensionLinkActionOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+      }),
+    );
+  });
+
+  app.post('/api/auth/extension/link/status', async (c) => {
+    const nowIso = isoNow(options.clock);
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 16 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = ExtensionLinkStatusInputSchema.parse(parsedBody.body);
+    const requestRecord = await options.storage.extensionLinkRequests.findByRequestId(input.requestId);
+    if (!requestRecord) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (
+      requestRecord.serverOrigin !== configuredServerOrigin ||
+      requestRecord.deploymentFingerprint !== options.deploymentFingerprint
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    const proofValid = await verifyExtensionLinkProof({
+      requestPublicKey: requestRecord.requestPublicKey,
+      signature: input.requestProof.signature,
+      action: 'status',
+      requestId: requestRecord.requestId,
+      nonce: input.requestProof.nonce,
+      clientNonce: requestRecord.clientNonce,
+      serverOrigin: requestRecord.serverOrigin,
+      deploymentFingerprint: requestRecord.deploymentFingerprint,
+    });
+    if (!proofValid) {
+      return jsonResponse(
+        200,
+        ExtensionLinkStatusOutputSchema.parse({
+          ok: true,
+          status: 'denied',
+          reasonCode: 'invalid_request_proof',
+        }),
+      );
+    }
+
+    if (requestRecord.expiresAt <= nowIso) {
+      return jsonResponse(
+        200,
+        ExtensionLinkStatusOutputSchema.parse({
+          ok: true,
+          status: 'expired',
+        }),
+      );
+    }
+
+    const statusRate = await options.storage.authRateLimits.increment({
+      key: `extension-link:status:${requestRecord.requestId}`,
+      nowIso,
+      windowSeconds: EXTENSION_LINK_STATUS_WINDOW_SECONDS,
+    });
+    if (statusRate.attemptCount > EXTENSION_LINK_STATUS_ATTEMPT_LIMIT) {
+      const nextInterval = Math.min(
+        EXTENSION_LINK_MAX_INTERVAL_SECONDS,
+        EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS + EXTENSION_LINK_STATUS_SLOWDOWN_SECONDS,
+      );
+      return jsonResponse(429, { ok: false, code: 'slow_down', interval: nextInterval });
+    }
+
+    if (requestRecord.status === 'pending') {
+      return jsonResponse(
+        200,
+        ExtensionLinkStatusOutputSchema.parse({
+          ok: true,
+          status: 'authorization_pending',
+          interval: EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS,
+        }),
+      );
+    }
+    if (requestRecord.status === 'approved') {
+      return jsonResponse(
+        200,
+        ExtensionLinkStatusOutputSchema.parse({
+          ok: true,
+          status: 'approved',
+          interval: EXTENSION_LINK_DEFAULT_INTERVAL_SECONDS,
+        }),
+      );
+    }
+    if (requestRecord.status === 'rejected') {
+      return jsonResponse(
+        200,
+        ExtensionLinkStatusOutputSchema.parse({
+          ok: true,
+          status: 'rejected',
+          reasonCode: requestRecord.rejectionReasonCode ?? undefined,
+        }),
+      );
+    }
+    return jsonResponse(
+      200,
+      ExtensionLinkStatusOutputSchema.parse({
+        ok: true,
+        status: 'consumed',
+      }),
+    );
+  });
+
+  app.post('/api/auth/extension/link/consume', async (c) => {
+    const nowIso = isoNow(options.clock);
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 24 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = ExtensionLinkConsumeInputSchema.parse(parsedBody.body);
+    const requestRecord = await options.storage.extensionLinkRequests.findByRequestId(input.requestId);
+    if (!requestRecord) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (
+      requestRecord.serverOrigin !== configuredServerOrigin ||
+      requestRecord.deploymentFingerprint !== options.deploymentFingerprint
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    if (requestRecord.expiresAt <= nowIso) {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_expired' });
+    }
+    const proofValid = await verifyExtensionLinkProof({
+      requestPublicKey: requestRecord.requestPublicKey,
+      signature: input.requestProof.signature,
+      action: 'consume',
+      requestId: requestRecord.requestId,
+      nonce: input.requestProof.nonce,
+      clientNonce: requestRecord.clientNonce,
+      serverOrigin: requestRecord.serverOrigin,
+      deploymentFingerprint: requestRecord.deploymentFingerprint,
+    });
+    if (!proofValid) {
+      return jsonResponse(403, { ok: false, code: 'forbidden' });
+    }
+    if (requestRecord.status !== 'approved') {
+      if (requestRecord.status === 'consumed') {
+        return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
+      }
+      return jsonResponse(409, { ok: false, code: 'authorization_pending' });
+    }
+    if (
+      !requestRecord.userId ||
+      !requestRecord.authSalt ||
+      !requestRecord.encryptedAccountBundle ||
+      !requestRecord.accountKeyWrapped ||
+      !requestRecord.localUnlockEnvelope
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+
+    const user = await options.storage.users.findByUserId(requestRecord.userId);
+    if (!user || user.lifecycleState !== 'active') {
+      return jsonResponse(403, { ok: false, code: 'forbidden' });
+    }
+    const deviceId = options.idGenerator.nextId('device_ext');
+    const deviceName =
+      requestRecord.deviceNameHint?.trim().length ? requestRecord.deviceNameHint.trim() : 'VaultLite Extension';
+    const device: DeviceRecord = {
+      deviceId,
+      userId: user.userId,
+      deviceName,
+      platform: 'extension',
+      deviceState: 'active',
+      createdAt: nowIso,
+      revokedAt: null,
+    };
+    const consumed = await options.storage.extensionLinkRequests.consume({
+      requestId: requestRecord.requestId,
+      expectedStatus: 'approved',
+      consumedAt: nowIso,
+      consumedByDeviceId: deviceId,
+    });
+    if (!consumed) {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
+    }
+    await options.storage.devices.register(device);
+    const issued = await issueExtensionSession({
       storage: options.storage,
       clock: options.clock,
-      sessionId: cookies.vl_session,
+      idGenerator: options.idGenerator,
+      user,
+      device,
+      rotatedFromSessionId: null,
+    });
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_extension_link_consume',
+      actorUserId: user.userId,
+      targetType: 'device',
+      targetId: device.deviceId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+    if (!consumed.localUnlockEnvelope) {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
+    }
+    const localUnlockEnvelope = JSON.parse(consumed.localUnlockEnvelope) as {
+      version: 'local-unlock.v1';
+      nonce: string;
+      ciphertext: string;
+    };
+    return jsonResponse(
+      200,
+      ExtensionLinkConsumeOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+        extensionSessionToken: issued.token,
+        sessionExpiresAt: issued.session.expiresAt,
+        user: {
+          userId: user.userId,
+          username: user.username,
+          role: user.role,
+          bundleVersion: user.bundleVersion,
+          lifecycleState: user.lifecycleState,
+        },
+        device: {
+          deviceId: device.deviceId,
+          deviceName: device.deviceName,
+          platform: device.platform,
+        },
+        package: {
+          authSalt: consumed.authSalt,
+          encryptedAccountBundle: consumed.encryptedAccountBundle,
+          accountKeyWrapped: consumed.accountKeyWrapped,
+          localUnlockEnvelope,
+        },
+      }),
+    );
+  });
+
+  app.get('/api/auth/session/restore', async (c) => {
+    const deploymentState = await options.storage.deploymentState.get();
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
     });
 
     if (!sessionContext) {
@@ -2240,11 +3067,36 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       );
     }
 
+    let extensionToken: string | undefined;
+    let extensionExpiresAt: string | undefined;
+    if (sessionContext.authMode === 'extension_bearer') {
+      const nowMillis = parseIsoTimestamp(isoNow(options.clock));
+      const expiresAtMillis = parseIsoTimestamp(sessionContext.session.expiresAt);
+      const remainingMillis = expiresAtMillis - nowMillis;
+      if (remainingMillis < EXTENSION_SESSION_ROTATE_THRESHOLD_SECONDS * 1000) {
+        const rotated = await issueExtensionSession({
+          storage: options.storage,
+          clock: options.clock,
+          idGenerator: options.idGenerator,
+          user: sessionContext.user,
+          device: sessionContext.device,
+          rotatedFromSessionId: sessionContext.session.sessionId,
+        });
+        await options.storage.sessions.revoke(sessionContext.session.sessionId, isoNow(options.clock));
+        extensionToken = rotated.token;
+        extensionExpiresAt = rotated.session.expiresAt;
+      } else {
+        extensionExpiresAt = sessionContext.session.expiresAt;
+      }
+    }
+
     return jsonResponse(
       200,
       SessionRestoreResponseSchema.parse({
         ok: true,
         sessionState: 'local_unlock_required',
+        extensionSessionToken: extensionToken,
+        sessionExpiresAt: extensionExpiresAt,
         user: {
           userId: sessionContext.user.userId,
           username: sessionContext.user.username,
@@ -2592,7 +3444,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
   });
 
   app.get('/api/sync/snapshot', async (c) => {
-    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
     if (!sessionContext) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
     }

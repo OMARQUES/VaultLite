@@ -8,7 +8,7 @@ import BootstrapSuccessPage from './pages/BootstrapSuccessPage.vue';
 import HomePage from './pages/HomePage.vue';
 import OnboardingPage from './pages/OnboardingPage.vue';
 import RemoteAuthenticationPage from './pages/RemoteAuthenticationPage.vue';
-import SettingsPage from './pages/SettingsPage.vue';
+import SettingsShellPage from './pages/SettingsShellPage.vue';
 import UnlockPage from './pages/UnlockPage.vue';
 import VaultShellPage from './pages/VaultShellPage.vue';
 
@@ -17,7 +17,7 @@ function isVaultRoute(path: string) {
 }
 
 function isSettingsRoute(path: string) {
-  return path === '/settings';
+  return path === '/settings' || path.startsWith('/settings/');
 }
 
 function isAuthenticatedRoute(path: string) {
@@ -160,7 +160,11 @@ export function createVaultLiteRouter(sessionStore: { state: SessionState }) {
       { path: '/vault/new/secure-note', component: VaultShellPage },
       { path: '/vault/item/:itemId', component: VaultShellPage },
       { path: '/vault/item/:itemId/edit', component: VaultShellPage },
-      { path: '/settings', component: SettingsPage },
+      { path: '/settings', component: SettingsShellPage },
+      {
+        path: '/settings/:section(overview|security|devices|extension|data|advanced)',
+        component: SettingsShellPage,
+      },
       { path: '/admin', component: AdminConsolePage },
       { path: '/admin/overview', component: AdminConsolePage },
       { path: '/admin/invites', component: AdminConsolePage },

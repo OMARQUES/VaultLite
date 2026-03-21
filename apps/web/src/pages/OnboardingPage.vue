@@ -8,6 +8,7 @@ import SecondaryButton from '../components/ui/SecondaryButton.vue';
 import SecretField from '../components/ui/SecretField.vue';
 import TextField from '../components/ui/TextField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
+import { triggerJsonDownload } from '../lib/browser-download';
 import type { TrustedLocalStateRecord } from '../lib/trusted-local-state';
 
 const router = useRouter();
@@ -171,15 +172,10 @@ function downloadAccountKit() {
   downloadHint.value = '';
 
   try {
-    const blob = new Blob([JSON.stringify(accountKit.value, null, 2)], {
-      type: 'application/json',
+    triggerJsonDownload({
+      filename: `${accountKit.value.payload.username}-account-kit.json`,
+      value: accountKit.value,
     });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${accountKit.value.payload.username}-account-kit.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
 
     downloadAttempted.value = true;
     downloadHint.value = 'Download started. Save it outside this browser.';

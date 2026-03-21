@@ -11,6 +11,11 @@ import type {
   CompleteOnboardingAtomicResult,
   DeviceRecord,
   DeviceRepository,
+  ExtensionLinkRequestRecord,
+  ExtensionLinkRequestRepository,
+  ExtensionLinkRequestStatus,
+  ExtensionPairingRecord,
+  ExtensionPairingRepository,
   InviteRecord,
   InviteRepository,
   IdempotencyRecord,
@@ -269,6 +274,65 @@ ALTER TABLE vault_item_tombstones ADD COLUMN updated_at TEXT;`,
     filename: '0008_attachment_filename_attached_at.sql',
     sql: `ALTER TABLE attachment_blobs ADD COLUMN file_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE attachment_blobs ADD COLUMN attached_at TEXT;`,
+  },
+  {
+    id: '0009_extension_pairings',
+    filename: '0009_extension_pairings.sql',
+    sql: `CREATE TABLE IF NOT EXISTS extension_pairings (
+  pairing_id TEXT PRIMARY KEY,
+  code_hash TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL,
+  deployment_fingerprint TEXT NOT NULL,
+  server_origin TEXT NOT NULL,
+  auth_salt TEXT NOT NULL,
+  encrypted_account_bundle TEXT NOT NULL,
+  account_key_wrapped TEXT NOT NULL,
+  local_unlock_envelope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  consumed_by_device_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_pairings_user_created_at
+  ON extension_pairings (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_extension_pairings_expires_at
+  ON extension_pairings (expires_at);`,
+  },
+  {
+    id: '0010_extension_link_requests',
+    filename: '0010_extension_link_requests.sql',
+    sql: `CREATE TABLE IF NOT EXISTS extension_link_requests (
+  request_id TEXT PRIMARY KEY,
+  user_id TEXT NULL,
+  deployment_fingerprint TEXT NOT NULL,
+  server_origin TEXT NOT NULL,
+  request_public_key TEXT NOT NULL,
+  client_nonce TEXT NOT NULL,
+  short_code TEXT NOT NULL,
+  fingerprint_phrase TEXT NOT NULL,
+  device_name_hint TEXT NULL,
+  auth_salt TEXT NULL,
+  encrypted_account_bundle TEXT NULL,
+  account_key_wrapped TEXT NULL,
+  local_unlock_envelope TEXT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  approved_at TEXT NULL,
+  approved_by_user_id TEXT NULL,
+  approved_by_device_id TEXT NULL,
+  rejected_at TEXT NULL,
+  rejection_reason_code TEXT NULL,
+  consumed_at TEXT NULL,
+  consumed_by_device_id TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_link_requests_status_created
+  ON extension_link_requests (status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_extension_link_requests_expires
+  ON extension_link_requests (expires_at);`,
   },
 ];
 
@@ -800,6 +864,348 @@ class CloudflareSessionRepository implements SessionRepository {
       revokedAtIso,
       deviceId,
     ]);
+  }
+}
+
+class CloudflareExtensionPairingRepository implements ExtensionPairingRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: ExtensionPairingRecord): Promise<ExtensionPairingRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO extension_pairings (
+          pairing_id,
+          code_hash,
+          user_id,
+          deployment_fingerprint,
+          server_origin,
+          auth_salt,
+          encrypted_account_bundle,
+          account_key_wrapped,
+          local_unlock_envelope,
+          created_at,
+          expires_at,
+          consumed_at,
+          consumed_by_device_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.pairingId,
+        record.codeHash,
+        record.userId,
+        record.deploymentFingerprint,
+        record.serverOrigin,
+        record.authSalt,
+        record.encryptedAccountBundle,
+        record.accountKeyWrapped,
+        record.localUnlockEnvelope,
+        record.createdAt,
+        record.expiresAt,
+        record.consumedAt,
+        record.consumedByDeviceId,
+      ],
+    );
+    return { ...record };
+  }
+
+  async findByCodeHash(codeHash: string, nowIso: string): Promise<ExtensionPairingRecord | null> {
+    return selectOne<ExtensionPairingRecord>(
+      this.db,
+      `SELECT pairing_id AS pairingId,
+              code_hash AS codeHash,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              auth_salt AS authSalt,
+              encrypted_account_bundle AS encryptedAccountBundle,
+              account_key_wrapped AS accountKeyWrapped,
+              local_unlock_envelope AS localUnlockEnvelope,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM extension_pairings
+       WHERE code_hash = ?
+         AND consumed_at IS NULL
+         AND expires_at > ?`,
+      [codeHash, nowIso],
+    );
+  }
+
+  async findByCodeHashAny(codeHash: string): Promise<ExtensionPairingRecord | null> {
+    return selectOne<ExtensionPairingRecord>(
+      this.db,
+      `SELECT pairing_id AS pairingId,
+              code_hash AS codeHash,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              auth_salt AS authSalt,
+              encrypted_account_bundle AS encryptedAccountBundle,
+              account_key_wrapped AS accountKeyWrapped,
+              local_unlock_envelope AS localUnlockEnvelope,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM extension_pairings
+       WHERE code_hash = ?`,
+      [codeHash],
+    );
+  }
+
+  async consume(input: {
+    pairingId: string;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<ExtensionPairingRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE extension_pairings
+       SET consumed_at = ?, consumed_by_device_id = ?
+       WHERE pairing_id = ?
+         AND consumed_at IS NULL`,
+      [input.consumedAt, input.consumedByDeviceId, input.pairingId],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return selectOne<ExtensionPairingRecord>(
+      this.db,
+      `SELECT pairing_id AS pairingId,
+              code_hash AS codeHash,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              auth_salt AS authSalt,
+              encrypted_account_bundle AS encryptedAccountBundle,
+              account_key_wrapped AS accountKeyWrapped,
+              local_unlock_envelope AS localUnlockEnvelope,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM extension_pairings
+       WHERE pairing_id = ?`,
+      [input.pairingId],
+    );
+  }
+}
+
+class CloudflareExtensionLinkRequestRepository implements ExtensionLinkRequestRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: ExtensionLinkRequestRecord): Promise<ExtensionLinkRequestRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO extension_link_requests (
+          request_id,
+          user_id,
+          deployment_fingerprint,
+          server_origin,
+          request_public_key,
+          client_nonce,
+          short_code,
+          fingerprint_phrase,
+          device_name_hint,
+          auth_salt,
+          encrypted_account_bundle,
+          account_key_wrapped,
+          local_unlock_envelope,
+          status,
+          created_at,
+          expires_at,
+          approved_at,
+          approved_by_user_id,
+          approved_by_device_id,
+          rejected_at,
+          rejection_reason_code,
+          consumed_at,
+          consumed_by_device_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.requestId,
+        record.userId,
+        record.deploymentFingerprint,
+        record.serverOrigin,
+        record.requestPublicKey,
+        record.clientNonce,
+        record.shortCode,
+        record.fingerprintPhrase,
+        record.deviceNameHint,
+        record.authSalt,
+        record.encryptedAccountBundle,
+        record.accountKeyWrapped,
+        record.localUnlockEnvelope,
+        record.status,
+        record.createdAt,
+        record.expiresAt,
+        record.approvedAt,
+        record.approvedByUserId,
+        record.approvedByDeviceId,
+        record.rejectedAt,
+        record.rejectionReasonCode,
+        record.consumedAt,
+        record.consumedByDeviceId,
+      ],
+    );
+    return { ...record };
+  }
+
+  async findByRequestId(requestId: string): Promise<ExtensionLinkRequestRecord | null> {
+    return selectOne<ExtensionLinkRequestRecord>(
+      this.db,
+      `SELECT request_id AS requestId,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              request_public_key AS requestPublicKey,
+              client_nonce AS clientNonce,
+              short_code AS shortCode,
+              fingerprint_phrase AS fingerprintPhrase,
+              device_name_hint AS deviceNameHint,
+              auth_salt AS authSalt,
+              encrypted_account_bundle AS encryptedAccountBundle,
+              account_key_wrapped AS accountKeyWrapped,
+              local_unlock_envelope AS localUnlockEnvelope,
+              status AS status,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              approved_at AS approvedAt,
+              approved_by_user_id AS approvedByUserId,
+              approved_by_device_id AS approvedByDeviceId,
+              rejected_at AS rejectedAt,
+              rejection_reason_code AS rejectionReasonCode,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM extension_link_requests
+       WHERE request_id = ?`,
+      [requestId],
+    );
+  }
+
+  async listRecent(nowIso: string, limit: number): Promise<ExtensionLinkRequestRecord[]> {
+    return selectMany<ExtensionLinkRequestRecord>(
+      this.db,
+      `SELECT request_id AS requestId,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              request_public_key AS requestPublicKey,
+              client_nonce AS clientNonce,
+              short_code AS shortCode,
+              fingerprint_phrase AS fingerprintPhrase,
+              device_name_hint AS deviceNameHint,
+              auth_salt AS authSalt,
+              encrypted_account_bundle AS encryptedAccountBundle,
+              account_key_wrapped AS accountKeyWrapped,
+              local_unlock_envelope AS localUnlockEnvelope,
+              status AS status,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              approved_at AS approvedAt,
+              approved_by_user_id AS approvedByUserId,
+              approved_by_device_id AS approvedByDeviceId,
+              rejected_at AS rejectedAt,
+              rejection_reason_code AS rejectionReasonCode,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM extension_link_requests
+       WHERE expires_at > ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [nowIso, Math.max(1, limit)],
+    );
+  }
+
+  async approve(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    approvedAt: string;
+    approvedByUserId: string;
+    approvedByDeviceId: string;
+    userId: string;
+    authSalt: string;
+    encryptedAccountBundle: string;
+    accountKeyWrapped: string;
+    localUnlockEnvelope: string;
+  }): Promise<ExtensionLinkRequestRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE extension_link_requests
+       SET status = 'approved',
+           approved_at = ?,
+           approved_by_user_id = ?,
+           approved_by_device_id = ?,
+           user_id = ?,
+           auth_salt = ?,
+           encrypted_account_bundle = ?,
+           account_key_wrapped = ?,
+           local_unlock_envelope = ?,
+           rejected_at = NULL,
+           rejection_reason_code = NULL
+       WHERE request_id = ?
+         AND status = ?`,
+      [
+        input.approvedAt,
+        input.approvedByUserId,
+        input.approvedByDeviceId,
+        input.userId,
+        input.authSalt,
+        input.encryptedAccountBundle,
+        input.accountKeyWrapped,
+        input.localUnlockEnvelope,
+        input.requestId,
+        input.expectedStatus,
+      ],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
+  }
+
+  async reject(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    rejectedAt: string;
+    reasonCode: string | null;
+  }): Promise<ExtensionLinkRequestRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE extension_link_requests
+       SET status = 'rejected',
+           rejected_at = ?,
+           rejection_reason_code = ?
+       WHERE request_id = ?
+         AND status = ?`,
+      [input.rejectedAt, input.reasonCode, input.requestId, input.expectedStatus],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
+  }
+
+  async consume(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<ExtensionLinkRequestRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE extension_link_requests
+       SET status = 'consumed',
+           consumed_at = ?,
+           consumed_by_device_id = ?
+       WHERE request_id = ?
+         AND status = ?`,
+      [input.consumedAt, input.consumedByDeviceId, input.requestId, input.expectedStatus],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
   }
 }
 
@@ -1603,6 +2009,8 @@ export function createCloudflareVaultLiteStorage(input: {
   const users = new CloudflareUserAccountRepository(input.db);
   const devices = new CloudflareDeviceRepository(input.db);
   const sessions = new CloudflareSessionRepository(input.db);
+  const extensionPairings = new CloudflareExtensionPairingRepository(input.db);
+  const extensionLinkRequests = new CloudflareExtensionLinkRequestRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
 
   return {
@@ -1611,6 +2019,8 @@ export function createCloudflareVaultLiteStorage(input: {
     users,
     devices,
     sessions,
+    extensionPairings,
+    extensionLinkRequests,
     authRateLimits: new CloudflareAuthRateLimitRepository(input.db),
     idempotency: new CloudflareIdempotencyRepository(input.db),
     auditEvents: new CloudflareAuditEventRepository(input.db),

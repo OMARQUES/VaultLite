@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import InlineAlert from '../components/ui/InlineAlert.vue';
 import PrimaryButton from '../components/ui/PrimaryButton.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import { createVaultLiteAuthClient } from '../lib/auth-client';
+import { triggerJsonDownload } from '../lib/browser-download';
 import { toHumanErrorMessage } from '../lib/human-error';
 
 const router = useRouter();
@@ -16,27 +17,52 @@ const accountKit = ref<Awaited<ReturnType<typeof sessionStore.reissueAccountKit>
 const acknowledged = ref(false);
 const downloadAttempted = ref(false);
 const busy = ref(false);
+const preparingAccountKit = ref(false);
 const errorMessage = ref<string | null>(null);
 const hint = ref('');
 
-const finishDisabled = computed(() => !acknowledged.value || !downloadAttempted.value || busy.value);
+const finishDisabled = computed(
+  () =>
+    !acknowledged.value ||
+    !downloadAttempted.value ||
+    busy.value ||
+    preparingAccountKit.value ||
+    !accountKit.value,
+);
+
+const downloadLabel = computed(() => {
+  if (preparingAccountKit.value) {
+    return 'Preparing Account Kit...';
+  }
+  if (!accountKit.value) {
+    return 'Prepare Account Kit';
+  }
+  return downloadAttempted.value ? 'Download again' : 'Download signed Account Kit';
+});
 
 async function loadAccountKit() {
-  accountKit.value = await sessionStore.reissueAccountKit();
-}
+  if (preparingAccountKit.value || accountKit.value || sessionStore.state.phase !== 'ready') {
+    return;
+  }
 
-function triggerJsonDownload(payload: object, filename: string) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  errorMessage.value = null;
+  preparingAccountKit.value = true;
+  try {
+    accountKit.value = await sessionStore.reissueAccountKit();
+  } catch (error) {
+    errorMessage.value = toHumanErrorMessage(error);
+  } finally {
+    preparingAccountKit.value = false;
+  }
 }
 
 async function downloadAccountKit() {
   if (!accountKit.value) {
+    await loadAccountKit();
+  }
+
+  if (!accountKit.value) {
+    errorMessage.value = 'Unable to prepare Account Kit for download. Unlock and try again.';
     return;
   }
 
@@ -47,13 +73,13 @@ async function downloadAccountKit() {
       payload: accountKit.value.payload,
       signature: accountKit.value.signature,
     });
-    triggerJsonDownload(
-      {
+    triggerJsonDownload({
+      filename: `${response.accountKit.payload.username}-account-kit.json`,
+      value: {
         payload: response.accountKit.payload,
         signature: response.accountKit.signature,
       },
-      `${response.accountKit.payload.username}-account-kit.json`,
-    );
+    });
     downloadAttempted.value = true;
     hint.value = 'Download started. Save it outside this browser.';
   } catch (error) {
@@ -83,6 +109,15 @@ async function finishInitialization() {
   }
 }
 
+watch(
+  () => sessionStore.state.phase,
+  (phase) => {
+    if (phase === 'ready') {
+      void loadAccountKit();
+    }
+  },
+);
+
 onMounted(async () => {
   if (sessionStore.state.phase === 'local_unlock_required') {
     await router.replace('/unlock?next=/bootstrap/checkpoint');
@@ -94,11 +129,7 @@ onMounted(async () => {
     return;
   }
 
-  try {
-    await loadAccountKit();
-  } catch (error) {
-    errorMessage.value = toHumanErrorMessage(error);
-  }
+  await loadAccountKit();
 });
 </script>
 
@@ -129,8 +160,12 @@ onMounted(async () => {
       </article>
 
       <div class="form-actions onboarding-step__actions onboarding-step__download-action">
-        <PrimaryButton type="button" :disabled="busy || !accountKit" @click="downloadAccountKit">
-          {{ downloadAttempted ? 'Download again' : 'Download signed Account Kit' }}
+        <PrimaryButton
+          type="button"
+          :disabled="busy || preparingAccountKit"
+          @click="downloadAccountKit"
+        >
+          {{ downloadLabel }}
         </PrimaryButton>
       </div>
       <p v-if="hint" class="onboarding-step__hint">{{ hint }}</p>

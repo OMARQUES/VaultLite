@@ -62,6 +62,15 @@ describe('resolveNavigationTarget', () => {
     expect(resolveTarget({ phase: 'ready', targetPath: '/vault/item/item_1' })).toBeUndefined();
 
     expect(resolveTarget({ phase: 'ready', targetPath: '/settings' })).toBeUndefined();
+    expect(resolveTarget({ phase: 'ready', targetPath: '/settings/security' })).toBeUndefined();
+    expect(resolveTarget({ phase: 'ready', targetPath: '/settings/extension' })).toBeUndefined();
+    expect(resolveTarget({ phase: 'ready', targetPath: '/settings/advanced' })).toBeUndefined();
+    expect(resolveTarget({ phase: 'remote_authentication_required', targetPath: '/settings/security' })).toBe(
+      '/auth?next=%2Fsettings%2Fsecurity',
+    );
+    expect(resolveTarget({ phase: 'local_unlock_required', targetPath: '/settings/devices' })).toBe(
+      '/unlock?next=%2Fsettings%2Fdevices',
+    );
   });
 
   test('keeps onboarding export flow pinned to onboarding until finalization', () => {

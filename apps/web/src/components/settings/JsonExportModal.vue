@@ -11,6 +11,7 @@ import {
   loadDecryptedVaultDataset,
   serializeDeterministicJson,
 } from '../../lib/data-portability';
+import { triggerJsonDownload } from '../../lib/browser-download';
 import { toHumanErrorMessage } from '../../lib/human-error';
 import type { SessionStore } from '../../lib/session-store';
 import type { VaultLiteVaultClient } from '../../lib/vault-client';
@@ -52,16 +53,6 @@ function closeModal() {
   emit('close');
 }
 
-function downloadFile(filename: string, content: string) {
-  const blob = new Blob([content], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 async function generateExport() {
   if (!acknowledgedRisk.value) {
     errorMessage.value = 'Acknowledge the plaintext export warning before continuing.';
@@ -95,7 +86,10 @@ async function generateExport() {
     const serialized = serializeDeterministicJson(exportPayload, prettyJson.value);
     const username = props.sessionStore.state.username ?? 'account';
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    downloadFile(`vaultlite-export-${username}-${timestamp}.json`, serialized);
+    triggerJsonDownload({
+      filename: `vaultlite-export-${username}-${timestamp}.json`,
+      value: serialized,
+    });
     emit('exported');
     busy.value = false;
     closeModal();

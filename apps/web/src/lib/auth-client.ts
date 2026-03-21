@@ -19,6 +19,10 @@ import type {
   BootstrapVerifyOutput,
   DeviceListOutput,
   DeviceRevokeOutput,
+  ExtensionLinkActionOutput,
+  ExtensionLinkApproveInput,
+  ExtensionLinkPendingListOutput,
+  ExtensionLinkRejectInput,
   OnboardingAccountKitSignInput,
   PasswordRotationCompleteOutput,
   PasswordRotationInput,
@@ -102,6 +106,9 @@ export interface VaultLiteAuthClient {
   listDevices(): Promise<DeviceListOutput>;
   revokeDevice(deviceId: string): Promise<DeviceRevokeOutput>;
   completePasswordRotation(input: PasswordRotationInput): Promise<PasswordRotationCompleteOutput>;
+  listExtensionLinkPending(): Promise<ExtensionLinkPendingListOutput>;
+  approveExtensionLink(input: ExtensionLinkApproveInput): Promise<ExtensionLinkActionOutput>;
+  rejectExtensionLink(input: ExtensionLinkRejectInput): Promise<ExtensionLinkActionOutput>;
 }
 
 async function requestJson<T>(
@@ -381,6 +388,33 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
     completePasswordRotation(input) {
       return requestJson<PasswordRotationCompleteOutput>(
         `${baseUrl}/api/auth/password-rotation/complete`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listExtensionLinkPending() {
+      return requestJson<ExtensionLinkPendingListOutput>(
+        `${baseUrl}/api/auth/extension/link/pending`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    approveExtensionLink(input) {
+      return requestJson<ExtensionLinkActionOutput>(
+        `${baseUrl}/api/auth/extension/link/approve`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    rejectExtensionLink(input) {
+      return requestJson<ExtensionLinkActionOutput>(
+        `${baseUrl}/api/auth/extension/link/reject`,
         withIdempotencyHeader({
           method: 'POST',
           body: JSON.stringify(input),

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VaultLite Unlock</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #091327;
+        --card: #142340;
+        --card-alt: #1a2d53;
+        --border: #2f4674;
+        --text: #e9f0ff;
+        --muted: #a7badf;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at top, #1f3263, var(--bg) 60%);
+        color: var(--text);
+        font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+      }
+
+      .card {
+        width: min(760px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 22px;
+        display: grid;
+        gap: 14px;
+      }
+
+      h1 {
+        margin: 0;
+      }
+
+      .muted {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .status {
+        border-radius: 10px;
+        border: 1px solid #3d598d;
+        background: rgba(67, 95, 150, 0.2);
+        padding: 10px 12px;
+      }
+
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 13px;
+      }
+
+      input {
+        height: 42px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0f1930;
+        color: var(--text);
+        padding: 0 12px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--card-alt);
+        color: var(--text);
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: linear-gradient(180deg, #458ff3, #2f77dd);
+      }
+
+      .panel {
+        border: 1px solid rgba(120, 146, 196, 0.28);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(8, 14, 26, 0.45);
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <h1>Unlock VaultLite extension</h1>
+        <p class="muted" id="contextLine">Checking extension status…</p>
+
+        <div id="statusBanner" class="status" hidden></div>
+
+        <section id="pairingPanel" class="panel" hidden>
+          <p class="muted" id="pairingDescription">
+            Start a trusted-device request and approve it in web settings.
+          </p>
+          <label>
+            Server URL
+            <input id="serverUrlInput" autocomplete="off" placeholder="http://127.0.0.1:8787" />
+          </label>
+          <label>
+            Device name
+            <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="VaultLite Extension" />
+          </label>
+          <div class="actions">
+            <button id="pairBtn" class="primary" type="button">Connect with trusted device</button>
+            <button id="openSettingsBtn" type="button">Open web settings</button>
+          </div>
+        </section>
+
+        <section id="unlockPanel" class="panel" hidden>
+          <p class="muted">Unlock this trusted device locally.</p>
+          <label>
+            Account password
+            <input id="unlockPasswordInput" type="password" autocomplete="current-password" />
+          </label>
+          <div class="actions">
+            <button id="unlockBtn" class="primary" type="button">Unlock</button>
+          </div>
+        </section>
+
+        <section id="readyPanel" class="panel" hidden>
+          <p class="muted">Extension is ready for manual fill in supported pages.</p>
+          <div class="actions">
+            <button id="openPopupBtn" class="primary" type="button">Open popup</button>
+            <button id="openVaultBtn" type="button">Open vault web app</button>
+            <button id="lockBtn" type="button">Lock extension</button>
+          </div>
+        </section>
+
+      </section>
+    </main>
+
+    <script type="module" src="full-page-auth.js"></script>
+  </body>
+</html>

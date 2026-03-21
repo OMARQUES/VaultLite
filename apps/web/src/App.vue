@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterView, useRoute, useRouter } from 'vue-router';
 
 import AppShell from './components/layout/AppShell.vue';
 import PublicTopbar from './components/layout/PublicTopbar.vue';
 import SidebarNav from './components/layout/SidebarNav.vue';
-import SettingsPage from './pages/SettingsPage.vue';
 import { useSessionStore } from './composables/useSessionStore';
 import { VAULT_UNAUTHORIZED_EVENT, type VaultUnauthorizedEventDetail } from './lib/http-events';
 import { resolveNavigationTarget } from './router';
@@ -13,11 +12,11 @@ import { resolveNavigationTarget } from './router';
 const sessionStore = useSessionStore();
 const route = useRoute();
 const router = useRouter();
-const settingsModalOpen = ref(false);
 const handlingUnauthorized = ref(false);
 const sessionRestoreResolved = ref(false);
+const phaseRedirectInFlight = ref(false);
 const isAuthenticatedRoute = computed(
-  () => route.path.startsWith('/vault') || route.path === '/settings' || route.path.startsWith('/admin'),
+  () => route.path.startsWith('/vault') || route.path.startsWith('/settings') || route.path.startsWith('/admin'),
 );
 const isAuthenticatedShell = computed(
   () =>
@@ -26,22 +25,37 @@ const isAuthenticatedShell = computed(
     sessionStore.state.phase === 'ready',
 );
 
+async function maybeRedirectForSessionPhase() {
+  if (!sessionRestoreResolved.value || handlingUnauthorized.value || phaseRedirectInFlight.value) {
+    return;
+  }
+
+  const redirect = resolveNavigationTarget({
+    phase: sessionStore.state.phase,
+    bootstrapState: sessionStore.state.bootstrapState,
+    role: sessionStore.state.role,
+    targetPath: route.fullPath,
+  });
+
+  if (!redirect || redirect === route.fullPath || redirect === route.path) {
+    return;
+  }
+
+  phaseRedirectInFlight.value = true;
+  try {
+    await router.replace(redirect);
+  } finally {
+    phaseRedirectInFlight.value = false;
+  }
+}
+
 function handleActivity() {
   sessionStore.markActivity();
 }
 
 async function lockSession() {
   sessionStore.lock();
-  settingsModalOpen.value = false;
   await router.push(sessionStore.state.username ? '/unlock' : '/auth');
-}
-
-function openSettingsModal() {
-  settingsModalOpen.value = true;
-}
-
-function closeSettingsModal() {
-  settingsModalOpen.value = false;
 }
 
 function currentRouteAllowsUnauthorizedRedirect(path: string): boolean {
@@ -70,7 +84,6 @@ async function handleUnauthorizedEvent(event: Event) {
     reasonCode: detail.code,
     message,
   });
-  settingsModalOpen.value = false;
 
   const destination =
     sessionStore.state.phase === 'local_unlock_required' && sessionStore.state.username
@@ -91,17 +104,9 @@ onMounted(() => {
     try {
       await router.isReady();
       await sessionStore.restoreSession();
-      const redirect = resolveNavigationTarget({
-        phase: sessionStore.state.phase,
-        bootstrapState: sessionStore.state.bootstrapState,
-        role: sessionStore.state.role,
-        targetPath: route.path,
-      });
-      if (redirect && redirect !== route.path) {
-        await router.replace(redirect);
-      }
     } finally {
       sessionRestoreResolved.value = true;
+      await maybeRedirectForSessionPhase();
     }
   })();
   window.addEventListener('pointerdown', handleActivity);
@@ -111,6 +116,20 @@ onMounted(() => {
     sessionStore.enforceAutoLock();
   }, 15000);
 });
+
+watch(
+  () => [
+    sessionRestoreResolved.value,
+    sessionStore.state.phase,
+    sessionStore.state.bootstrapState,
+    sessionStore.state.role,
+    route.fullPath,
+  ],
+  () => {
+    void maybeRedirectForSessionPhase();
+  },
+  { flush: 'post' },
+);
 
 onUnmounted(() => {
   if (autoLockInterval !== undefined) {
@@ -150,24 +169,9 @@ onUnmounted(() => {
           :role="sessionStore.state.role"
           :device-name="sessionStore.state.deviceName"
           :on-lock="lockSession"
-          :on-open-settings="openSettingsModal"
-          :settings-open="settingsModalOpen"
         />
       </template>
       <RouterView />
     </AppShell>
-    <div
-      v-if="settingsModalOpen"
-      class="settings-modal-backdrop"
-      role="presentation"
-      @click.self="closeSettingsModal"
-    >
-      <section class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
-        <button class="settings-modal__close" type="button" aria-label="Close settings" @click="closeSettingsModal">
-          ×
-        </button>
-        <SettingsPage />
-      </section>
-    </div>
   </main>
 </template>

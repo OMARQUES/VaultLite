@@ -56,6 +56,54 @@ export interface SessionRecord {
   rotatedFromSessionId: string | null;
 }
 
+export interface ExtensionPairingRecord {
+  pairingId: string;
+  codeHash: string;
+  userId: string;
+  deploymentFingerprint: string;
+  serverOrigin: string;
+  authSalt: string;
+  encryptedAccountBundle: string;
+  accountKeyWrapped: string;
+  localUnlockEnvelope: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  consumedByDeviceId: string | null;
+}
+
+export type ExtensionLinkRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'consumed';
+
+export interface ExtensionLinkRequestRecord {
+  requestId: string;
+  userId: string | null;
+  deploymentFingerprint: string;
+  serverOrigin: string;
+  requestPublicKey: string;
+  clientNonce: string;
+  shortCode: string;
+  fingerprintPhrase: string;
+  deviceNameHint: string | null;
+  authSalt: string | null;
+  encryptedAccountBundle: string | null;
+  accountKeyWrapped: string | null;
+  localUnlockEnvelope: string | null;
+  status: ExtensionLinkRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+  approvedAt: string | null;
+  approvedByUserId: string | null;
+  approvedByDeviceId: string | null;
+  rejectedAt: string | null;
+  rejectionReasonCode: string | null;
+  consumedAt: string | null;
+  consumedByDeviceId: string | null;
+}
+
 export interface AuthRateLimitRecord {
   key: string;
   attemptCount: number;
@@ -187,6 +235,47 @@ export interface SessionRepository {
   revoke(sessionId: string, revokedAtIso: string): Promise<void>;
   revokeByUserId(userId: string, revokedAtIso: string): Promise<void>;
   revokeByDeviceId(deviceId: string, revokedAtIso: string): Promise<void>;
+}
+
+export interface ExtensionPairingRepository {
+  create(record: ExtensionPairingRecord): Promise<ExtensionPairingRecord>;
+  findByCodeHashAny(codeHash: string): Promise<ExtensionPairingRecord | null>;
+  findByCodeHash(codeHash: string, nowIso: string): Promise<ExtensionPairingRecord | null>;
+  consume(input: {
+    pairingId: string;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<ExtensionPairingRecord | null>;
+}
+
+export interface ExtensionLinkRequestRepository {
+  create(record: ExtensionLinkRequestRecord): Promise<ExtensionLinkRequestRecord>;
+  findByRequestId(requestId: string): Promise<ExtensionLinkRequestRecord | null>;
+  listRecent(nowIso: string, limit: number): Promise<ExtensionLinkRequestRecord[]>;
+  approve(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    approvedAt: string;
+    approvedByUserId: string;
+    approvedByDeviceId: string;
+    userId: string;
+    authSalt: string;
+    encryptedAccountBundle: string;
+    accountKeyWrapped: string;
+    localUnlockEnvelope: string;
+  }): Promise<ExtensionLinkRequestRecord | null>;
+  reject(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    rejectedAt: string;
+    reasonCode: string | null;
+  }): Promise<ExtensionLinkRequestRecord | null>;
+  consume(input: {
+    requestId: string;
+    expectedStatus: ExtensionLinkRequestStatus;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<ExtensionLinkRequestRecord | null>;
 }
 
 export interface AuthRateLimitRepository {
@@ -323,6 +412,8 @@ export interface VaultLiteStorage {
   users: UserAccountRepository;
   devices: DeviceRepository;
   sessions: SessionRepository;
+  extensionPairings: ExtensionPairingRepository;
+  extensionLinkRequests: ExtensionLinkRequestRepository;
   authRateLimits: AuthRateLimitRepository;
   idempotency: IdempotencyRepository;
   auditEvents: AuditEventRepository;
@@ -345,6 +436,8 @@ export function createInMemoryVaultLiteStorage(input: {
   const usersByUsername = new Map<string, UserAccountRecord>();
   const devices = new Map<string, DeviceRecord>();
   const sessions = new Map<string, SessionRecord>();
+  const extensionPairings = new Map<string, ExtensionPairingRecord>();
+  const extensionLinkRequests = new Map<string, ExtensionLinkRequestRecord>();
   const rateLimits = new Map<string, AuthRateLimitRecord>();
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
@@ -620,6 +713,115 @@ export function createInMemoryVaultLiteStorage(input: {
             sessions.set(sessionId, { ...record, revokedAt: revokedAtIso });
           }
         }
+      },
+    },
+    extensionPairings: {
+      async create(record) {
+        extensionPairings.set(record.pairingId, { ...record });
+        return { ...record };
+      },
+      async findByCodeHashAny(codeHash) {
+        for (const record of extensionPairings.values()) {
+          if (record.codeHash === codeHash) {
+            return { ...record };
+          }
+        }
+        return null;
+      },
+      async findByCodeHash(codeHash, nowIso) {
+        for (const record of extensionPairings.values()) {
+          if (record.codeHash !== codeHash) {
+            continue;
+          }
+          if (record.consumedAt !== null) {
+            continue;
+          }
+          if (record.expiresAt <= nowIso) {
+            continue;
+          }
+          return { ...record };
+        }
+        return null;
+      },
+      async consume(inputRecord) {
+        const record = extensionPairings.get(inputRecord.pairingId);
+        if (!record || record.consumedAt !== null) {
+          return null;
+        }
+        const next: ExtensionPairingRecord = {
+          ...record,
+          consumedAt: inputRecord.consumedAt,
+          consumedByDeviceId: inputRecord.consumedByDeviceId,
+        };
+        extensionPairings.set(next.pairingId, next);
+        return { ...next };
+      },
+    },
+    extensionLinkRequests: {
+      async create(record) {
+        extensionLinkRequests.set(record.requestId, { ...record });
+        return { ...record };
+      },
+      async findByRequestId(requestId) {
+        const record = extensionLinkRequests.get(requestId);
+        return record ? { ...record } : null;
+      },
+      async listRecent(nowIso, limit) {
+        return Array.from(extensionLinkRequests.values())
+          .filter((record) => record.expiresAt > nowIso)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+          .slice(0, Math.max(1, limit))
+          .map((record) => ({ ...record }));
+      },
+      async approve(inputRecord) {
+        const record = extensionLinkRequests.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: ExtensionLinkRequestRecord = {
+          ...record,
+          status: 'approved',
+          approvedAt: inputRecord.approvedAt,
+          approvedByUserId: inputRecord.approvedByUserId,
+          approvedByDeviceId: inputRecord.approvedByDeviceId,
+          userId: inputRecord.userId,
+          authSalt: inputRecord.authSalt,
+          encryptedAccountBundle: inputRecord.encryptedAccountBundle,
+          accountKeyWrapped: inputRecord.accountKeyWrapped,
+          localUnlockEnvelope: inputRecord.localUnlockEnvelope,
+          rejectedAt: null,
+          rejectionReasonCode: null,
+        };
+        extensionLinkRequests.set(next.requestId, next);
+        return { ...next };
+      },
+      async reject(inputRecord) {
+        const record = extensionLinkRequests.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: ExtensionLinkRequestRecord = {
+          ...record,
+          status: 'rejected',
+          rejectedAt: inputRecord.rejectedAt,
+          rejectionReasonCode: inputRecord.reasonCode,
+        };
+        extensionLinkRequests.set(next.requestId, next);
+        return { ...next };
+      },
+      async consume(inputRecord) {
+        const record = extensionLinkRequests.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: ExtensionLinkRequestRecord = {
+          ...record,
+          status: 'consumed',
+          consumedAt: inputRecord.consumedAt,
+          consumedByDeviceId: inputRecord.consumedByDeviceId,
+        };
+        extensionLinkRequests.set(next.requestId, next);
+        return { ...next };
       },
     },
     authRateLimits: {

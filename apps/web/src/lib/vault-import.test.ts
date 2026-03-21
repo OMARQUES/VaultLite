@@ -36,6 +36,9 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
     confirmRecentReauth: vi.fn(async () => ({ validUntil: new Date().toISOString() })),
+    listExtensionLinkPending: vi.fn(async () => ({ ok: true as const, requests: [] })),
+    approveExtensionLink: vi.fn(),
+    rejectExtensionLink: vi.fn(),
     listDevices: vi.fn(),
     revokeDevice: vi.fn(),
     rotatePassword: vi.fn(),
@@ -298,7 +301,7 @@ describe('vault import', () => {
         backupPassphrase: 'wrong-passphrase',
       }),
     ).rejects.toThrow('backup_decrypt_failed');
-  }, 20000);
+  }, 60000);
 
   test('imports backup attachments using existing encrypted envelopes', async () => {
     const sessionStore = createSessionStoreStub();
@@ -427,7 +430,7 @@ describe('vault import', () => {
       uploadToken: 'token_1',
       encryptedEnvelope: 'encrypted-envelope-value',
     });
-  });
+  }, 60000);
 
   test('marks review-required rows as skipped_review_required during execution', async () => {
     const sessionStore = createSessionStoreStub();

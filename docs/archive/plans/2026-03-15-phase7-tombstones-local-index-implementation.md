@@ -1,4 +1,4 @@
-# Phase 7 Tombstones and Local Index Implementation Plan
+clecle# Phase 7 Tombstones and Local Index Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 

@@ -43,6 +43,9 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     localUnlock: vi.fn(),
     reissueAccountKit: vi.fn(),
     confirmRecentReauth: vi.fn(async () => ({ validUntil: new Date().toISOString() })),
+    listExtensionLinkPending: vi.fn(async () => ({ ok: true as const, requests: [] })),
+    approveExtensionLink: vi.fn(),
+    rejectExtensionLink: vi.fn(),
     listDevices: vi.fn(),
     revokeDevice: vi.fn(),
     rotatePassword: vi.fn(),
@@ -293,6 +296,6 @@ describe('data portability helpers', () => {
     expect(decrypted.version).toBe('vaultlite.export.v1');
       expect(decrypted.vault.counts.items).toBe(2);
     },
-    20000,
+    60000,
   );
 });

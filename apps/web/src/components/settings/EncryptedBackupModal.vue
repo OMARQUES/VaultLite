@@ -13,6 +13,7 @@ import {
   loadDecryptedVaultDataset,
   serializeDeterministicJson,
 } from '../../lib/data-portability';
+import { triggerJsonDownload } from '../../lib/browser-download';
 import { toHumanErrorMessage } from '../../lib/human-error';
 import type { SessionStore } from '../../lib/session-store';
 import type { VaultLiteVaultClient } from '../../lib/vault-client';
@@ -84,15 +85,12 @@ function downloadBackup() {
   if (!backupJson.value) {
     return;
   }
-  const blob = new Blob([backupJson.value], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
   const username = props.sessionStore.state.username ?? 'account';
   const timestamp = (createdAt.value ?? new Date().toISOString()).replace(/[:.]/g, '-');
-  anchor.download = `vaultlite-backup-${username}-${timestamp}.vlbk.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  triggerJsonDownload({
+    filename: `vaultlite-backup-${username}-${timestamp}.vlbk.json`,
+    value: backupJson.value,
+  });
 }
 
 async function createBackup() {

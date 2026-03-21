@@ -30,6 +30,7 @@ import {
   saveVaultUiState,
   type VaultUiState,
 } from '../lib/vault-ui-state';
+import { listManualSiteIcons, type ManualSiteIconMap } from '../lib/manual-site-icons';
 import { encryptAttachmentBlobPayload } from '../lib/browser-crypto';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
 import {
@@ -111,6 +112,7 @@ const localAttachmentAssetsByUploadId = ref<Record<string, LocalAttachmentAsset>
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const faviconSourceIndexByItemAndHost = ref<Record<string, number>>({});
+const manualSiteIconsByHost = ref<ManualSiteIconMap>({});
 const attachmentObjectUrls = new Set<string>();
 
 const loginDraft = reactive<LoginVaultItemPayload>({
@@ -230,6 +232,10 @@ function cloneUiState(state: VaultUiState): VaultUiState {
 
 function refreshUiState() {
   uiState.value = loadVaultUiState(sessionStore.state.username);
+}
+
+function refreshManualSiteIcons() {
+  manualSiteIconsByHost.value = listManualSiteIcons(sessionStore.state.username);
 }
 
 function commitUiState(updater: (draft: VaultUiState) => void) {
@@ -1091,6 +1097,7 @@ watch(
   () => sessionStore.state.username,
   () => {
     refreshUiState();
+    refreshManualSiteIcons();
   },
   { immediate: true },
 );
@@ -1433,10 +1440,11 @@ function loginFaviconCandidates(url: string | undefined): string[] {
   if (!hostname) {
     return [];
   }
+  const manualIcon = manualSiteIconsByHost.value[hostname]?.dataUrl ?? null;
   return [
+    ...(manualIcon ? [manualIcon] : []),
     `https://${hostname}/favicon.ico`,
-    `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`,
-    `https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`,
+    `https://${hostname}/apple-touch-icon.png`,
   ];
 }
 
@@ -1899,6 +1907,7 @@ onMounted(async () => {
   }
 
   window.addEventListener('keydown', handleGlobalKeydown);
+  refreshManualSiteIcons();
   await loadVault();
   workspace.startSync();
 });

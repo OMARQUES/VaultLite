@@ -2,8 +2,27 @@
   "manifest_version": 3,
   "name": "VaultLite",
   "version": "0.1.0",
-  "description": "VaultLite extension scaffold",
+  "description": "VaultLite extension",
   "action": {
-    "default_title": "VaultLite"
+    "default_title": "VaultLite",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "incognito": "spanning",
+  "options_page": "options.html",
+  "permissions": ["storage", "scripting", "activeTab", "permissions"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://[::1]/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
   }
 }

@@ -21,3 +21,11 @@ The project repeatedly risked mixing trusted-device unlock, remote auth, and boo
 - The codebase must not use ambiguous labels such as generic `login` when the exact auth state matters.
 - API and web contracts must encode the different state transitions explicitly.
 - Session middleware is a design prerequisite, not final hardening.
+
+## 2026-03-19 Addendum: Multi-client Session Model
+- The web app remains cookie + CSRF (`SameSite=Strict`) for browser-authenticated flows.
+- Browser extension uses opaque bearer sessions scoped to `extension` with audience `vaultlite-extension`.
+- Extension bearer allowlist is explicit for Phase 11: `GET /api/auth/session/restore` and `GET /api/sync/snapshot`.
+- Bearer outside allowlist is rejected by default.
+- Extension pairing is website-assisted and one-time (`10 min` TTL, single-use, hashed challenge, rate-limited).
+- Extension restore may rotate token when remaining TTL is below threshold; rotation revokes prior token (`fail-closed`).

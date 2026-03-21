@@ -584,6 +584,8 @@ export const SessionRestoreResponseSchema = z
   .object({
     ok: z.literal(true),
     sessionState: SessionStateSchema,
+    extensionSessionToken: z.string().min(1).optional(),
+    sessionExpiresAt: isoDatetimeSchema.optional(),
     user: z
       .object({
         userId: z.string().min(1),
@@ -604,6 +606,156 @@ export const SessionRestoreResponseSchema = z
       .optional(),
   })
   .strict();
+
+export const LocalUnlockEnvelopeSchema = z
+  .object({
+    version: z.literal('local-unlock.v1'),
+    nonce: base64UrlSchema,
+    ciphertext: base64UrlSchema,
+  })
+  .strict();
+
+export const ExtensionTrustedPackageSchema = z
+  .object({
+    authSalt: base64UrlSchema,
+    encryptedAccountBundle: encryptedPayloadSchema,
+    accountKeyWrapped: encryptedPayloadSchema,
+    localUnlockEnvelope: LocalUnlockEnvelopeSchema,
+  })
+  .strict();
+
+export const ExtensionTrustedSessionOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    extensionSessionToken: z.string().min(1),
+    sessionExpiresAt: isoDatetimeSchema,
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
+    package: ExtensionTrustedPackageSchema,
+  })
+  .strict();
+
+export const ExtensionLinkRequestPublicKeySchema = base64UrlSchema.min(40);
+
+export const ExtensionLinkRequestInputSchema = z
+  .object({
+    deploymentFingerprint: z.string().min(1),
+    requestPublicKey: ExtensionLinkRequestPublicKeySchema,
+    clientNonce: base64UrlSchema.min(16),
+    deviceNameHint: z.string().min(1).max(80).optional(),
+  })
+  .strict();
+
+export const ExtensionLinkRequestOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    requestId: z.string().min(16),
+    shortCode: z.string().regex(/^[A-Z2-7]{8}$/),
+    fingerprintPhrase: z.string().min(4).max(64),
+    expiresAt: isoDatetimeSchema,
+    interval: z.number().int().positive(),
+    serverOrigin: z.string().url(),
+  })
+  .strict();
+
+export const ExtensionLinkApproveInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    approvalNonce: base64UrlSchema.min(16),
+    package: ExtensionTrustedPackageSchema,
+  })
+  .strict();
+
+export const ExtensionLinkRejectInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    rejectionReasonCode: z.string().min(1).max(64).optional(),
+  })
+  .strict();
+
+export const ExtensionLinkPendingRecordSchema = z
+  .object({
+    requestId: z.string().min(16),
+    status: z.enum(['pending', 'approved', 'rejected', 'consumed', 'expired']),
+    shortCode: z.string().regex(/^[A-Z2-7]{8}$/),
+    fingerprintPhrase: z.string().min(4).max(64),
+    deviceNameHint: z.string().min(1).max(80).nullable(),
+    createdAt: isoDatetimeSchema,
+    expiresAt: isoDatetimeSchema,
+    approvedAt: isoDatetimeSchema.nullable(),
+  })
+  .strict();
+
+export const ExtensionLinkPendingListOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    requests: z.array(ExtensionLinkPendingRecordSchema),
+  })
+  .strict();
+
+export const ExtensionLinkActionOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const ExtensionLinkProofSchema = z
+  .object({
+    nonce: base64UrlSchema.min(16),
+    signature: base64UrlSchema.min(40),
+  })
+  .strict();
+
+export const ExtensionLinkStatusInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    requestProof: ExtensionLinkProofSchema,
+  })
+  .strict();
+
+export const ExtensionLinkStatusOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    status: z.enum([
+      'authorization_pending',
+      'slow_down',
+      'approved',
+      'rejected',
+      'consumed',
+      'expired',
+      'denied',
+    ]),
+    interval: z.number().int().positive().optional(),
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const ExtensionLinkConsumeInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    requestProof: ExtensionLinkProofSchema,
+    consumeNonce: base64UrlSchema.min(16),
+  })
+  .strict();
+
+export const ExtensionLinkConsumeOutputSchema = ExtensionTrustedSessionOutputSchema;
 
 export const AccountKitSignatureInputSchema = z
   .object({
@@ -709,6 +861,21 @@ export type AttachmentUploadFinalizeOutput = z.infer<typeof AttachmentUploadFina
 export type AttachmentUploadEnvelopeOutput = z.infer<typeof AttachmentUploadEnvelopeOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
+export type LocalUnlockEnvelope = z.infer<typeof LocalUnlockEnvelopeSchema>;
+export type ExtensionTrustedPackage = z.infer<typeof ExtensionTrustedPackageSchema>;
+export type ExtensionTrustedSessionOutput = z.infer<typeof ExtensionTrustedSessionOutputSchema>;
+export type ExtensionLinkRequestInput = z.infer<typeof ExtensionLinkRequestInputSchema>;
+export type ExtensionLinkRequestOutput = z.infer<typeof ExtensionLinkRequestOutputSchema>;
+export type ExtensionLinkApproveInput = z.infer<typeof ExtensionLinkApproveInputSchema>;
+export type ExtensionLinkRejectInput = z.infer<typeof ExtensionLinkRejectInputSchema>;
+export type ExtensionLinkPendingRecord = z.infer<typeof ExtensionLinkPendingRecordSchema>;
+export type ExtensionLinkPendingListOutput = z.infer<typeof ExtensionLinkPendingListOutputSchema>;
+export type ExtensionLinkActionOutput = z.infer<typeof ExtensionLinkActionOutputSchema>;
+export type ExtensionLinkProof = z.infer<typeof ExtensionLinkProofSchema>;
+export type ExtensionLinkStatusInput = z.infer<typeof ExtensionLinkStatusInputSchema>;
+export type ExtensionLinkStatusOutput = z.infer<typeof ExtensionLinkStatusOutputSchema>;
+export type ExtensionLinkConsumeInput = z.infer<typeof ExtensionLinkConsumeInputSchema>;
+export type ExtensionLinkConsumeOutput = z.infer<typeof ExtensionLinkConsumeOutputSchema>;
 export type GenericAuthFailure = z.infer<typeof GenericAuthFailureSchema>;
 export type AccountKitSignatureInput = z.infer<typeof AccountKitSignatureInputSchema>;
 export type AccountKitSignatureOutput = z.infer<typeof AccountKitSignatureOutputSchema>;

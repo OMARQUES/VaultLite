@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VaultLite</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #151a23;
+        --panel: #1b212c;
+        --panel-2: #202734;
+        --panel-3: #252d3a;
+        --border: #2f3849;
+        --border-strong: #3c4960;
+        --text: #eff3fb;
+        --muted: #9aa6bc;
+        --accent: #3c7bff;
+        --accent-2: #2f68db;
+        --danger: #ff7c7c;
+        --warning: #ffca7a;
+        --success: #66d7a0;
+      }
+
+      html {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      body {
+        margin: 0;
+        width: 430px;
+        height: 600px;
+        background: radial-gradient(circle at top, #1f2b49, var(--bg) 58%);
+        color: var(--text);
+        font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+        transition: width 150ms ease;
+        overflow: hidden;
+      }
+
+      body.popup-expanded {
+        width: 760px;
+      }
+
+      .popup-shell {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        padding: 14px;
+        gap: 12px;
+        box-sizing: border-box;
+        overflow-y: auto;
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      .popup-shell::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+
+      .popup-header {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      body.ready-mode .popup-header {
+        display: none;
+      }
+
+      .popup-title {
+        margin: 0;
+        font-size: 30px;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+        line-height: 0.92;
+      }
+
+      .popup-subtitle {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .alert {
+        border: 1px solid transparent;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 14px;
+      }
+
+      .alert--danger {
+        border-color: #6d2f3a;
+        background: rgba(109, 40, 51, 0.28);
+        color: #ffd6de;
+      }
+
+      .alert--warning {
+        border-color: #725126;
+        background: rgba(118, 78, 24, 0.25);
+        color: #ffe5bc;
+      }
+
+      .alert--success {
+        border-color: #29614b;
+        background: rgba(41, 97, 75, 0.27);
+        color: #c8fae3;
+      }
+
+      .panel {
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent), var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 12px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+
+      .field span {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .field input {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #0e1523;
+        color: var(--text);
+        height: 38px;
+        padding: 0 10px;
+        outline: none;
+      }
+
+      .field input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(69, 126, 255, 0.3);
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .lts-panel {
+        border: 1px solid rgba(112, 133, 176, 0.28);
+        border-radius: 12px;
+        background: rgba(14, 21, 35, 0.5);
+        padding: 10px;
+        margin-top: 8px;
+      }
+
+      .lts-code {
+        margin: 0 0 6px;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        line-height: 1.1;
+        overflow-wrap: anywhere;
+      }
+
+      .lts-meta {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+
+      .lts-status {
+        margin-top: 8px;
+      }
+
+      button {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel-2);
+        color: var(--text);
+        padding: 8px 12px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: var(--border-strong);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: linear-gradient(180deg, var(--accent), var(--accent-2));
+        border-color: #2f64ce;
+        font-weight: 600;
+      }
+
+      .ready-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .search-shell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-3);
+        padding: 0 10px;
+        min-height: 42px;
+      }
+
+      .search-shell::before {
+        content: '⌕';
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1;
+      }
+
+      .filter-chips {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .chip {
+        min-height: 28px;
+        padding: 4px 9px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .chip.is-active {
+        border-color: #2f64ce;
+        background: rgba(60, 123, 255, 0.23);
+        color: var(--text);
+      }
+
+      #searchInput {
+        flex: 1;
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        height: 38px;
+        outline: none;
+        font-size: 15px;
+      }
+
+      #searchInput::placeholder {
+        color: #909db4;
+      }
+
+      .ready-layout {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        min-height: 0;
+        flex: 1;
+        overflow: hidden;
+      }
+
+      body.popup-expanded .ready-layout {
+        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+      }
+
+      .vault-list-shell {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(14, 21, 35, 0.6);
+        min-height: 0;
+        height: 100%;
+        overflow: auto;
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      .vault-list-shell::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+
+      .vault-row {
+        border-bottom: 1px solid rgba(112, 133, 176, 0.16);
+        padding: 10px;
+        display: block;
+        cursor: pointer;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .vault-row:last-child {
+        border-bottom: none;
+      }
+
+      .vault-row:hover {
+        background: rgba(77, 105, 167, 0.12);
+      }
+
+      .vault-row.is-selected {
+        background: linear-gradient(180deg, rgba(63, 121, 255, 0.24), rgba(63, 121, 255, 0.18));
+      }
+
+      .vault-row-content {
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+      }
+
+      .monogram {
+        width: 44px;
+        height: 44px;
+        border-radius: 11px;
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, #2a3342, #1d2533);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        font-weight: 700;
+        color: #d5dff1;
+      }
+
+      .monogram--with-image {
+        overflow: hidden;
+        padding: 0;
+      }
+
+      .credential-favicon {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .vault-row-main {
+        min-width: 0;
+      }
+
+      .vault-row-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .vault-row-sub {
+        margin: 3px 0 0;
+        font-size: 13px;
+        color: #c8d3ea;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .vault-row-sub-2 {
+        margin: 2px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .badge {
+        border-radius: 999px;
+        border: 1px solid #2f6f4c;
+        color: #bdf6d7;
+        background: rgba(31, 110, 72, 0.24);
+        font-size: 11px;
+        padding: 2px 8px;
+        justify-self: end;
+        align-self: start;
+      }
+
+      .vault-row-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(9, 15, 27, 0.42);
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 120ms ease;
+      }
+
+      .vault-row-actions {
+        display: flex;
+        gap: 10px;
+        transform: translateY(3px);
+        transition: transform 120ms ease;
+      }
+
+      .vault-row:hover .vault-row-overlay,
+      .vault-row:focus-within .vault-row-overlay {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .vault-row:hover .vault-row-actions,
+      .vault-row:focus-within .vault-row-actions {
+        transform: translateY(0);
+      }
+
+      .vault-row-actions button {
+        min-width: 78px;
+        padding: 7px 10px;
+        font-size: 13px;
+      }
+
+      .vault-row:hover .badge,
+      .vault-row:focus-within .badge {
+        display: none;
+      }
+
+      .vault-detail {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(14, 21, 35, 0.62);
+        padding: 12px;
+        display: none;
+        min-height: 0;
+        overflow: auto;
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      .vault-detail::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+
+      body.popup-expanded .vault-detail {
+        display: block;
+      }
+
+      .detail-empty {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .detail-head {
+        display: grid;
+        grid-template-columns: 56px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .detail-icon-shell {
+        width: 44px;
+        height: 44px;
+        border-radius: 11px;
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, #2a3342, #1d2533);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+
+      .detail-icon-shell .monogram.is-hidden {
+        display: none;
+      }
+
+      .detail-favicon {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .detail-title {
+        margin: 0;
+        font-size: 32px;
+        letter-spacing: -0.03em;
+        line-height: 0.95;
+      }
+
+      .detail-type {
+        margin: 0;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+      }
+
+      .detail-section {
+        border-top: 1px solid rgba(112, 133, 176, 0.2);
+        padding-top: 10px;
+        margin-top: 10px;
+      }
+
+      .detail-label {
+        margin: 0 0 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .detail-value {
+        margin: 0;
+        color: var(--text);
+        font-size: 16px;
+        line-height: 1.35;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+
+      .detail-password {
+        border: 1px solid var(--border);
+        background: var(--panel-3);
+        border-radius: 10px;
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        letter-spacing: 0.14em;
+        font-size: 18px;
+      }
+
+      .detail-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+      }
+
+      .icon-button {
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border-radius: 10px;
+        font-size: 24px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .empty-state {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 14px;
+        text-align: center;
+      }
+
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: auto;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="popup-header" id="popupHeader">
+        <h1 class="popup-title">VaultLite</h1>
+        <p class="popup-subtitle" id="siteContext">Checking active site…</p>
+      </header>
+
+      <div id="statusAlert" class="alert alert--warning" hidden></div>
+
+      <section id="pairingSection" class="panel" hidden>
+        <p class="popup-subtitle" id="pairingDescription">
+          Start a trusted-device request and approve it in web settings.
+        </p>
+        <label class="field">
+          <span>Server URL</span>
+          <input id="serverUrlInput" autocomplete="off" placeholder="http://127.0.0.1:8787" />
+        </label>
+        <label class="field">
+          <span>Device name</span>
+          <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="VaultLite Extension" />
+        </label>
+        <div class="actions">
+          <button type="button" id="linkPairBtn" class="btn-primary">Connect with trusted device</button>
+          <button type="button" id="openWebSettingsPairingBtn">Open web settings</button>
+        </div>
+        <section id="linkRequestPanel" class="lts-panel" hidden>
+          <p class="lts-code" id="linkRequestCode">ABCDEFG2</p>
+          <p class="lts-meta">
+            Phrase: <span id="linkRequestPhrase">amber-delta-zenith</span><br />
+            Expires: <span id="linkRequestExpires">—</span>
+          </p>
+          <div id="linkRequestStatus" class="popup-subtitle lts-status">
+            Waiting for approval in trusted surface settings...
+          </div>
+          <div class="actions" style="margin-top: 8px">
+            <button type="button" id="cancelLinkPairBtn">Cancel request</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="unlockSection" class="panel" hidden>
+        <p class="popup-subtitle">Unlock this trusted device locally.</p>
+        <label class="field">
+          <span>Account password</span>
+          <input id="unlockPasswordInput" type="password" autocomplete="current-password" />
+        </label>
+        <div class="actions">
+          <button type="button" id="unlockBtn" class="btn-primary">Unlock</button>
+          <button type="button" id="openFullPageBtn">Open full-page unlock</button>
+        </div>
+      </section>
+
+      <section id="readySection" class="panel ready-panel" hidden>
+        <div class="search-shell">
+          <input id="searchInput" autocomplete="off" placeholder="Search vault" />
+        </div>
+        <div class="filter-chips">
+          <button type="button" class="chip is-active" data-type-filter="all">All</button>
+          <button type="button" class="chip" data-type-filter="login">Logins</button>
+          <button type="button" class="chip" data-type-filter="card">Cards</button>
+          <button type="button" class="chip" data-type-filter="document">Documents</button>
+          <button type="button" class="chip" data-type-filter="secure_note">Notes</button>
+          <button type="button" class="chip" id="suggestedChip">Suggested</button>
+        </div>
+        <div class="ready-layout" id="readyLayout">
+          <aside class="vault-list-shell" id="credentialsList"></aside>
+          <article class="vault-detail" id="credentialDetails">
+            <p id="credentialDetailsEmpty" class="detail-empty">Select an item to view details.</p>
+            <div id="credentialDetailsContent" hidden>
+              <header class="detail-head">
+                <div class="detail-icon-shell">
+                  <div class="monogram" id="detailMonogram">VL</div>
+                  <img id="detailFavicon" class="detail-favicon" alt="" hidden />
+                </div>
+                <div>
+                  <p class="detail-type" id="detailType">Login</p>
+                  <h2 class="detail-title" id="detailTitle">Vault item</h2>
+                </div>
+                <button type="button" id="detailCloseBtn" class="icon-button" title="Close details" aria-label="Close details">×</button>
+              </header>
+
+              <section class="detail-section">
+                <p class="detail-label" id="detailPrimaryLabel">Username</p>
+                <p class="detail-value" id="detailPrimaryValue">—</p>
+              </section>
+
+              <section class="detail-section">
+                <p class="detail-label" id="detailSecondaryLabel">Password</p>
+                <div class="detail-password" id="detailSecondaryValue">••••••••••••</div>
+              </section>
+
+              <section class="detail-section">
+                <p class="detail-label" id="detailTertiaryLabel">URL</p>
+                <p class="detail-value" id="detailTertiaryValue">No URL</p>
+              </section>
+
+              <div class="detail-actions">
+                <button type="button" id="detailActionPrimary" class="btn-primary">Fill</button>
+                <button type="button" id="detailActionSecondary">Copy username</button>
+                <button type="button" id="detailActionTertiary">Copy password</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="actions">
+          <button type="button" id="lockBtn">Lock</button>
+        </div>
+        <div class="actions">
+          <button type="button" id="openWebAppBtn">Open in web app</button>
+        </div>
+      </footer>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

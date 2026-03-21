@@ -15,6 +15,7 @@ async function mountSidebarAt(path: string, role: 'owner' | 'user' = 'user') {
       { path: '/admin/users', component: { template: '<div />' } },
       { path: '/admin/audit', component: { template: '<div />' } },
       { path: '/settings', component: { template: '<div />' } },
+      { path: '/settings/:section', component: { template: '<div />' } },
     ],
   });
 
@@ -56,13 +57,46 @@ describe('SidebarNav', () => {
     expect(wrapper.text()).toContain('Settings');
   });
 
-  test('keeps the app links and session meta visible', async () => {
+  test('shows settings IA blocks in the native sidebar area on settings routes', async () => {
     const { wrapper } = await mountSidebarAt('/settings');
 
+    expect(wrapper.text()).toContain('Settings');
+    expect(wrapper.text()).toContain('Overview');
+    expect(wrapper.text()).toContain('Security');
+    expect(wrapper.text()).toContain('Devices');
+    expect(wrapper.text()).toContain('Browser Extension');
+    expect(wrapper.text()).toContain('Import & Export');
+    expect(wrapper.text()).toContain('Advanced');
     expect(wrapper.text()).toContain('Settings');
     expect(wrapper.text()).toContain('User');
     expect(wrapper.text()).toContain('Device');
     expect(wrapper.text()).toContain('Lock now');
+  });
+
+  test('shows Vault shortcut in System footer while inside settings routes', async () => {
+    const { wrapper } = await mountSidebarAt('/settings', 'owner');
+
+    const footerLinks = wrapper
+      .findAll('a')
+      .filter((node) => (node.attributes('class') ?? '').includes('sidebar-nav__link--footer'));
+
+    expect(footerLinks.length).toBeGreaterThan(0);
+    expect(footerLinks.some((node) => node.text().includes('Vault'))).toBe(true);
+    expect(footerLinks.some((node) => node.text().includes('Settings'))).toBe(false);
+  });
+
+  test('uses route navigation for settings instead of modal callback button', async () => {
+    const { wrapper } = await mountSidebarAt('/vault');
+
+    const settingsLink = wrapper
+      .findAll('a')
+      .find((node) => {
+        const href = node.attributes('href') ?? '';
+        return href.includes('/settings');
+      });
+
+    expect(settingsLink).toBeDefined();
+    expect(settingsLink!.text()).toContain('Settings');
   });
 
   test('shows admin shortcut for owner role in authenticated shell', async () => {
@@ -82,16 +116,17 @@ describe('SidebarNav', () => {
     expect(wrapper.text()).toContain('Audit');
   });
 
-  test('shows Vault shortcut in System footer while inside admin routes', async () => {
+  test('shows Vault and Settings shortcuts in System footer while inside admin routes', async () => {
     const { wrapper } = await mountSidebarAt('/admin/overview', 'owner');
 
-    const footerLink = wrapper
+    const footerLinks = wrapper
       .findAll('a')
-      .find((node) => (node.attributes('class') ?? '').includes('sidebar-nav__link--footer'));
+      .filter((node) => (node.attributes('class') ?? '').includes('sidebar-nav__link--footer'));
 
-    expect(footerLink).toBeDefined();
-    expect(footerLink!.text()).toContain('Vault');
-    expect(footerLink!.attributes('href')).toContain('/vault');
+    expect(footerLinks.length).toBeGreaterThan(0);
+    expect(footerLinks.some((node) => node.text().includes('Vault'))).toBe(true);
+    expect(footerLinks.some((node) => node.text().includes('Settings'))).toBe(true);
+    expect(footerLinks.some((node) => node.text().includes('Admin'))).toBe(false);
   });
 
   test('preserves q search query while changing vault scope links', async () => {

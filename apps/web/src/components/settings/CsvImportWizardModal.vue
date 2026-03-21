@@ -14,6 +14,7 @@ import {
   type VaultImportExecutionResult,
   type VaultImportPreview,
 } from '../../lib/vault-import';
+import { triggerJsonDownload } from '../../lib/browser-download';
 import { toHumanErrorMessage } from '../../lib/human-error';
 import type { SessionStore } from '../../lib/session-store';
 import type { VaultLiteVaultClient } from '../../lib/vault-client';
@@ -193,15 +194,10 @@ function downloadImportReport() {
   if (!importResult.value) {
     return;
   }
-  const blob = new Blob([JSON.stringify(importResult.value.report, null, 2)], {
-    type: 'application/json',
+  triggerJsonDownload({
+    filename: `vaultlite-import-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+    value: importResult.value.report,
   });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `vaultlite-import-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 function closeModal() {
