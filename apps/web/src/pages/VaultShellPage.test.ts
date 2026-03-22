@@ -201,6 +201,11 @@ function createSessionStore(role: 'owner' | 'user' = 'user') {
       serverUrl: 'https://vaultlite.local',
       deploymentFingerprint: 'development_deployment',
     }),
+    resolveSiteIcons: vi.fn().mockResolvedValue({ ok: true, icons: [] }),
+    discoverSiteIcons: vi.fn().mockResolvedValue({ ok: true, icons: [], unresolved: [] }),
+    listManualSiteIcons: vi.fn().mockResolvedValue({ ok: true, icons: [] }),
+    upsertManualSiteIcon: vi.fn(),
+    removeManualSiteIcon: vi.fn(),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
     markActivity: vi.fn(),
@@ -813,7 +818,10 @@ describe('VaultShellPage', () => {
     ]);
 
     expect(wrapper.find('.detail-card__editor-avatar').exists()).toBe(true);
-    expect(wrapper.find('.detail-card__editor-avatar img').exists()).toBe(true);
+    const avatar = wrapper.find('.detail-card__editor-avatar');
+    const hasImage = avatar.find('img').exists();
+    const hasMonogramText = avatar.text().trim().length > 0;
+    expect(hasImage || hasMonogramText).toBe(true);
   });
 
   test('asks for confirmation before discarding dirty edits', async () => {

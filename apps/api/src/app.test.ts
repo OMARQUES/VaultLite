@@ -779,6 +779,150 @@ describe('createVaultLiteApi', () => {
     });
   });
 
+  test('resolves manual site icon overrides with user precedence', async () => {
+    const { app } = await createAppFixture();
+    const { ownerCookies, ownerCsrf } = await initializeDeployment(app);
+    const dataUrl = 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD';
+
+    const upsertResponse = await app.request('/api/icons/manual/upsert', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+        'x-csrf-token': ownerCsrf,
+      },
+      body: JSON.stringify({
+        domain: 'portal.example.com',
+        dataUrl,
+        source: 'url',
+      }),
+    });
+    expect(upsertResponse.status).toBe(200);
+    expect(await upsertResponse.json()).toEqual({
+      ok: true,
+      result: 'success_changed',
+    });
+
+    const resolveResponse = await app.request('/api/icons/resolve', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: ownerCookies,
+      },
+      body: JSON.stringify({
+        domains: ['portal.example.com'],
+      }),
+    });
+    expect(resolveResponse.status).toBe(200);
+    expect(await resolveResponse.json()).toEqual({
+      ok: true,
+      icons: [
+        {
+          domain: 'portal.example.com',
+          dataUrl,
+          source: 'manual',
+          sourceUrl: null,
+          updatedAt: expect.any(String),
+        },
+      ],
+    });
+  });
+
+  test('discovers and caches automatic site icons server-side', async () => {
+    const { app } = await createAppFixture();
+    const { ownerCookies } = await initializeDeployment(app);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const target = String(input);
+      if (target === 'https://portal.example.com/') {
+        const response = new Response('<html><head><link rel="icon" href="/favicon.png"></head></html>', {
+          status: 200,
+          headers: {
+            'content-type': 'text/html',
+          },
+        });
+        Object.defineProperty(response, 'url', {
+          configurable: true,
+          value: target,
+        });
+        return response;
+      }
+      if (target === 'https://portal.example.com/favicon.png') {
+        const response = new Response(
+          new Uint8Array([
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+          ]),
+          {
+          status: 200,
+          headers: {
+            'content-type': 'image/png',
+          },
+          },
+        );
+        Object.defineProperty(response, 'url', {
+          configurable: true,
+          value: target,
+        });
+        return response;
+      }
+      return new Response('not_found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const discoverResponse = await app.request('/api/icons/discover', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: ownerCookies,
+        },
+        body: JSON.stringify({
+          domains: ['portal.example.com'],
+        }),
+      });
+      expect(discoverResponse.status).toBe(200);
+      expect(await discoverResponse.json()).toEqual({
+        ok: true,
+        icons: [
+          {
+            domain: 'portal.example.com',
+            dataUrl: expect.stringContaining('data:image/png;base64,'),
+            source: 'automatic',
+            sourceUrl: 'https://portal.example.com/favicon.png',
+            updatedAt: expect.any(String),
+          },
+        ],
+        unresolved: [],
+      });
+
+      const resolveResponse = await app.request('/api/icons/resolve', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: ownerCookies,
+        },
+        body: JSON.stringify({
+          domains: ['portal.example.com'],
+        }),
+      });
+      expect(resolveResponse.status).toBe(200);
+      expect(await resolveResponse.json()).toEqual({
+        ok: true,
+        icons: [
+          {
+            domain: 'portal.example.com',
+            dataUrl: expect.stringContaining('data:image/png;base64,'),
+            source: 'automatic',
+            sourceUrl: 'https://portal.example.com/favicon.png',
+            updatedAt: expect.any(String),
+          },
+        ],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('applies security header baseline on 2xx/4xx/5xx and only applies HSTS in production over https', async () => {
     const { app, storage, clock } = await createAppFixture();
 

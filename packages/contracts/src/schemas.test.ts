@@ -17,6 +17,12 @@ import {
   PasswordRotationInputSchema,
   RemoteAuthenticationChallengeInputSchema,
   RemoteAuthenticationInputSchema,
+  SiteIconDiscoverBatchInputSchema,
+  SiteIconDiscoverBatchOutputSchema,
+  SiteIconManualListOutputSchema,
+  SiteIconManualUpsertInputSchema,
+  SiteIconResolveBatchInputSchema,
+  SiteIconResolveBatchOutputSchema,
   VaultJsonExportV1Schema,
   VaultItemCreateInputSchema,
   VaultItemRecordSchema,
@@ -306,6 +312,76 @@ describe('contracts schemas', () => {
         deletedAt: '2026-03-15T12:10:00.000Z',
       }).success,
     ).toBe(false);
+  });
+
+  it('validates site icon batch resolve/discover contracts', () => {
+    expect(
+      SiteIconResolveBatchInputSchema.safeParse({
+        domains: ['example.com', 'foo.bar.example.com'],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      SiteIconResolveBatchOutputSchema.safeParse({
+        ok: true,
+        icons: [
+          {
+            domain: 'example.com',
+            dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+            source: 'automatic',
+            sourceUrl: 'https://example.com/favicon.ico',
+            updatedAt: '2026-03-22T12:00:00.000Z',
+          },
+        ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      SiteIconDiscoverBatchInputSchema.safeParse({
+        domains: ['example.com'],
+        forceRefresh: true,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      SiteIconDiscoverBatchOutputSchema.safeParse({
+        ok: true,
+        icons: [
+          {
+            domain: 'example.com',
+            dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+            source: 'automatic',
+            sourceUrl: 'https://example.com/favicon.ico',
+            updatedAt: '2026-03-22T12:00:00.000Z',
+          },
+        ],
+        unresolved: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('validates manual icon override contracts', () => {
+    expect(
+      SiteIconManualUpsertInputSchema.safeParse({
+        domain: 'example.com',
+        dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+        source: 'file',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      SiteIconManualListOutputSchema.safeParse({
+        ok: true,
+        icons: [
+          {
+            domain: 'example.com',
+            dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+            source: 'url',
+            updatedAt: '2026-03-22T12:00:00.000Z',
+          },
+        ],
+      }).success,
+    ).toBe(true);
   });
 
   it('validates versioned JSON export payloads', () => {

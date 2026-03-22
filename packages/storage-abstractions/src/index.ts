@@ -104,6 +104,22 @@ export interface ExtensionLinkRequestRecord {
   consumedByDeviceId: string | null;
 }
 
+export interface SiteIconCacheRecord {
+  domain: string;
+  dataUrl: string;
+  sourceUrl: string | null;
+  updatedAt: string;
+  fetchedAt: string;
+}
+
+export interface ManualSiteIconOverrideRecord {
+  userId: string;
+  domain: string;
+  dataUrl: string;
+  source: 'url' | 'file';
+  updatedAt: string;
+}
+
 export interface AuthRateLimitRecord {
   key: string;
   attemptCount: number;
@@ -288,6 +304,20 @@ export interface AuthRateLimitRepository {
   reset(key: string): Promise<void>;
 }
 
+export interface SiteIconCacheRepository {
+  listByDomains(domains: string[]): Promise<SiteIconCacheRecord[]>;
+  findByDomain(domain: string): Promise<SiteIconCacheRecord | null>;
+  upsert(record: SiteIconCacheRecord): Promise<SiteIconCacheRecord>;
+}
+
+export interface ManualSiteIconOverrideRepository {
+  listByUserId(userId: string): Promise<ManualSiteIconOverrideRecord[]>;
+  listByUserIdAndDomains(userId: string, domains: string[]): Promise<ManualSiteIconOverrideRecord[]>;
+  findByUserIdAndDomain(userId: string, domain: string): Promise<ManualSiteIconOverrideRecord | null>;
+  upsert(record: ManualSiteIconOverrideRecord): Promise<ManualSiteIconOverrideRecord>;
+  remove(userId: string, domain: string): Promise<boolean>;
+}
+
 export interface AttachmentBlobRepository {
   put(record: AttachmentBlobRecord): Promise<AttachmentBlobRecord>;
   get(key: string): Promise<AttachmentBlobRecord | null>;
@@ -414,6 +444,8 @@ export interface VaultLiteStorage {
   sessions: SessionRepository;
   extensionPairings: ExtensionPairingRepository;
   extensionLinkRequests: ExtensionLinkRequestRepository;
+  siteIconCache: SiteIconCacheRepository;
+  manualSiteIconOverrides: ManualSiteIconOverrideRepository;
   authRateLimits: AuthRateLimitRepository;
   idempotency: IdempotencyRepository;
   auditEvents: AuditEventRepository;
@@ -438,6 +470,8 @@ export function createInMemoryVaultLiteStorage(input: {
   const sessions = new Map<string, SessionRecord>();
   const extensionPairings = new Map<string, ExtensionPairingRecord>();
   const extensionLinkRequests = new Map<string, ExtensionLinkRequestRecord>();
+  const siteIconCache = new Map<string, SiteIconCacheRecord>();
+  const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
   const rateLimits = new Map<string, AuthRateLimitRecord>();
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
@@ -822,6 +856,79 @@ export function createInMemoryVaultLiteStorage(input: {
         };
         extensionLinkRequests.set(next.requestId, next);
         return { ...next };
+      },
+    },
+    siteIconCache: {
+      async listByDomains(domains) {
+        const normalized = domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0);
+        if (normalized.length === 0) {
+          return [];
+        }
+        const deduped = Array.from(new Set(normalized));
+        return deduped
+          .map((domain) => siteIconCache.get(domain))
+          .filter((record): record is SiteIconCacheRecord => Boolean(record))
+          .map((record) => ({ ...record }));
+      },
+      async findByDomain(domain) {
+        const normalized = domain.trim().toLowerCase();
+        if (!normalized) {
+          return null;
+        }
+        const record = siteIconCache.get(normalized);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        const normalized: SiteIconCacheRecord = {
+          ...record,
+          domain: record.domain.trim().toLowerCase(),
+        };
+        siteIconCache.set(normalized.domain, normalized);
+        return { ...normalized };
+      },
+    },
+    manualSiteIconOverrides: {
+      async listByUserId(userId) {
+        return Array.from(manualSiteIconOverrides.values())
+          .filter((record) => record.userId === userId)
+          .sort((left, right) => left.domain.localeCompare(right.domain))
+          .map((record) => ({ ...record }));
+      },
+      async listByUserIdAndDomains(userId, domains) {
+        const normalizedDomains = new Set(
+          domains
+            .filter((domain) => typeof domain === 'string')
+            .map((domain) => domain.trim().toLowerCase())
+            .filter((domain) => domain.length > 0),
+        );
+        if (normalizedDomains.size === 0) {
+          return [];
+        }
+        return Array.from(manualSiteIconOverrides.values())
+          .filter((record) => record.userId === userId && normalizedDomains.has(record.domain))
+          .sort((left, right) => left.domain.localeCompare(right.domain))
+          .map((record) => ({ ...record }));
+      },
+      async findByUserIdAndDomain(userId, domain) {
+        const key = `${userId}:${domain.trim().toLowerCase()}`;
+        const record = manualSiteIconOverrides.get(key);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        const normalized: ManualSiteIconOverrideRecord = {
+          ...record,
+          domain: record.domain.trim().toLowerCase(),
+        };
+        const key = `${normalized.userId}:${normalized.domain}`;
+        manualSiteIconOverrides.set(key, normalized);
+        return { ...normalized };
+      },
+      async remove(userId, domain) {
+        const key = `${userId}:${domain.trim().toLowerCase()}`;
+        return manualSiteIconOverrides.delete(key);
       },
     },
     authRateLimits: {

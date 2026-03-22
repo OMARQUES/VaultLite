@@ -38,6 +38,9 @@ const EXTENSION_LINK_FALLBACK_INTERVAL_SECONDS = 5;
 const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
 const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
 const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
+const ICON_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
+const ICON_RESOLVE_WAIT_BUDGET_MS = 900;
 
 const state = {
   phase: 'anonymous',
@@ -59,6 +62,9 @@ let credentialsCache = {
   loadedAt: 0,
   credentials: [],
 };
+const canonicalIconCacheByDomain = new Map();
+const iconDiscoverLastAttemptByDomain = new Map();
+let iconHydrationInFlight = null;
 let lastRestoreAttemptAt = 0;
 let idleLockTimer = null;
 let restoreInFlightPromise = null;
@@ -858,6 +864,7 @@ async function restoreSessionInternal(force = false) {
       }
 
       withSessionIdentity(restoreOutput);
+      await hydrateManualIconsFromServerBestEffort();
 
       if (
         restoreOutput.sessionState !== 'local_unlock_required' ||
@@ -1130,6 +1137,184 @@ function truncateText(value, maxLength) {
   return `${value.slice(0, Math.max(1, maxLength - 1))}…`;
 }
 
+function normalizeIconDomainFromUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
+    return null;
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    return sanitizeIconHost(parsed.hostname);
+  } catch {
+    return null;
+  }
+}
+
+function iconCacheEntryForDomain(domain) {
+  const entry = canonicalIconCacheByDomain.get(domain);
+  if (!entry) {
+    return null;
+  }
+  if (Date.now() - entry.cachedAt > ICON_CACHE_TTL_MS) {
+    canonicalIconCacheByDomain.delete(domain);
+    return null;
+  }
+  return entry;
+}
+
+function cacheResolvedIcons(icons) {
+  if (!Array.isArray(icons)) {
+    return;
+  }
+  const now = Date.now();
+  for (const icon of icons) {
+    if (!icon || typeof icon !== 'object') {
+      continue;
+    }
+    const safeDomain = sanitizeIconHost(String(icon.domain ?? ''));
+    if (!safeDomain || !validateManualIconDataUrl(String(icon.dataUrl ?? ''))) {
+      continue;
+    }
+    canonicalIconCacheByDomain.set(safeDomain, {
+      domain: safeDomain,
+      dataUrl: icon.dataUrl,
+      sourceUrl: typeof icon.sourceUrl === 'string' ? icon.sourceUrl : null,
+      updatedAt: typeof icon.updatedAt === 'string' ? icon.updatedAt : nowIso(),
+      cachedAt: now,
+    });
+  }
+}
+
+function collectProjectedDomains(items) {
+  const domains = new Set();
+  for (const item of items) {
+    if (!item || item.itemType !== 'login') {
+      continue;
+    }
+    const safeDomain = normalizeIconDomainFromUrl(item.firstUrl);
+    if (safeDomain) {
+      domains.add(safeDomain);
+    }
+  }
+  return Array.from(domains);
+}
+
+function mergeUniqueIconCandidates(candidates) {
+  const unique = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || candidate.length === 0) {
+      continue;
+    }
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    unique.push(candidate);
+  }
+  return unique;
+}
+
+function applyCachedIconsToProjection(items) {
+  return items.map((item) => {
+    if (!item || item.itemType !== 'login') {
+      return item;
+    }
+    const safeDomain = normalizeIconDomainFromUrl(item.firstUrl);
+    if (!safeDomain) {
+      return item;
+    }
+    const cached = iconCacheEntryForDomain(safeDomain);
+    if (!cached) {
+      return item;
+    }
+    return {
+      ...item,
+      faviconCandidates: mergeUniqueIconCandidates([cached.dataUrl, ...(item.faviconCandidates ?? [])]),
+    };
+  });
+}
+
+async function hydrateCanonicalIconsForDomains(domains) {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !Array.isArray(domains) || domains.length === 0) {
+    return;
+  }
+
+  const uniqueDomains = Array.from(
+    new Set(
+      domains
+        .map((domain) => sanitizeIconHost(String(domain ?? '')))
+        .filter((domain) => Boolean(domain)),
+    ),
+  );
+  if (uniqueDomains.length === 0) {
+    return;
+  }
+
+  let resolvedIcons = [];
+  try {
+    const resolved = await apiClient.resolveSiteIcons({
+      bearerToken: sessionToken,
+      domains: uniqueDomains,
+    });
+    resolvedIcons = Array.isArray(resolved?.icons) ? resolved.icons : [];
+    cacheResolvedIcons(resolvedIcons);
+  } catch {
+    return;
+  }
+
+  const resolvedDomains = new Set(
+    resolvedIcons
+      .map((entry) => sanitizeIconHost(String(entry?.domain ?? '')))
+      .filter((entry) => Boolean(entry)),
+  );
+  const now = Date.now();
+  const discoverableDomains = uniqueDomains.filter((domain) => {
+    if (resolvedDomains.has(domain)) {
+      return false;
+    }
+    const lastAttemptAt = iconDiscoverLastAttemptByDomain.get(domain) ?? 0;
+    if (now - lastAttemptAt < ICON_DISCOVERY_RETRY_MS) {
+      return false;
+    }
+    return true;
+  });
+
+  if (discoverableDomains.length === 0) {
+    return;
+  }
+
+  for (const domain of discoverableDomains) {
+    iconDiscoverLastAttemptByDomain.set(domain, now);
+  }
+  try {
+    const discovered = await apiClient.discoverSiteIcons({
+      bearerToken: sessionToken,
+      domains: discoverableDomains,
+      forceRefresh: false,
+    });
+    cacheResolvedIcons(Array.isArray(discovered?.icons) ? discovered.icons : []);
+  } catch {
+    // Best-effort discovery.
+  }
+}
+
+async function ensureProjectedIconsHydrated(items) {
+  const domains = collectProjectedDomains(items);
+  if (domains.length === 0) {
+    return;
+  }
+  if (!iconHydrationInFlight) {
+    iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains).finally(() => {
+      iconHydrationInFlight = null;
+    });
+  }
+  await Promise.race([
+    iconHydrationInFlight,
+    new Promise((resolve) => setTimeout(resolve, ICON_RESOLVE_WAIT_BUDGET_MS)),
+  ]);
+}
+
 function listManualIconsView() {
   return Object.entries(manualIconMap)
     .map(([host, dataUrl]) => ({
@@ -1137,6 +1322,65 @@ function listManualIconsView() {
       dataUrl,
     }))
     .sort((left, right) => left.host.localeCompare(right.host));
+}
+
+async function syncManualIconUpsertToServerBestEffort(input) {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return;
+  }
+  try {
+    await apiClient.upsertManualSiteIcon({
+      bearerToken: sessionToken,
+      domain: input.host,
+      dataUrl: input.dataUrl,
+      source: input.source === 'url' ? 'url' : 'file',
+    });
+  } catch {
+    // Best-effort sync.
+  }
+}
+
+async function syncManualIconRemoveToServerBestEffort(host) {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return;
+  }
+  try {
+    await apiClient.removeManualSiteIcon({
+      bearerToken: sessionToken,
+      domain: host,
+    });
+  } catch {
+    // Best-effort sync.
+  }
+}
+
+async function hydrateManualIconsFromServerBestEffort() {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return;
+  }
+  try {
+    const response = await apiClient.listManualSiteIcons({
+      bearerToken: sessionToken,
+    });
+    if (!response || !Array.isArray(response.icons)) {
+      return;
+    }
+    const nextManualIconMap = {};
+    for (const entry of response.icons) {
+      const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
+      const dataUrl = String(entry.dataUrl ?? '');
+      if (!safeHost || !validateManualIconDataUrl(dataUrl)) {
+        continue;
+      }
+      nextManualIconMap[safeHost] = dataUrl;
+    }
+    manualIconMap = nextManualIconMap;
+  } catch {
+    // Best-effort hydration.
+  }
 }
 
 async function listManualIconsInternal() {
@@ -1160,6 +1404,11 @@ async function setManualIconInternal(input) {
     source: input?.source === 'url' ? 'url' : 'file',
   });
   manualIconMap[safeHost] = dataUrl;
+  await syncManualIconUpsertToServerBestEffort({
+    host: safeHost,
+    dataUrl,
+    source: input?.source === 'url' ? 'url' : 'file',
+  });
   return ok({
     icons: listManualIconsView(),
   });
@@ -1180,6 +1429,7 @@ async function removeManualIconInternal(input) {
     }
     manualIconMap[host] = record.dataUrl;
   }
+  await syncManualIconRemoveToServerBestEffort(safeHost);
   return ok({
     icons: listManualIconsView(),
   });
@@ -1191,7 +1441,11 @@ function sortProjectedCredentials(left, right) {
   if (rightScore !== leftScore) {
     return rightScore - leftScore;
   }
-  return left.title.localeCompare(right.title);
+  const titleCompare = left.title.localeCompare(right.title);
+  if (titleCompare !== 0) {
+    return titleCompare;
+  }
+  return left.itemId.localeCompare(right.itemId);
 }
 
 function normalizeTypeFilter(rawTypeFilter) {
@@ -1244,6 +1498,9 @@ async function listCredentialsInternal(input = {}) {
   })
     .sort(sortProjectedCredentials);
 
+  await ensureProjectedIconsHydrated(projections);
+  projections = applyCachedIconsToProjection(projections);
+
   const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
   const normalizedQuery = typeof input.query === 'string' ? input.query.trim() : '';
   const suggestedFilter = toBoolean(input.suggestedOnly);
@@ -1267,7 +1524,10 @@ async function listCredentialsInternal(input = {}) {
       query: input.query,
       typeFilter: input.typeFilter,
       suggestedOnly: input.suggestedOnly,
-    }).sort(sortProjectedCredentials);
+    })
+      .sort(sortProjectedCredentials);
+    await ensureProjectedIconsHydrated(projections);
+    projections = applyCachedIconsToProjection(projections);
   }
 
   const exactMatchCount = projections.filter((entry) => entry.matchFlags.exactOrigin).length;
@@ -1429,6 +1689,7 @@ async function applyTrustedPairingResult(pairingResult) {
   setPhase('local_unlock_required', null);
 
   await Promise.all([persistTrusted(trustedState), persistSessionToken()]);
+  await hydrateManualIconsFromServerBestEffort();
 }
 
 async function pollLinkPairingFromBridgeInternal(input, sender) {

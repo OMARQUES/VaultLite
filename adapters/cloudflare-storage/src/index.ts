@@ -11,6 +11,8 @@ import type {
   CompleteOnboardingAtomicResult,
   DeviceRecord,
   DeviceRepository,
+  ManualSiteIconOverrideRecord,
+  ManualSiteIconOverrideRepository,
   ExtensionLinkRequestRecord,
   ExtensionLinkRequestRepository,
   ExtensionLinkRequestStatus,
@@ -25,6 +27,8 @@ import type {
   RotatePasswordAtomicInput,
   RotatePasswordAtomicResult,
   RevokeDeviceAndSessionsAtomicInput,
+  SiteIconCacheRecord,
+  SiteIconCacheRepository,
   UserAccountRecord,
   UserAccountRepository,
   VaultItemRecord,
@@ -333,6 +337,35 @@ CREATE INDEX IF NOT EXISTS idx_extension_link_requests_status_created
 
 CREATE INDEX IF NOT EXISTS idx_extension_link_requests_expires
   ON extension_link_requests (expires_at);`,
+  },
+  {
+    id: '0011_site_icons',
+    filename: '0011_site_icons.sql',
+    sql: `CREATE TABLE IF NOT EXISTS site_icon_cache (
+  domain TEXT PRIMARY KEY,
+  data_url TEXT NOT NULL,
+  source_url TEXT,
+  fetched_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_site_icon_cache_updated
+  ON site_icon_cache (updated_at);
+
+CREATE TABLE IF NOT EXISTS manual_site_icon_overrides (
+  user_id TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  data_url TEXT NOT NULL,
+  source TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, domain)
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_site_icon_overrides_user_updated
+  ON manual_site_icon_overrides (user_id, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_manual_site_icon_overrides_domain
+  ON manual_site_icon_overrides (domain);`,
   },
 ];
 
@@ -1209,6 +1242,194 @@ class CloudflareExtensionLinkRequestRepository implements ExtensionLinkRequestRe
   }
 }
 
+class CloudflareSiteIconCacheRepository implements SiteIconCacheRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async listByDomains(domains: string[]): Promise<SiteIconCacheRecord[]> {
+    const normalized = Array.from(
+      new Set(
+        domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0),
+      ),
+    );
+    if (normalized.length === 0) {
+      return [];
+    }
+
+    const placeholders = normalized.map(() => '?').join(', ');
+    return selectMany<SiteIconCacheRecord>(
+      this.db,
+      `SELECT domain AS domain,
+              data_url AS dataUrl,
+              source_url AS sourceUrl,
+              updated_at AS updatedAt,
+              fetched_at AS fetchedAt
+       FROM site_icon_cache
+       WHERE domain IN (${placeholders})`,
+      normalized,
+    );
+  }
+
+  async findByDomain(domain: string): Promise<SiteIconCacheRecord | null> {
+    const normalized = domain.trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+
+    return selectOne<SiteIconCacheRecord>(
+      this.db,
+      `SELECT domain AS domain,
+              data_url AS dataUrl,
+              source_url AS sourceUrl,
+              updated_at AS updatedAt,
+              fetched_at AS fetchedAt
+       FROM site_icon_cache
+       WHERE domain = ?`,
+      [normalized],
+    );
+  }
+
+  async upsert(record: SiteIconCacheRecord): Promise<SiteIconCacheRecord> {
+    const normalized: SiteIconCacheRecord = {
+      ...record,
+      domain: record.domain.trim().toLowerCase(),
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO site_icon_cache (domain, data_url, source_url, fetched_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(domain)
+       DO UPDATE SET
+         data_url = excluded.data_url,
+         source_url = excluded.source_url,
+         fetched_at = excluded.fetched_at,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.domain,
+        normalized.dataUrl,
+        normalized.sourceUrl,
+        normalized.fetchedAt,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+}
+
+class CloudflareManualSiteIconOverrideRepository implements ManualSiteIconOverrideRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async listByUserId(userId: string): Promise<ManualSiteIconOverrideRecord[]> {
+    return selectMany<ManualSiteIconOverrideRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              domain AS domain,
+              data_url AS dataUrl,
+              source AS source,
+              updated_at AS updatedAt
+       FROM manual_site_icon_overrides
+       WHERE user_id = ?
+       ORDER BY domain ASC`,
+      [userId],
+    );
+  }
+
+  async listByUserIdAndDomains(
+    userId: string,
+    domains: string[],
+  ): Promise<ManualSiteIconOverrideRecord[]> {
+    const normalized = Array.from(
+      new Set(
+        domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0),
+      ),
+    );
+    if (normalized.length === 0) {
+      return [];
+    }
+    const placeholders = normalized.map(() => '?').join(', ');
+    return selectMany<ManualSiteIconOverrideRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              domain AS domain,
+              data_url AS dataUrl,
+              source AS source,
+              updated_at AS updatedAt
+       FROM manual_site_icon_overrides
+       WHERE user_id = ?
+         AND domain IN (${placeholders})
+       ORDER BY domain ASC`,
+      [userId, ...normalized],
+    );
+  }
+
+  async findByUserIdAndDomain(
+    userId: string,
+    domain: string,
+  ): Promise<ManualSiteIconOverrideRecord | null> {
+    const normalized = domain.trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+    return selectOne<ManualSiteIconOverrideRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              domain AS domain,
+              data_url AS dataUrl,
+              source AS source,
+              updated_at AS updatedAt
+       FROM manual_site_icon_overrides
+       WHERE user_id = ?
+         AND domain = ?`,
+      [userId, normalized],
+    );
+  }
+
+  async upsert(record: ManualSiteIconOverrideRecord): Promise<ManualSiteIconOverrideRecord> {
+    const normalized: ManualSiteIconOverrideRecord = {
+      ...record,
+      domain: record.domain.trim().toLowerCase(),
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO manual_site_icon_overrides (user_id, domain, data_url, source, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, domain)
+       DO UPDATE SET
+         data_url = excluded.data_url,
+         source = excluded.source,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.userId,
+        normalized.domain,
+        normalized.dataUrl,
+        normalized.source,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+
+  async remove(userId: string, domain: string): Promise<boolean> {
+    const normalized = domain.trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    const changed = await executeOneWithChanges(
+      this.db,
+      `DELETE FROM manual_site_icon_overrides
+       WHERE user_id = ?
+         AND domain = ?`,
+      [userId, normalized],
+    );
+    return changed === 1;
+  }
+}
+
 class CloudflareAuthRateLimitRepository implements AuthRateLimitRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -2011,6 +2232,8 @@ export function createCloudflareVaultLiteStorage(input: {
   const sessions = new CloudflareSessionRepository(input.db);
   const extensionPairings = new CloudflareExtensionPairingRepository(input.db);
   const extensionLinkRequests = new CloudflareExtensionLinkRequestRepository(input.db);
+  const siteIconCache = new CloudflareSiteIconCacheRepository(input.db);
+  const manualSiteIconOverrides = new CloudflareManualSiteIconOverrideRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
 
   return {
@@ -2021,6 +2244,8 @@ export function createCloudflareVaultLiteStorage(input: {
     sessions,
     extensionPairings,
     extensionLinkRequests,
+    siteIconCache,
+    manualSiteIconOverrides,
     authRateLimits: new CloudflareAuthRateLimitRepository(input.db),
     idempotency: new CloudflareIdempotencyRepository(input.db),
     auditEvents: new CloudflareAuditEventRepository(input.db),

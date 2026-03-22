@@ -15,7 +15,8 @@
     "@vaultlite/runtime-abstractions": "*",
     "@vaultlite/storage-abstractions": "*",
     "@vaultlite/cloudflare-runtime": "*",
-    "hono": "^4.12.8"
+    "hono": "^4.12.8",
+    "tldts": "^7.0.17"
   },
   "devDependencies": {
     "@vaultlite/test-utils": "*"

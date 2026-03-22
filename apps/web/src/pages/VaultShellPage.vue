@@ -113,6 +113,11 @@ const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const faviconSourceIndexByItemAndHost = ref<Record<string, number>>({});
 const manualSiteIconsByHost = ref<ManualSiteIconMap>({});
+const canonicalSiteIconsByHost = ref<
+  Record<string, { dataUrl: string; source: 'manual' | 'automatic'; sourceUrl: string | null; updatedAt: string }>
+>({});
+const iconDiscoveryCooldownByHost = ref<Record<string, number>>({});
+let iconHydrationNonce = 0;
 const attachmentObjectUrls = new Set<string>();
 
 const loginDraft = reactive<LoginVaultItemPayload>({
@@ -323,6 +328,22 @@ const selectedItem = computed(
 const selectedTrashEntry = computed(
   () => allTombstones.value.find((entry) => entry.itemId === selectedItemId.value) ?? null,
 );
+const iconHydrationItems = computed(() => {
+  const seen = new Set<string>();
+  const items: VaultWorkspaceItem[] = [];
+  for (const entry of filteredItems.value) {
+    if (seen.has(entry.itemId)) {
+      continue;
+    }
+    seen.add(entry.itemId);
+    items.push(entry);
+  }
+  if (selectedItem.value && !seen.has(selectedItem.value.itemId)) {
+    items.push(selectedItem.value);
+  }
+  return items;
+});
+const iconHydrationHosts = computed(() => loginHostsForItems(iconHydrationItems.value));
 
 const selectedItemInContext = computed(() => {
   const current = selectedItem.value;
@@ -1121,6 +1142,14 @@ watch(
 );
 
 watch(
+  () => iconHydrationHosts.value,
+  (hosts) => {
+    void hydrateCanonicalSiteIconsForHosts(hosts);
+  },
+  { immediate: true },
+);
+
+watch(
   () => [selectedAttachmentItem.value?.itemId ?? null, isTrashContext.value] as const,
   async ([itemId, trash]) => {
     if (!itemId || trash) {
@@ -1435,17 +1464,97 @@ function normalizeUrlForFavicon(url: string): string | null {
   }
 }
 
+function setCanonicalSiteIcons(
+  icons: Array<{ domain: string; dataUrl: string; source: 'manual' | 'automatic'; sourceUrl: string | null; updatedAt: string }>,
+) {
+  if (!Array.isArray(icons) || icons.length === 0) {
+    return;
+  }
+  const next = { ...canonicalSiteIconsByHost.value };
+  for (const icon of icons) {
+    const safeHost = normalizeUrlForFavicon(icon.domain);
+    if (!safeHost || typeof icon.dataUrl !== 'string' || icon.dataUrl.length < 32) {
+      continue;
+    }
+    next[safeHost] = {
+      dataUrl: icon.dataUrl,
+      source: icon.source,
+      sourceUrl: icon.sourceUrl,
+      updatedAt: icon.updatedAt,
+    };
+  }
+  canonicalSiteIconsByHost.value = next;
+}
+
+function loginHostsForItems(items: VaultWorkspaceItem[]): string[] {
+  const hosts = new Set<string>();
+  for (const item of items) {
+    if (item.itemType !== 'login') {
+      continue;
+    }
+    const host = normalizeUrlForFavicon(item.payload.urls[0] ?? '');
+    if (host) {
+      hosts.add(host);
+    }
+  }
+  return Array.from(hosts).sort((left, right) => left.localeCompare(right));
+}
+
+async function hydrateCanonicalSiteIconsForHosts(hosts: string[]) {
+  if (hosts.length === 0) {
+    return;
+  }
+  const requestNonce = ++iconHydrationNonce;
+  try {
+    const resolved = await sessionStore.resolveSiteIcons({
+      domains: hosts,
+    });
+    if (requestNonce !== iconHydrationNonce) {
+      return;
+    }
+    setCanonicalSiteIcons(resolved.icons);
+
+    const knownHosts = new Set(resolved.icons.map((entry) => normalizeUrlForFavicon(entry.domain)).filter((entry): entry is string => Boolean(entry)));
+    const now = Date.now();
+    const discoverTargets = hosts.filter((host) => {
+      if (knownHosts.has(host)) {
+        return false;
+      }
+      const lastAttempt = iconDiscoveryCooldownByHost.value[host] ?? 0;
+      return now - lastAttempt > 15 * 60 * 1000;
+    });
+    if (discoverTargets.length === 0) {
+      return;
+    }
+
+    iconDiscoveryCooldownByHost.value = {
+      ...iconDiscoveryCooldownByHost.value,
+      ...Object.fromEntries(discoverTargets.map((host) => [host, now])),
+    };
+    const discovered = await sessionStore.discoverSiteIcons({
+      domains: discoverTargets,
+      forceRefresh: false,
+    });
+    if (requestNonce !== iconHydrationNonce) {
+      return;
+    }
+    setCanonicalSiteIcons(discovered.icons);
+  } catch {
+    // Keep placeholder/legacy fallback when icon resolution fails.
+  }
+}
+
 function loginFaviconCandidates(url: string | undefined): string[] {
   const hostname = normalizeUrlForFavicon(url ?? '');
   if (!hostname) {
     return [];
   }
+  const canonicalIcon = canonicalSiteIconsByHost.value[hostname]?.dataUrl ?? null;
+  if (canonicalIcon) {
+    return [canonicalIcon];
+  }
   const manualIcon = manualSiteIconsByHost.value[hostname]?.dataUrl ?? null;
-  return [
-    ...(manualIcon ? [manualIcon] : []),
-    `https://${hostname}/favicon.ico`,
-    `https://${hostname}/apple-touch-icon.png`,
-  ];
+  return manualIcon ? [manualIcon] : [];
 }
 
 function faviconKey(itemId: string, url: string | undefined): string | null {

@@ -111,5 +111,44 @@ export function createExtensionApiClient(serverOrigin) {
         body: JSON.stringify(input),
       });
     },
+    async resolveSiteIcons(input) {
+      return requestJson(`${base}/api/icons/resolve`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          domains: Array.isArray(input?.domains) ? input.domains : [],
+        }),
+      });
+    },
+    async discoverSiteIcons(input) {
+      return requestJson(`${base}/api/icons/discover`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          domains: Array.isArray(input?.domains) ? input.domains : [],
+          forceRefresh: input?.forceRefresh === true,
+        }),
+      });
+    },
+    async listManualSiteIcons(input = {}) {
+      return requestJson(`${base}/api/icons/manual`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async upsertManualSiteIcon(input) {
+      return requestJson(`${base}/api/icons/manual/upsert`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify(input),
+      });
+    },
+    async removeManualSiteIcon(input) {
+      return requestJson(`${base}/api/icons/manual/remove`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify(input),
+      });
+    },
   };
 }

@@ -49,6 +49,11 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     listDevices: vi.fn(),
     revokeDevice: vi.fn(),
     rotatePassword: vi.fn(),
+    resolveSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [] })),
+    discoverSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [], unresolved: [] })),
+    listManualSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [] })),
+    upsertManualSiteIcon: vi.fn(async () => ({ ok: true as const, result: 'success_changed' as const })),
+    removeManualSiteIcon: vi.fn(async () => ({ ok: true as const, result: 'success_changed' as const })),
     getRuntimeMetadata: vi.fn(async () => ({
       serverUrl: 'https://vaultlite.local',
       deploymentFingerprint: 'development_deployment',

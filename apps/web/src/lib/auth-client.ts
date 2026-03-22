@@ -23,6 +23,14 @@ import type {
   ExtensionLinkApproveInput,
   ExtensionLinkPendingListOutput,
   ExtensionLinkRejectInput,
+  SiteIconDiscoverBatchInput,
+  SiteIconDiscoverBatchOutput,
+  SiteIconManualActionOutput,
+  SiteIconManualListOutput,
+  SiteIconManualRemoveInput,
+  SiteIconManualUpsertInput,
+  SiteIconResolveBatchInput,
+  SiteIconResolveBatchOutput,
   OnboardingAccountKitSignInput,
   PasswordRotationCompleteOutput,
   PasswordRotationInput,
@@ -109,6 +117,11 @@ export interface VaultLiteAuthClient {
   listExtensionLinkPending(): Promise<ExtensionLinkPendingListOutput>;
   approveExtensionLink(input: ExtensionLinkApproveInput): Promise<ExtensionLinkActionOutput>;
   rejectExtensionLink(input: ExtensionLinkRejectInput): Promise<ExtensionLinkActionOutput>;
+  resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
+  discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
+  listManualSiteIcons(): Promise<SiteIconManualListOutput>;
+  upsertManualSiteIcon(input: SiteIconManualUpsertInput): Promise<SiteIconManualActionOutput>;
+  removeManualSiteIcon(input: SiteIconManualRemoveInput): Promise<SiteIconManualActionOutput>;
 }
 
 async function requestJson<T>(
@@ -419,6 +432,53 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
           method: 'POST',
           body: JSON.stringify(input),
         }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    resolveSiteIcons(input) {
+      return requestJson<SiteIconResolveBatchOutput>(
+        `${baseUrl}/api/icons/resolve`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    discoverSiteIcons(input) {
+      return requestJson<SiteIconDiscoverBatchOutput>(
+        `${baseUrl}/api/icons/discover`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listManualSiteIcons() {
+      return requestJson<SiteIconManualListOutput>(
+        `${baseUrl}/api/icons/manual`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    upsertManualSiteIcon(input) {
+      return requestJson<SiteIconManualActionOutput>(
+        `${baseUrl}/api/icons/manual/upsert`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    removeManualSiteIcon(input) {
+      return requestJson<SiteIconManualActionOutput>(
+        `${baseUrl}/api/icons/manual/remove`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
         { emitUnauthorizedEvent: true },
       );
     },

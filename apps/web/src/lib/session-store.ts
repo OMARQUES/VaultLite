@@ -5,6 +5,14 @@ import type {
   ExtensionLinkPendingListOutput,
   PasswordRotationCompleteOutput,
   RuntimeMetadata,
+  SiteIconDiscoverBatchInput,
+  SiteIconDiscoverBatchOutput,
+  SiteIconManualActionOutput,
+  SiteIconManualListOutput,
+  SiteIconManualRemoveInput,
+  SiteIconManualUpsertInput,
+  SiteIconResolveBatchInput,
+  SiteIconResolveBatchOutput,
 } from '@vaultlite/contracts';
 import { reactive, readonly } from 'vue';
 
@@ -112,6 +120,11 @@ export interface SessionStore {
     currentPassword: string;
     nextPassword: string;
   }): Promise<PasswordRotationCompleteOutput>;
+  resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
+  discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
+  listManualSiteIcons(): Promise<SiteIconManualListOutput>;
+  upsertManualSiteIcon(input: SiteIconManualUpsertInput): Promise<SiteIconManualActionOutput>;
+  removeManualSiteIcon(input: SiteIconManualRemoveInput): Promise<SiteIconManualActionOutput>;
   getRuntimeMetadata(): Promise<RuntimeMetadata>;
   handleUnauthorized(input?: {
     reasonCode?: string | null;
@@ -865,6 +878,21 @@ export function createSessionStore(input: {
       });
 
       return rotationResponse;
+    },
+    resolveSiteIcons(inputData) {
+      return input.authClient.resolveSiteIcons(inputData);
+    },
+    discoverSiteIcons(inputData) {
+      return input.authClient.discoverSiteIcons(inputData);
+    },
+    listManualSiteIcons() {
+      return input.authClient.listManualSiteIcons();
+    },
+    upsertManualSiteIcon(inputData) {
+      return input.authClient.upsertManualSiteIcon(inputData);
+    },
+    removeManualSiteIcon(inputData) {
+      return input.authClient.removeManualSiteIcon(inputData);
     },
     async getRuntimeMetadata() {
       return ensureRuntimeMetadata();

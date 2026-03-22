@@ -757,6 +757,90 @@ export const ExtensionLinkConsumeInputSchema = z
 
 export const ExtensionLinkConsumeOutputSchema = ExtensionTrustedSessionOutputSchema;
 
+export const SiteIconDomainSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9.-]{1,255}$/);
+
+export const SiteIconSourceSchema = z.enum(['manual', 'automatic']);
+
+export const SiteIconRecordSchema = z
+  .object({
+    domain: SiteIconDomainSchema,
+    dataUrl: z.string().min(32),
+    source: SiteIconSourceSchema,
+    sourceUrl: z.string().url().nullable(),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const SiteIconResolveBatchInputSchema = z
+  .object({
+    domains: z.array(SiteIconDomainSchema).min(1).max(200),
+  })
+  .strict();
+
+export const SiteIconResolveBatchOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    icons: z.array(SiteIconRecordSchema),
+  })
+  .strict();
+
+export const SiteIconDiscoverBatchInputSchema = z
+  .object({
+    domains: z.array(SiteIconDomainSchema).min(1).max(200),
+    forceRefresh: z.boolean().optional(),
+  })
+  .strict();
+
+export const SiteIconDiscoverBatchOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    icons: z.array(SiteIconRecordSchema),
+    unresolved: z.array(SiteIconDomainSchema),
+  })
+  .strict();
+
+export const SiteIconManualUpsertInputSchema = z
+  .object({
+    domain: SiteIconDomainSchema,
+    dataUrl: z.string().min(32),
+    source: z.enum(['url', 'file']).default('url'),
+  })
+  .strict();
+
+export const SiteIconManualListOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    icons: z.array(
+      z
+        .object({
+          domain: SiteIconDomainSchema,
+          dataUrl: z.string().min(32),
+          source: z.enum(['url', 'file']),
+          updatedAt: isoDatetimeSchema,
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const SiteIconManualRemoveInputSchema = z
+  .object({
+    domain: SiteIconDomainSchema,
+  })
+  .strict();
+
+export const SiteIconManualActionOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const AccountKitSignatureInputSchema = z
   .object({
     payload: z.object({
@@ -876,6 +960,17 @@ export type ExtensionLinkStatusInput = z.infer<typeof ExtensionLinkStatusInputSc
 export type ExtensionLinkStatusOutput = z.infer<typeof ExtensionLinkStatusOutputSchema>;
 export type ExtensionLinkConsumeInput = z.infer<typeof ExtensionLinkConsumeInputSchema>;
 export type ExtensionLinkConsumeOutput = z.infer<typeof ExtensionLinkConsumeOutputSchema>;
+export type SiteIconDomain = z.infer<typeof SiteIconDomainSchema>;
+export type SiteIconSource = z.infer<typeof SiteIconSourceSchema>;
+export type SiteIconRecord = z.infer<typeof SiteIconRecordSchema>;
+export type SiteIconResolveBatchInput = z.infer<typeof SiteIconResolveBatchInputSchema>;
+export type SiteIconResolveBatchOutput = z.infer<typeof SiteIconResolveBatchOutputSchema>;
+export type SiteIconDiscoverBatchInput = z.infer<typeof SiteIconDiscoverBatchInputSchema>;
+export type SiteIconDiscoverBatchOutput = z.infer<typeof SiteIconDiscoverBatchOutputSchema>;
+export type SiteIconManualUpsertInput = z.infer<typeof SiteIconManualUpsertInputSchema>;
+export type SiteIconManualListOutput = z.infer<typeof SiteIconManualListOutputSchema>;
+export type SiteIconManualRemoveInput = z.infer<typeof SiteIconManualRemoveInputSchema>;
+export type SiteIconManualActionOutput = z.infer<typeof SiteIconManualActionOutputSchema>;
 export type GenericAuthFailure = z.infer<typeof GenericAuthFailureSchema>;
 export type AccountKitSignatureInput = z.infer<typeof AccountKitSignatureInputSchema>;
 export type AccountKitSignatureOutput = z.infer<typeof AccountKitSignatureOutputSchema>;

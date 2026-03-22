@@ -19,10 +19,7 @@ import {
   importManualSiteIconFromFile,
   importManualSiteIconFromUrl,
   listManualSiteIcons,
-  removeManualSiteIcon,
   sanitizeIconHost,
-  upsertManualSiteIcon,
-  type ManualSiteIconMap,
 } from '../lib/manual-site-icons';
 
 const sessionStore = useSessionStore();
@@ -79,6 +76,7 @@ const iconFileInput = ref<HTMLInputElement | null>(null);
 const manualIcons = ref<Array<{ host: string; dataUrl: string; updatedAt: string; source: 'url' | 'file' }>>([]);
 const iconBusy = ref(false);
 const iconErrorMessage = ref<string | null>(null);
+let legacyManualIconsMigrated = false;
 const bridgePendingRequests = new Map<
   string,
   {
@@ -223,7 +221,7 @@ onMounted(() => {
   void refreshDevices();
   void refreshRuntimeMetadata();
   void refreshExtensionLinkRequests();
-  refreshManualIcons();
+  void refreshManualIcons();
   if (showExtensionSection.value) {
     startExtensionLinkAutoRefresh();
   }
@@ -568,16 +566,56 @@ function closeRevokeDialog() {
   revokeErrorMessage.value = null;
 }
 
-function refreshManualIcons() {
-  const map = listManualSiteIcons(sessionStore.state.username);
-  manualIcons.value = Object.entries(map)
-    .map(([host, record]) => ({
-      host,
-      dataUrl: record.dataUrl,
-      source: record.source,
-      updatedAt: record.updatedAt,
-    }))
-    .sort((left, right) => left.host.localeCompare(right.host));
+async function migrateLegacyManualIconsToServerIfNeeded() {
+  if (legacyManualIconsMigrated) {
+    return;
+  }
+  legacyManualIconsMigrated = true;
+  const legacyMap = listManualSiteIcons(sessionStore.state.username);
+  const entries = Object.entries(legacyMap);
+  if (entries.length === 0) {
+    return;
+  }
+  for (const [host, record] of entries) {
+    const safeHost = sanitizeIconHost(host);
+    if (!safeHost || typeof record?.dataUrl !== 'string') {
+      continue;
+    }
+    try {
+      await sessionStore.upsertManualSiteIcon({
+        domain: safeHost,
+        dataUrl: record.dataUrl,
+        source: record.source === 'file' ? 'file' : 'url',
+      });
+    } catch {
+      // Best-effort migration; local fallback remains available.
+    }
+  }
+}
+
+async function refreshManualIcons() {
+  try {
+    await migrateLegacyManualIconsToServerIfNeeded();
+    const response = await sessionStore.listManualSiteIcons();
+    manualIcons.value = response.icons
+      .map((entry) => ({
+        host: entry.domain,
+        dataUrl: entry.dataUrl,
+        source: entry.source,
+        updatedAt: entry.updatedAt,
+      }))
+      .sort((left, right) => left.host.localeCompare(right.host));
+  } catch {
+    const map = listManualSiteIcons(sessionStore.state.username);
+    manualIcons.value = Object.entries(map)
+      .map(([host, record]) => ({
+        host,
+        dataUrl: record.dataUrl,
+        source: record.source,
+        updatedAt: record.updatedAt,
+      }))
+      .sort((left, right) => left.host.localeCompare(right.host));
+  }
 }
 
 function manualIconErrorMessage(error: unknown): string {
@@ -617,14 +655,13 @@ async function importManualIconFromUrlAction() {
   iconBusy.value = true;
   try {
     const dataUrl = await importManualSiteIconFromUrl(iconUrlInput.value.trim());
-    upsertManualSiteIcon({
-      username: sessionStore.state.username,
-      host: safeHost,
+    await sessionStore.upsertManualSiteIcon({
+      domain: safeHost,
       dataUrl,
       source: 'url',
     });
     iconUrlInput.value = '';
-    refreshManualIcons();
+    await refreshManualIcons();
     showToast(`Icon saved for ${safeHost}`);
   } catch (error) {
     iconErrorMessage.value = manualIconErrorMessage(error);
@@ -649,16 +686,15 @@ async function importManualIconFromFileAction() {
   iconBusy.value = true;
   try {
     const dataUrl = await importManualSiteIconFromFile(file);
-    upsertManualSiteIcon({
-      username: sessionStore.state.username,
-      host: safeHost,
+    await sessionStore.upsertManualSiteIcon({
+      domain: safeHost,
       dataUrl,
       source: 'file',
     });
     if (iconFileInput.value) {
       iconFileInput.value.value = '';
     }
-    refreshManualIcons();
+    await refreshManualIcons();
     showToast(`Icon saved for ${safeHost}`);
   } catch (error) {
     iconErrorMessage.value = manualIconErrorMessage(error);
@@ -667,9 +703,9 @@ async function importManualIconFromFileAction() {
   }
 }
 
-function removeManualIconAction(host: string) {
-  removeManualSiteIcon(sessionStore.state.username, host);
-  refreshManualIcons();
+async function removeManualIconAction(host: string) {
+  await sessionStore.removeManualSiteIcon({ domain: host });
+  await refreshManualIcons();
   showToast(`Icon removed for ${host}`);
 }
 

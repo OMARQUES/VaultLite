@@ -531,13 +531,45 @@ function renderCredentialDetails() {
   popupAutosizer?.schedule();
 }
 
+function captureListScrollAnchor() {
+  const scrollTop = elements.credentialsList.scrollTop;
+  const rows = Array.from(elements.credentialsList.querySelectorAll('.vault-row[data-item-id]'));
+  const anchorRow =
+    rows.find((row) => row.offsetTop + row.offsetHeight > scrollTop + 1) ??
+    rows[rows.length - 1] ??
+    null;
+  const itemId = anchorRow?.getAttribute('data-item-id') ?? null;
+  const offsetFromRowTop = anchorRow ? scrollTop - anchorRow.offsetTop : 0;
+  return {
+    scrollTop,
+    itemId,
+    offsetFromRowTop,
+  };
+}
+
+function restoreListScrollAnchor(input) {
+  if (!input || typeof input !== 'object') {
+    return;
+  }
+  if (typeof input.itemId === 'string' && input.itemId.length > 0) {
+    const anchor = Array.from(elements.credentialsList.querySelectorAll('.vault-row[data-item-id]')).find(
+      (row) => row.getAttribute('data-item-id') === input.itemId,
+    );
+    if (anchor instanceof HTMLElement) {
+      elements.credentialsList.scrollTop = Math.max(0, anchor.offsetTop + Number(input.offsetFromRowTop ?? 0));
+      return;
+    }
+  }
+  elements.credentialsList.scrollTop = Number(input.scrollTop ?? 0);
+}
+
 function renderCredentialList(items) {
   const previousItems = currentItems;
-  const previousScrollTop = elements.credentialsList.scrollTop;
+  const previousAnchor = captureListScrollAnchor();
   currentItems = Array.isArray(items) ? items : [];
   selectedItemId = selectItemIdAfterRefresh(selectedItemId, currentItems);
   const preserveScroll =
-    previousScrollTop > 0 &&
+    previousAnchor.scrollTop > 0 &&
     hasSameItemOrder(previousItems, currentItems) &&
     currentItems.length > 0;
 
@@ -656,7 +688,9 @@ function renderCredentialList(items) {
 
   elements.credentialsList.innerHTML = rows;
   if (preserveScroll) {
-    elements.credentialsList.scrollTop = previousScrollTop;
+    restoreListScrollAnchor(previousAnchor);
+  } else if (previousAnchor.scrollTop > 0) {
+    restoreListScrollAnchor(previousAnchor);
   }
   renderCredentialDetails();
   persistPopupUiState();

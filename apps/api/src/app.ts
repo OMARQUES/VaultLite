@@ -18,6 +18,14 @@ import {
   ExtensionLinkRequestOutputSchema,
   ExtensionLinkStatusInputSchema,
   ExtensionLinkStatusOutputSchema,
+  SiteIconDiscoverBatchInputSchema,
+  SiteIconDiscoverBatchOutputSchema,
+  SiteIconManualActionOutputSchema,
+  SiteIconManualListOutputSchema,
+  SiteIconManualRemoveInputSchema,
+  SiteIconManualUpsertInputSchema,
+  SiteIconResolveBatchInputSchema,
+  SiteIconResolveBatchOutputSchema,
   AdminInviteCreateInputSchema,
   AdminInviteCreateOutputSchema,
   AdminInviteListOutputSchema,
@@ -87,6 +95,7 @@ import {
 import { Hono } from 'hono';
 import { createHash, createHmac, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { ZodError } from 'zod';
+import { discoverSiteIcon, normalizeDomainCandidate } from './site-icons';
 
 const GENERIC_INVALID_CREDENTIALS = GenericAuthFailureSchema.parse({
   ok: false,
@@ -253,6 +262,109 @@ function canonicalizeServerOrigin(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+type ResolvedSiteIcon = {
+  domain: string;
+  dataUrl: string;
+  source: 'manual' | 'automatic';
+  sourceUrl: string | null;
+  updatedAt: string;
+};
+
+function normalizeSiteIconDomains(rawDomains: string[]): string[] {
+  const deduped = new Set<string>();
+  for (const rawDomain of rawDomains) {
+    const normalized = normalizeDomainCandidate(rawDomain);
+    if (!normalized) {
+      continue;
+    }
+    deduped.add(normalized);
+  }
+  return Array.from(deduped);
+}
+
+function mergeResolvedSiteIcons(input: {
+  domains: string[];
+  manual: Array<{ domain: string; dataUrl: string; source: 'url' | 'file'; updatedAt: string }>;
+  automatic: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }>;
+}): ResolvedSiteIcon[] {
+  const manualByDomain = new Map(
+    input.manual.map((entry) => [
+      entry.domain,
+      {
+        domain: entry.domain,
+        dataUrl: entry.dataUrl,
+        source: 'manual' as const,
+        sourceUrl: null,
+        updatedAt: entry.updatedAt,
+      },
+    ]),
+  );
+  const automaticByDomain = new Map(
+    input.automatic.map((entry) => [
+      entry.domain,
+      {
+        domain: entry.domain,
+        dataUrl: entry.dataUrl,
+        source: 'automatic' as const,
+        sourceUrl: entry.sourceUrl,
+        updatedAt: entry.updatedAt,
+      },
+    ]),
+  );
+
+  return input.domains
+    .map((domain) => manualByDomain.get(domain) ?? automaticByDomain.get(domain) ?? null)
+    .filter((entry): entry is ResolvedSiteIcon => Boolean(entry));
+}
+
+function isSafeIconDataUrl(value: string): boolean {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  if (value.length < 32 || value.length > 1_500_000) {
+    return false;
+  }
+  return /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/iu.test(value);
+}
+
+async function discoverAndPersistSiteIcons(input: {
+  domains: string[];
+  nowIso: string;
+  storage: VaultLiteStorage;
+}): Promise<{
+  discovered: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }>;
+  unresolved: string[];
+}> {
+  const discovered: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }> = [];
+  const unresolved: string[] = [];
+
+  for (const domain of input.domains) {
+    const next = await discoverSiteIcon({
+      domain,
+      nowIso: input.nowIso,
+    });
+    if (!next) {
+      unresolved.push(domain);
+      continue;
+    }
+    await input.storage.siteIconCache.upsert({
+      domain: next.domain,
+      dataUrl: next.dataUrl,
+      sourceUrl: next.sourceUrl,
+      fetchedAt: next.fetchedAt,
+      updatedAt: next.updatedAt,
+    });
+    discovered.push({
+      domain: next.domain,
+      dataUrl: next.dataUrl,
+      sourceUrl: next.sourceUrl,
+      updatedAt: next.updatedAt,
+    });
+  }
+
+  return { discovered, unresolved };
 }
 
 function generatePairingCode(): string {
@@ -3033,6 +3145,243 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
           accountKeyWrapped: consumed.accountKeyWrapped,
           localUnlockEnvelope,
         },
+      }),
+    );
+  });
+
+  app.post('/api/icons/resolve', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 32 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = SiteIconResolveBatchInputSchema.parse(parsedBody.body);
+    const domains = normalizeSiteIconDomains(input.domains);
+    if (domains.length === 0) {
+      return jsonResponse(
+        200,
+        SiteIconResolveBatchOutputSchema.parse({
+          ok: true,
+          icons: [],
+        }),
+      );
+    }
+
+    const manualIcons = await options.storage.manualSiteIconOverrides.listByUserIdAndDomains(
+      sessionContext.user.userId,
+      domains,
+    );
+    const manualDomains = new Set(manualIcons.map((entry) => entry.domain));
+    const automaticDomains = domains.filter((domain) => !manualDomains.has(domain));
+    const automaticIcons =
+      automaticDomains.length > 0 ? await options.storage.siteIconCache.listByDomains(automaticDomains) : [];
+    const merged = mergeResolvedSiteIcons({
+      domains,
+      manual: manualIcons,
+      automatic: automaticIcons,
+    });
+
+    return jsonResponse(
+      200,
+      SiteIconResolveBatchOutputSchema.parse({
+        ok: true,
+        icons: merged,
+      }),
+    );
+  });
+
+  app.post('/api/icons/discover', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 32 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = SiteIconDiscoverBatchInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const domains = normalizeSiteIconDomains(input.domains);
+    if (domains.length === 0) {
+      return jsonResponse(
+        200,
+        SiteIconDiscoverBatchOutputSchema.parse({
+          ok: true,
+          icons: [],
+          unresolved: [],
+        }),
+      );
+    }
+
+    const manualIcons = await options.storage.manualSiteIconOverrides.listByUserIdAndDomains(
+      sessionContext.user.userId,
+      domains,
+    );
+    const manualDomains = new Set(manualIcons.map((entry) => entry.domain));
+    const discoverableDomains = domains.filter((domain) => !manualDomains.has(domain));
+
+    const existingAutomatic = input.forceRefresh
+      ? []
+      : await options.storage.siteIconCache.listByDomains(discoverableDomains);
+    const existingAutomaticByDomain = new Map(existingAutomatic.map((entry) => [entry.domain, entry]));
+    const targetDiscoveryDomains = discoverableDomains.filter(
+      (domain) => input.forceRefresh === true || !existingAutomaticByDomain.has(domain),
+    );
+
+    const discovery = await discoverAndPersistSiteIcons({
+      domains: targetDiscoveryDomains,
+      nowIso,
+      storage: options.storage,
+    });
+
+    const automaticMerged = [...existingAutomatic];
+    for (const discovered of discovery.discovered) {
+      existingAutomaticByDomain.set(discovered.domain, {
+        domain: discovered.domain,
+        dataUrl: discovered.dataUrl,
+        sourceUrl: discovered.sourceUrl,
+        updatedAt: discovered.updatedAt,
+      });
+    }
+    if (input.forceRefresh) {
+      automaticMerged.splice(
+        0,
+        automaticMerged.length,
+        ...Array.from(existingAutomaticByDomain.values()),
+      );
+    } else {
+      automaticMerged.push(...discovery.discovered);
+    }
+    const merged = mergeResolvedSiteIcons({
+      domains,
+      manual: manualIcons,
+      automatic: automaticMerged,
+    });
+    const unresolved = discovery.unresolved.filter((domain) => !existingAutomaticByDomain.has(domain));
+
+    return jsonResponse(
+      200,
+      SiteIconDiscoverBatchOutputSchema.parse({
+        ok: true,
+        icons: merged,
+        unresolved,
+      }),
+    );
+  });
+
+  app.get('/api/icons/manual', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const manual = await options.storage.manualSiteIconOverrides.listByUserId(sessionContext.user.userId);
+    return jsonResponse(
+      200,
+      SiteIconManualListOutputSchema.parse({
+        ok: true,
+        icons: manual.map((entry) => ({
+          domain: entry.domain,
+          dataUrl: entry.dataUrl,
+          source: entry.source,
+          updatedAt: entry.updatedAt,
+        })),
+      }),
+    );
+  });
+
+  app.post('/api/icons/manual/upsert', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie') {
+      if (!hasValidCsrf(c.req.raw)) {
+        return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+      }
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 2 * 1024 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = SiteIconManualUpsertInputSchema.parse(parsedBody.body);
+    if (!isSafeIconDataUrl(input.dataUrl)) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const previous = await options.storage.manualSiteIconOverrides.findByUserIdAndDomain(
+      sessionContext.user.userId,
+      input.domain,
+    );
+    const nowIso = isoNow(options.clock);
+    await options.storage.manualSiteIconOverrides.upsert({
+      userId: sessionContext.user.userId,
+      domain: input.domain,
+      dataUrl: input.dataUrl,
+      source: input.source,
+      updatedAt: nowIso,
+    });
+    const noChanges = previous?.dataUrl === input.dataUrl && previous.source === input.source;
+    return jsonResponse(
+      200,
+      SiteIconManualActionOutputSchema.parse({
+        ok: true,
+        result: noChanges ? 'success_no_op' : 'success_changed',
+      }),
+    );
+  });
+
+  app.post('/api/icons/manual/remove', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie') {
+      if (!hasValidCsrf(c.req.raw)) {
+        return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+      }
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 8 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = SiteIconManualRemoveInputSchema.parse(parsedBody.body);
+    const changed = await options.storage.manualSiteIconOverrides.remove(
+      sessionContext.user.userId,
+      input.domain,
+    );
+    return jsonResponse(
+      200,
+      SiteIconManualActionOutputSchema.parse({
+        ok: true,
+        result: changed ? 'success_changed' : 'success_no_op',
       }),
     );
   });

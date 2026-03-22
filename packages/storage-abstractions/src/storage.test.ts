@@ -304,4 +304,66 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(postCooldown.attemptCount).toBe(1);
     expect(postCooldown.windowStartedAt).toBe('2026-03-15T12:06:01.000Z');
   });
+
+  test('stores and resolves canonical site icons by normalized domain', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.siteIconCache.upsert({
+      domain: 'WWW.Example.COM',
+      dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+      sourceUrl: 'https://www.example.com/favicon.ico',
+      updatedAt: '2026-03-22T10:00:00.000Z',
+      fetchedAt: '2026-03-22T10:00:00.000Z',
+    });
+
+    await expect(storage.siteIconCache.findByDomain('www.example.com')).resolves.toEqual(
+      expect.objectContaining({
+        domain: 'www.example.com',
+      }),
+    );
+    await expect(storage.siteIconCache.listByDomains(['example.com', 'www.example.com'])).resolves.toEqual([
+      expect.objectContaining({
+        domain: 'www.example.com',
+      }),
+    ]);
+  });
+
+  test('stores manual icon overrides per user with domain scoping', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.manualSiteIconOverrides.upsert({
+      userId: 'user_1',
+      domain: 'Portal.Example.com',
+      dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+      source: 'url',
+      updatedAt: '2026-03-22T10:00:00.000Z',
+    });
+    await storage.manualSiteIconOverrides.upsert({
+      userId: 'user_2',
+      domain: 'portal.example.com',
+      dataUrl: 'data:image/png;base64,DDDDDDDDEEEEEEEEFFFFFFFF',
+      source: 'file',
+      updatedAt: '2026-03-22T11:00:00.000Z',
+    });
+
+    await expect(
+      storage.manualSiteIconOverrides.findByUserIdAndDomain('user_1', 'portal.example.com'),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        userId: 'user_1',
+        domain: 'portal.example.com',
+        source: 'url',
+      }),
+    );
+    await expect(
+      storage.manualSiteIconOverrides.listByUserIdAndDomains('user_1', ['portal.example.com']),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        userId: 'user_1',
+        domain: 'portal.example.com',
+      }),
+    ]);
+    await expect(storage.manualSiteIconOverrides.remove('user_1', 'portal.example.com')).resolves.toBe(true);
+    await expect(
+      storage.manualSiteIconOverrides.findByUserIdAndDomain('user_1', 'portal.example.com'),
+    ).resolves.toBeNull();
+  });
 });
