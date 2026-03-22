@@ -7,347 +7,668 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #151a23;
-        --panel: #1b212c;
-        --panel-2: #202734;
-        --panel-3: #252d3a;
-        --border: #2f3849;
-        --border-strong: #3c4960;
-        --text: #eff3fb;
-        --muted: #9aa6bc;
-        --accent: #3c7bff;
-        --accent-2: #2f68db;
-        --danger: #ff7c7c;
-        --warning: #ffca7a;
-        --success: #66d7a0;
+        --vl-shell: #19181d;
+        --vl-surface: #1f232d;
+        --vl-surface-2: #262c37;
+        --vl-input: #313844;
+        --vl-border: #364154;
+        --vl-divider: rgba(255, 255, 255, 0.08);
+        --vl-text: #f4f7fb;
+        --vl-text-muted: #b7c0d1;
+        --vl-text-soft: #8b96ab;
+        --vl-primary: #2562ea;
+        --vl-primary-hover: #1f56d6;
+        --vl-danger: #d84f60;
+        --vl-warning: #d08a2e;
+
+        --pairing-width: 470px;
+        --pairing-min-height: 340px;
+        --pairing-min-height-link-open: 470px;
+        --unlock-width: 470px;
+        --unlock-min-height: 252px;
+        --ready-width: 620px;
+        --ready-expanded-width: 800px;
+        --ready-min-height: 520px;
       }
 
-      html {
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
         width: 100%;
-        height: 100%;
         overflow: hidden;
+        overflow: clip;
+        background: transparent;
+        max-height: 600px;
       }
 
       body {
-        margin: 0;
-        width: 430px;
-        height: 600px;
-        background: radial-gradient(circle at top, #1f2b49, var(--bg) 58%);
-        color: var(--text);
+        width: var(--pairing-width);
+        min-height: var(--pairing-min-height);
         font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
-        transition: width 150ms ease;
+        color: var(--vl-text);
         overflow: hidden;
+        overflow: clip;
+        max-width: 800px;
+        max-height: 600px;
       }
 
-      body.popup-expanded {
-        width: 760px;
+      body[data-layout='pairing'] {
+        width: var(--pairing-width);
+        min-height: var(--pairing-min-height);
+      }
+
+      body[data-layout='pairing'][data-link-request='open'] {
+        min-height: var(--pairing-min-height-link-open);
+      }
+
+      body[data-layout='unlock'] {
+        width: var(--unlock-width);
+        min-height: var(--unlock-min-height);
+      }
+
+      body[data-layout='ready'] {
+        width: var(--ready-width);
+        min-height: var(--ready-min-height);
+      }
+
+      body[data-layout='ready'][data-detail='open'] {
+        width: var(--ready-expanded-width);
       }
 
       .popup-shell {
-        display: flex;
-        flex-direction: column;
+        width: 100%;
         height: 100%;
-        padding: 14px;
-        gap: 12px;
-        box-sizing: border-box;
-        overflow-y: auto;
-        -ms-overflow-style: none;
-        scrollbar-width: none;
-      }
-
-      .popup-shell::-webkit-scrollbar {
-        width: 0;
-        height: 0;
-        display: none;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        background: var(--vl-shell);
+        border: 1px solid color-mix(in srgb, var(--vl-border) 72%, transparent);
+        overflow: hidden;
+        overflow: clip;
       }
 
       .popup-header {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
+        display: grid;
+        gap: 8px;
+        padding: 14px 16px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--vl-divider) 80%, transparent);
       }
 
-      body.ready-mode .popup-header {
-        display: none;
+      .popup-header-top {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
       }
 
       .popup-title {
         margin: 0;
-        font-size: 30px;
-        letter-spacing: -0.03em;
+        font-size: 49px;
+        font-size: clamp(32px, 5vw, 52px);
+        letter-spacing: -0.035em;
+        line-height: 0.86;
         font-weight: 700;
-        line-height: 0.92;
+      }
+
+      body[data-layout='ready'] .popup-title {
+        font-size: 54px;
+        font-size: clamp(30px, 4.2vw, 48px);
       }
 
       .popup-subtitle {
         margin: 0;
-        font-size: 13px;
-        color: var(--muted);
+        color: var(--vl-text-muted);
+        font-size: 14px;
+        line-height: 1.35;
+      }
+
+      .site-context {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-ready-search.search-shell {
+        display: none;
+      }
+
+      body[data-layout='ready'] .header-ready-search.search-shell {
+        display: flex;
+      }
+
+      .search-shell {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 38px;
+        border: 1px solid var(--vl-border);
+        border-radius: 12px;
+        background: var(--vl-input);
+        padding: 0 12px;
+      }
+
+      .search-icon {
+        width: 18px;
+        height: 18px;
+        color: var(--vl-text-soft);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+
+      .search-icon svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.1;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      #searchInput {
+        flex: 1;
+        min-width: 0;
+        height: 30px;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: var(--vl-text);
+        font-size: 14px;
+      }
+
+      #searchInput::placeholder {
+        color: #96a2b8;
+      }
+
+      .header-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .icon-button {
+        width: 34px;
+        height: 34px;
+        border: 1px solid var(--vl-border);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--vl-surface-2) 58%, transparent);
+        color: var(--vl-text-soft);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        cursor: pointer;
+      }
+
+      .icon-button:hover {
+        border-color: color-mix(in srgb, var(--vl-border) 94%, transparent);
+        background: color-mix(in srgb, var(--vl-surface-2) 82%, transparent);
+        color: var(--vl-text);
+      }
+
+      .icon-button svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .new-item-btn {
+        display: none;
+        background: var(--vl-primary);
+        border-color: color-mix(in srgb, var(--vl-primary) 70%, #3e5f8c);
+        color: #f7fbff;
+      }
+
+      body[data-layout='ready'] .new-item-btn {
+        display: inline-flex;
+      }
+
+      .new-item-btn:disabled {
+        opacity: 0.55;
+        color: #e6efff;
       }
 
       .alert {
         border: 1px solid transparent;
         border-radius: 12px;
-        padding: 12px 14px;
-        font-size: 14px;
+        padding: 10px 12px;
+        font-size: 13px;
       }
 
       .alert--danger {
-        border-color: #6d2f3a;
-        background: rgba(109, 40, 51, 0.28);
-        color: #ffd6de;
+        border-color: color-mix(in srgb, var(--vl-danger) 70%, var(--vl-border));
+        background: color-mix(in srgb, var(--vl-danger) 14%, var(--vl-surface));
+        color: #ffd8df;
       }
 
       .alert--warning {
-        border-color: #725126;
-        background: rgba(118, 78, 24, 0.25);
-        color: #ffe5bc;
+        border-color: color-mix(in srgb, var(--vl-warning) 62%, var(--vl-border));
+        background: color-mix(in srgb, var(--vl-warning) 18%, var(--vl-surface));
+        color: #ffdca7;
       }
 
       .alert--success {
-        border-color: #29614b;
-        background: rgba(41, 97, 75, 0.27);
-        color: #c8fae3;
+        border-color: color-mix(in srgb, #22c55e 62%, var(--vl-border));
+        background: color-mix(in srgb, #22c55e 16%, var(--vl-surface));
+        color: #c7f8da;
       }
 
-      .panel {
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent), var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 12px;
+      .popup-content {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px 16px 14px;
+        overflow: hidden;
+      }
+
+      body[data-layout='pairing'] .popup-content,
+      body[data-layout='unlock'] .popup-content {
+        justify-content: flex-start;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+
+      .compact-stage {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .compact-intro {
+        margin: 0 0 4px;
+        font-size: 15px;
+        color: var(--vl-text-muted);
+        line-height: 1.4;
       }
 
       .field {
         display: flex;
         flex-direction: column;
-        gap: 6px;
-        margin-bottom: 10px;
+        gap: 8px;
       }
 
       .field span {
-        font-size: 12px;
-        color: var(--muted);
+        font-size: 13px;
+        color: var(--vl-text-muted);
       }
 
       .field input {
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: #0e1523;
-        color: var(--text);
-        height: 38px;
-        padding: 0 10px;
+        height: 44px;
+        border: 1px solid var(--vl-border);
+        border-radius: 14px;
+        background: var(--vl-input);
+        color: var(--vl-text);
+        padding: 0 12px;
         outline: none;
+        font-size: 16px;
       }
 
       .field input:focus {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 1px rgba(69, 126, 255, 0.3);
+        border-color: var(--vl-primary);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--vl-primary) 38%, transparent);
       }
 
       .actions {
         display: flex;
-        gap: 8px;
         flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      button {
+        border: 1px solid var(--vl-border);
+        border-radius: 14px;
+        background: var(--vl-surface-2);
+        color: var(--vl-text);
+        height: 40px;
+        padding: 0 13px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: color-mix(in srgb, var(--vl-border) 92%, transparent);
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--vl-primary);
+        border-color: color-mix(in srgb, var(--vl-primary) 70%, #3e5f8c);
+        color: #f7fbff;
+        font-weight: 700;
+      }
+
+      .btn-primary:hover {
+        background: var(--vl-primary-hover);
       }
 
       .lts-panel {
-        border: 1px solid rgba(112, 133, 176, 0.28);
-        border-radius: 12px;
-        background: rgba(14, 21, 35, 0.5);
+        margin-top: 2px;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 78%, transparent);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--vl-surface) 68%, transparent);
         padding: 10px;
-        margin-top: 8px;
       }
 
       .lts-code {
         margin: 0 0 6px;
-        font-size: 18px;
+        font-size: 24px;
+        letter-spacing: 0.08em;
+        line-height: 1;
         font-weight: 700;
-        letter-spacing: 0.06em;
-        line-height: 1.1;
-        overflow-wrap: anywhere;
       }
 
       .lts-meta {
         margin: 0;
-        font-size: 12px;
-        color: var(--muted);
-        line-height: 1.35;
+        color: var(--vl-text-muted);
+        font-size: 13px;
+        line-height: 1.3;
       }
 
       .lts-status {
         margin-top: 8px;
       }
 
-      button {
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel-2);
-        color: var(--text);
-        padding: 8px 12px;
-        font-size: 13px;
-        cursor: pointer;
-      }
-
-      button:hover {
-        border-color: var(--border-strong);
-      }
-
-      button:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
-      }
-
-      .btn-primary {
-        background: linear-gradient(180deg, var(--accent), var(--accent-2));
-        border-color: #2f64ce;
-        font-weight: 600;
+      .pairing-recovery {
+        margin-top: 8px;
       }
 
       .ready-panel {
+        min-height: 0;
         display: flex;
         flex-direction: column;
-        gap: 10px;
-        flex: 1;
-        min-height: 0;
-      }
-
-      .search-shell {
-        display: flex;
-        align-items: center;
         gap: 8px;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: var(--panel-3);
-        padding: 0 10px;
-        min-height: 42px;
-      }
-
-      .search-shell::before {
-        content: '⌕';
-        color: var(--muted);
-        font-size: 16px;
-        line-height: 1;
-      }
-
-      .filter-chips {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        flex-wrap: wrap;
-      }
-
-      .chip {
-        min-height: 28px;
-        padding: 4px 9px;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        background: var(--panel-2);
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      .chip.is-active {
-        border-color: #2f64ce;
-        background: rgba(60, 123, 255, 0.23);
-        color: var(--text);
-      }
-
-      #searchInput {
-        flex: 1;
-        border: 0;
-        background: transparent;
-        color: var(--text);
-        height: 38px;
-        outline: none;
-        font-size: 15px;
-      }
-
-      #searchInput::placeholder {
-        color: #909db4;
-      }
-
-      .ready-layout {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 10px;
-        min-height: 0;
         flex: 1;
         overflow: hidden;
       }
 
-      body.popup-expanded .ready-layout {
-        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-      }
-
-      .vault-list-shell {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: rgba(14, 21, 35, 0.6);
+      .ready-layout {
         min-height: 0;
-        height: 100%;
-        overflow: auto;
-        -ms-overflow-style: none;
-        scrollbar-width: none;
+        flex: 1;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 86%, transparent);
+        border-radius: 16px;
+        background: color-mix(in srgb, var(--vl-surface) 76%, transparent);
+        display: grid;
+        grid-template-columns: 1fr 0fr;
+        transition: grid-template-columns 340ms cubic-bezier(0.22, 1, 0.36, 1);
+        overflow: hidden;
       }
 
-      .vault-list-shell::-webkit-scrollbar {
+      body[data-layout='ready'][data-detail='open'] .ready-layout {
+        grid-template-columns: minmax(310px, 40%) minmax(0, 1fr);
+      }
+
+      .vault-list-pane {
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .list-toolbar {
+        position: relative;
+        padding: 10px;
+        border-bottom: 1px solid color-mix(in srgb, var(--vl-divider) 90%, transparent);
+      }
+
+      .filter-dropdown {
+        position: relative;
+        display: inline-flex;
+        width: min(240px, 100%);
+      }
+
+      .filter-dropdown-button {
+        width: 100%;
+        height: 42px;
+        border: 1px solid var(--vl-border);
+        border-radius: 13px;
+        background: var(--vl-surface-2);
+        color: var(--vl-text);
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr) 18px;
+        align-items: center;
+        gap: 10px;
+        padding: 0 12px;
+        text-align: left;
+      }
+
+      .filter-dropdown-button .caret {
+        width: 18px;
+        height: 18px;
+        color: var(--vl-text-soft);
+      }
+
+      .filter-dropdown-button .caret svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .filter-dropdown-icon,
+      .filter-dropdown-option-icon {
+        width: 18px;
+        height: 18px;
+        color: var(--vl-text-soft);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .filter-dropdown-icon svg,
+      .filter-dropdown-option-icon svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .filter-dropdown-label {
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .filter-dropdown-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        width: 100%;
+        border: 1px solid var(--vl-border);
+        border-radius: 13px;
+        background: var(--vl-surface-2);
+        padding: 6px;
+        display: grid;
+        gap: 4px;
+        z-index: 40;
+        box-shadow: 0 14px 26px rgba(0, 0, 0, 0.42);
+      }
+
+      .filter-dropdown-option {
+        height: 36px;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--vl-text);
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        text-align: left;
+        padding: 0 10px;
+      }
+
+      .filter-dropdown-option.is-selected,
+      .filter-dropdown-option[aria-selected='true'] {
+        border-color: color-mix(in srgb, var(--vl-primary) 62%, var(--vl-border));
+        background: color-mix(in srgb, var(--vl-primary) 20%, transparent);
+      }
+
+      .filter-dropdown-option:hover,
+      .filter-dropdown-option:focus-visible {
+        border-color: color-mix(in srgb, var(--vl-border) 96%, transparent);
+        background: color-mix(in srgb, var(--vl-surface) 72%, transparent);
+        outline: none;
+      }
+
+      .vault-list-shell,
+      .vault-detail {
+        min-width: 0;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      .vault-list-shell::-webkit-scrollbar,
+      .vault-detail::-webkit-scrollbar {
         width: 0;
         height: 0;
         display: none;
       }
 
       .vault-row {
-        border-bottom: 1px solid rgba(112, 133, 176, 0.16);
-        padding: 10px;
-        display: block;
-        cursor: pointer;
+        margin: 8px 10px 0;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 86%, transparent);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--vl-surface-2) 42%, transparent);
+        display: grid;
+        grid-template-columns: 1fr;
         position: relative;
         overflow: hidden;
       }
 
       .vault-row:last-child {
-        border-bottom: none;
+        margin-bottom: 10px;
       }
 
       .vault-row:hover {
-        background: rgba(77, 105, 167, 0.12);
+        background: color-mix(in srgb, var(--vl-primary) 11%, var(--vl-surface-2));
       }
 
       .vault-row.is-selected {
-        background: linear-gradient(180deg, rgba(63, 121, 255, 0.24), rgba(63, 121, 255, 0.18));
+        background: #2562ea;
+        border-color: color-mix(in srgb, #2562ea 75%, #1f56d6);
+      }
+
+      .vault-row.is-selected .vault-row-title,
+      .vault-row.is-selected .vault-row-sub,
+      .vault-row.is-selected .vault-row-sub-2 {
+        color: #f4f8ff;
+      }
+
+      .vault-row.has-row-action {
+        grid-template-columns: 4fr 1fr;
+      }
+
+      .vault-row-main-hit {
+        padding: 10px 12px;
+        cursor: pointer;
+      }
+
+      .vault-row.has-row-action:hover .vault-row-main-hit {
+        filter: blur(0.5px);
+      }
+
+      .vault-row-side-hit {
+        border: 0;
+        border-left: 1px solid color-mix(in srgb, var(--vl-divider) 90%, transparent);
+        border-radius: 0;
+        background: color-mix(in srgb, var(--vl-surface-2) 74%, transparent);
+        color: #c6d2ea;
+        height: auto;
+        min-height: 100%;
+        align-self: stretch;
+        padding: 0;
+        opacity: 0;
+        pointer-events: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .vault-row-side-hit.is-fill {
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+
+      .vault-row-side-hit:disabled {
+        opacity: 0.52;
+        pointer-events: auto;
+        cursor: not-allowed;
+      }
+
+      .vault-row.has-row-action:hover .vault-row-side-hit,
+      .vault-row-side-hit:focus-visible {
+        opacity: 1;
+        pointer-events: auto;
+        outline: none;
+      }
+
+      .vault-row-side-hit svg {
+        width: 24px;
+        height: 24px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
       .vault-row-content {
         display: grid;
-        grid-template-columns: 52px minmax(0, 1fr);
-        gap: 10px;
+        grid-template-columns: 54px minmax(0, 1fr);
+        gap: 12px;
         align-items: center;
       }
 
       .monogram {
-        width: 44px;
-        height: 44px;
-        border-radius: 11px;
-        border: 1px solid var(--border);
-        background: linear-gradient(180deg, #2a3342, #1d2533);
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        border: 1px solid var(--vl-border);
+        background: linear-gradient(180deg, #2c3748, #20293a);
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 18px;
+        font-size: 32px;
+        font-size: clamp(14px, 2vw, 30px);
         font-weight: 700;
-        color: #d5dff1;
+        color: #d6e1f5;
       }
 
       .monogram--with-image {
         overflow: hidden;
-        padding: 0;
       }
 
       .credential-favicon {
         width: 100%;
         height: 100%;
-        object-fit: cover;
         display: block;
+        object-fit: cover;
       }
 
       .vault-row-main {
@@ -357,223 +678,240 @@
       .vault-row-title {
         margin: 0;
         font-size: 16px;
-        font-weight: 700;
         line-height: 1.2;
+        font-weight: 700;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
-      .vault-row-sub {
+      .vault-row-sub,
+      .vault-row-sub-2 {
         margin: 3px 0 0;
         font-size: 13px;
-        color: #c8d3ea;
+        color: #c8d1de;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
       .vault-row-sub-2 {
-        margin: 2px 0 0;
-        font-size: 12px;
-        color: var(--muted);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .badge {
-        border-radius: 999px;
-        border: 1px solid #2f6f4c;
-        color: #bdf6d7;
-        background: rgba(31, 110, 72, 0.24);
-        font-size: 11px;
-        padding: 2px 8px;
-        justify-self: end;
-        align-self: start;
-      }
-
-      .vault-row-overlay {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(9, 15, 27, 0.42);
-        backdrop-filter: blur(2px);
-        -webkit-backdrop-filter: blur(2px);
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 120ms ease;
-      }
-
-      .vault-row-actions {
-        display: flex;
-        gap: 10px;
-        transform: translateY(3px);
-        transition: transform 120ms ease;
-      }
-
-      .vault-row:hover .vault-row-overlay,
-      .vault-row:focus-within .vault-row-overlay {
-        opacity: 1;
-        pointer-events: auto;
-      }
-
-      .vault-row:hover .vault-row-actions,
-      .vault-row:focus-within .vault-row-actions {
-        transform: translateY(0);
-      }
-
-      .vault-row-actions button {
-        min-width: 78px;
-        padding: 7px 10px;
-        font-size: 13px;
-      }
-
-      .vault-row:hover .badge,
-      .vault-row:focus-within .badge {
-        display: none;
+        color: var(--vl-text-muted);
       }
 
       .vault-detail {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: rgba(14, 21, 35, 0.62);
-        padding: 12px;
-        display: none;
-        min-height: 0;
-        overflow: auto;
-        -ms-overflow-style: none;
-        scrollbar-width: none;
-      }
-
-      .vault-detail::-webkit-scrollbar {
-        width: 0;
-        height: 0;
-        display: none;
-      }
-
-      body.popup-expanded .vault-detail {
         display: block;
+        border-left: 0 solid transparent;
+        padding: 0;
+        opacity: 0;
+        transform: translateX(8px);
+        pointer-events: none;
+        transition:
+          opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
+          transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+          padding 320ms cubic-bezier(0.22, 1, 0.36, 1),
+          border-color 320ms cubic-bezier(0.22, 1, 0.36, 1);
       }
 
+      body[data-layout='ready'][data-detail='open'] .vault-detail {
+        border-left: 1px solid color-mix(in srgb, var(--vl-divider) 90%, transparent);
+        padding: 12px;
+        opacity: 1;
+        transform: translateX(0);
+        pointer-events: auto;
+      }
+
+      .detail-loading,
       .detail-empty {
-        color: var(--muted);
-        font-size: 14px;
+        font-size: 13px;
+        color: var(--vl-text-muted);
       }
 
       .detail-head {
         display: grid;
-        grid-template-columns: 56px minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: start;
+        margin-bottom: 12px;
+      }
+
+      .detail-head-main {
+        display: grid;
+        grid-template-columns: 54px minmax(0, 1fr);
         gap: 10px;
         align-items: center;
-        margin-bottom: 10px;
       }
 
       .detail-icon-shell {
-        width: 44px;
-        height: 44px;
-        border-radius: 11px;
-        border: 1px solid var(--border);
-        background: linear-gradient(180deg, #2a3342, #1d2533);
+        width: 48px;
+        height: 48px;
+        border-radius: 12px;
+        border: 1px solid var(--vl-border);
+        overflow: hidden;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        overflow: hidden;
-      }
-
-      .detail-icon-shell .monogram.is-hidden {
-        display: none;
+        background: linear-gradient(180deg, #2c3748, #20293a);
       }
 
       .detail-favicon {
         width: 100%;
         height: 100%;
-        object-fit: cover;
         display: block;
-      }
-
-      .detail-title {
-        margin: 0;
-        font-size: 32px;
-        letter-spacing: -0.03em;
-        line-height: 0.95;
+        object-fit: cover;
       }
 
       .detail-type {
         margin: 0;
-        text-transform: uppercase;
-        color: var(--muted);
         font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--vl-text-muted);
         font-weight: 700;
-        letter-spacing: 0.1em;
+      }
+
+      .detail-title {
+        margin: 0;
+        font-size: 28px;
+        font-size: clamp(22px, 3vw, 42px);
+        line-height: 0.95;
+        letter-spacing: -0.03em;
+      }
+
+      .detail-top-actions {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .detail-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 8px);
+        width: 210px;
+        border: 1px solid var(--vl-border);
+        border-radius: 12px;
+        background: var(--vl-surface-2);
+        padding: 6px;
+        display: grid;
+        gap: 4px;
+        box-shadow: 0 14px 26px rgba(0, 0, 0, 0.42);
+        z-index: 30;
+      }
+
+      .detail-menu button {
+        width: 100%;
+        justify-content: flex-start;
+        text-align: left;
+        height: 34px;
+        border-radius: 10px;
+        background: transparent;
+      }
+
+      .detail-menu-wrap {
+        position: relative;
       }
 
       .detail-section {
-        border-top: 1px solid rgba(112, 133, 176, 0.2);
-        padding-top: 10px;
-        margin-top: 10px;
+        border-top: 1px solid color-mix(in srgb, var(--vl-divider) 95%, transparent);
+      }
+
+      .detail-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        padding: 11px 0;
       }
 
       .detail-label {
         margin: 0 0 4px;
-        color: var(--muted);
+        color: var(--vl-text-muted);
         font-size: 12px;
       }
 
       .detail-value {
         margin: 0;
-        color: var(--text);
-        font-size: 16px;
+        font-size: 15px;
+        color: var(--vl-text);
         line-height: 1.35;
         word-break: break-word;
         overflow-wrap: anywhere;
       }
 
       .detail-password {
-        border: 1px solid var(--border);
-        background: var(--panel-3);
-        border-radius: 10px;
+        border: 1px solid var(--vl-border);
+        border-radius: 12px;
+        background: var(--vl-input);
         min-height: 42px;
         display: flex;
         align-items: center;
         padding: 0 12px;
         letter-spacing: 0.14em;
-        font-size: 18px;
       }
 
-      .detail-actions {
-        display: flex;
+      .detail-row-actions {
+        display: inline-flex;
         gap: 8px;
-        flex-wrap: wrap;
-        margin-top: 12px;
+        align-items: center;
       }
 
-      .icon-button {
-        width: 40px;
-        height: 40px;
-        padding: 0;
+      .row-action {
+        width: 32px;
+        height: 32px;
+        border: 1px solid var(--vl-border);
         border-radius: 10px;
-        font-size: 24px;
-        line-height: 1;
+        background: color-mix(in srgb, var(--vl-surface-2) 62%, transparent);
+        color: var(--vl-text-soft);
+        padding: 0;
         display: inline-flex;
         align-items: center;
         justify-content: center;
       }
 
-      .empty-state {
-        color: var(--muted);
-        font-size: 13px;
-        padding: 14px;
-        text-align: center;
+      .row-action svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.1;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
-      .footer {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        margin-top: auto;
+      .row-action:hover {
+        color: var(--vl-text);
+        border-color: color-mix(in srgb, var(--vl-border) 95%, transparent);
+      }
+
+      .row-action.is-copied {
+        color: var(--vl-primary);
+        background: color-mix(in srgb, var(--vl-primary) 16%, transparent);
+        border-color: color-mix(in srgb, var(--vl-primary) 62%, var(--vl-border));
+        animation: copiedPulse 0.6s ease;
+      }
+
+      @keyframes copiedPulse {
+        0% {
+          transform: scale(1);
+        }
+        45% {
+          transform: scale(1.12);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+
+      .empty-state {
+        color: var(--vl-text-muted);
+        font-size: 13px;
+        text-align: center;
+        padding: 16px 14px;
+      }
+
+      .empty-state button {
+        margin-top: 10px;
       }
 
       [hidden] {
@@ -581,120 +919,168 @@
       }
     </style>
   </head>
-  <body>
+  <body data-layout="pairing" data-detail="closed">
     <main class="popup-shell">
       <header class="popup-header" id="popupHeader">
-        <h1 class="popup-title">VaultLite</h1>
-        <p class="popup-subtitle" id="siteContext">Checking active site…</p>
+        <div class="popup-header-top">
+          <h1 class="popup-title">VaultLite</h1>
+          <div id="headerReadySearch" class="search-shell header-ready-search" aria-label="Search vault" hidden>
+            <span class="search-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path></svg>
+            </span>
+            <input id="searchInput" autocomplete="off" placeholder="Search vault" />
+          </div>
+          <div class="header-actions">
+            <button
+              type="button"
+              id="newItemBtn"
+              class="icon-button new-item-btn"
+              title="New item (coming soon)"
+              aria-label="New item (coming soon)"
+              disabled
+            >
+              <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+            </button>
+            <button type="button" id="lockBtn" class="icon-button" title="Lock extension" aria-label="Lock extension" hidden>
+              <svg viewBox="0 0 24 24"><path d="M7 10V8a5 5 0 0 1 10 0v2"></path><rect x="5" y="10" width="14" height="11" rx="2"></rect><circle cx="12" cy="15" r="1"></circle></svg>
+            </button>
+          </div>
+        </div>
+        <p class="popup-subtitle site-context" id="siteContext">Checking active site…</p>
       </header>
 
-      <div id="statusAlert" class="alert alert--warning" hidden></div>
+      <div class="popup-content">
+        <div id="statusAlert" class="alert alert--warning" hidden></div>
 
-      <section id="pairingSection" class="panel" hidden>
-        <p class="popup-subtitle" id="pairingDescription">
-          Start a trusted-device request and approve it in web settings.
-        </p>
-        <label class="field">
-          <span>Server URL</span>
-          <input id="serverUrlInput" autocomplete="off" placeholder="http://127.0.0.1:8787" />
-        </label>
-        <label class="field">
-          <span>Device name</span>
-          <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="VaultLite Extension" />
-        </label>
-        <div class="actions">
-          <button type="button" id="linkPairBtn" class="btn-primary">Connect with trusted device</button>
-          <button type="button" id="openWebSettingsPairingBtn">Open web settings</button>
-        </div>
-        <section id="linkRequestPanel" class="lts-panel" hidden>
-          <p class="lts-code" id="linkRequestCode">ABCDEFG2</p>
-          <p class="lts-meta">
-            Phrase: <span id="linkRequestPhrase">amber-delta-zenith</span><br />
-            Expires: <span id="linkRequestExpires">—</span>
-          </p>
-          <div id="linkRequestStatus" class="popup-subtitle lts-status">
-            Waiting for approval in trusted surface settings...
+        <section id="pairingSection" class="compact-stage" hidden>
+          <p class="compact-intro popup-subtitle" id="pairingDescription">Start a trusted-device request and approve it in web settings.</p>
+          <label class="field">
+            <span>Server URL</span>
+            <input id="serverUrlInput" autocomplete="off" placeholder="http://127.0.0.1:8787" />
+          </label>
+          <label class="field">
+            <span>Device name</span>
+            <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="VaultLite Extension" />
+          </label>
+          <div class="actions">
+            <button type="button" id="linkPairBtn" class="btn-primary">Connect with trusted device</button>
           </div>
-          <div class="actions" style="margin-top: 8px">
-            <button type="button" id="cancelLinkPairBtn">Cancel request</button>
+          <section id="linkRequestPanel" class="lts-panel" hidden>
+            <p class="lts-code" id="linkRequestCode">ABCDEFG2</p>
+            <p class="lts-meta">
+              Phrase: <span id="linkRequestPhrase">amber-delta-zenith</span><br />
+              Expires: <span id="linkRequestExpires">—</span>
+            </p>
+            <div id="linkRequestStatus" class="popup-subtitle lts-status">Waiting for approval in trusted surface settings...</div>
+            <div class="pairing-recovery" id="pairingRecovery" hidden>
+              <button type="button" id="openApprovalBtn">Open approval page</button>
+            </div>
+            <div class="actions" style="margin-top: 8px">
+              <button type="button" id="cancelLinkPairBtn">Cancel request</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="unlockSection" class="compact-stage" hidden>
+          <p class="compact-intro popup-subtitle">Unlock this trusted device locally.</p>
+          <label class="field">
+            <span>Account password</span>
+            <input id="unlockPasswordInput" type="password" autocomplete="current-password" />
+          </label>
+          <div class="actions">
+            <button type="button" id="unlockBtn" class="btn-primary">Unlock</button>
           </div>
         </section>
-      </section>
 
-      <section id="unlockSection" class="panel" hidden>
-        <p class="popup-subtitle">Unlock this trusted device locally.</p>
-        <label class="field">
-          <span>Account password</span>
-          <input id="unlockPasswordInput" type="password" autocomplete="current-password" />
-        </label>
-        <div class="actions">
-          <button type="button" id="unlockBtn" class="btn-primary">Unlock</button>
-          <button type="button" id="openFullPageBtn">Open full-page unlock</button>
-        </div>
-      </section>
-
-      <section id="readySection" class="panel ready-panel" hidden>
-        <div class="search-shell">
-          <input id="searchInput" autocomplete="off" placeholder="Search vault" />
-        </div>
-        <div class="filter-chips">
-          <button type="button" class="chip is-active" data-type-filter="all">All</button>
-          <button type="button" class="chip" data-type-filter="login">Logins</button>
-          <button type="button" class="chip" data-type-filter="card">Cards</button>
-          <button type="button" class="chip" data-type-filter="document">Documents</button>
-          <button type="button" class="chip" data-type-filter="secure_note">Notes</button>
-          <button type="button" class="chip" id="suggestedChip">Suggested</button>
-        </div>
-        <div class="ready-layout" id="readyLayout">
-          <aside class="vault-list-shell" id="credentialsList"></aside>
-          <article class="vault-detail" id="credentialDetails">
-            <p id="credentialDetailsEmpty" class="detail-empty">Select an item to view details.</p>
-            <div id="credentialDetailsContent" hidden>
-              <header class="detail-head">
-                <div class="detail-icon-shell">
-                  <div class="monogram" id="detailMonogram">VL</div>
-                  <img id="detailFavicon" class="detail-favicon" alt="" hidden />
+        <section id="readySection" class="ready-panel" hidden>
+          <div class="ready-layout" id="readyLayout">
+            <section class="vault-list-pane">
+              <div class="list-toolbar">
+                <div class="filter-dropdown" id="filterDropdownRoot">
+                  <button type="button" class="filter-dropdown-button" id="filterDropdownButton" aria-expanded="false" aria-haspopup="listbox">
+                    <span class="filter-dropdown-icon" id="filterDropdownIcon" aria-hidden="true"></span>
+                    <span class="filter-dropdown-label" id="filterDropdownLabel">All Items</span>
+                    <span class="caret" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"></path></svg></span>
+                  </button>
+                  <div id="filterDropdownMenu" class="filter-dropdown-menu" hidden role="listbox"></div>
                 </div>
-                <div>
-                  <p class="detail-type" id="detailType">Login</p>
-                  <h2 class="detail-title" id="detailTitle">Vault item</h2>
-                </div>
-                <button type="button" id="detailCloseBtn" class="icon-button" title="Close details" aria-label="Close details">×</button>
-              </header>
-
-              <section class="detail-section">
-                <p class="detail-label" id="detailPrimaryLabel">Username</p>
-                <p class="detail-value" id="detailPrimaryValue">—</p>
-              </section>
-
-              <section class="detail-section">
-                <p class="detail-label" id="detailSecondaryLabel">Password</p>
-                <div class="detail-password" id="detailSecondaryValue">••••••••••••</div>
-              </section>
-
-              <section class="detail-section">
-                <p class="detail-label" id="detailTertiaryLabel">URL</p>
-                <p class="detail-value" id="detailTertiaryValue">No URL</p>
-              </section>
-
-              <div class="detail-actions">
-                <button type="button" id="detailActionPrimary" class="btn-primary">Fill</button>
-                <button type="button" id="detailActionSecondary">Copy username</button>
-                <button type="button" id="detailActionTertiary">Copy password</button>
               </div>
-            </div>
-          </article>
-        </div>
-      </section>
+              <aside class="vault-list-shell" id="credentialsList"></aside>
+            </section>
 
-      <footer class="footer">
-        <div class="actions">
-          <button type="button" id="lockBtn">Lock</button>
-        </div>
-        <div class="actions">
-          <button type="button" id="openWebAppBtn">Open in web app</button>
-        </div>
-      </footer>
+            <article class="vault-detail" id="credentialDetails">
+              <p id="credentialDetailsEmpty" class="detail-empty" hidden>Select an item to view details.</p>
+              <p id="credentialDetailsLoading" class="detail-loading" hidden>Loading details…</p>
+              <div id="credentialDetailsContent" hidden>
+                <header class="detail-head">
+                  <div class="detail-head-main">
+                    <div class="detail-icon-shell">
+                      <div class="monogram" id="detailMonogram">VL</div>
+                      <img id="detailFavicon" class="detail-favicon" alt="" hidden />
+                    </div>
+                    <div>
+                      <p class="detail-type" id="detailType">LOGIN</p>
+                      <h2 class="detail-title" id="detailTitle">Vault item</h2>
+                    </div>
+                  </div>
+                  <div class="detail-top-actions">
+                    <button type="button" id="detailActionPrimary" class="btn-primary">Fill</button>
+                    <div class="detail-menu-wrap">
+                      <button type="button" id="detailActionMenu" class="icon-button" title="More actions" aria-label="More actions">
+                        <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
+                      </button>
+                      <div id="detailMenuPopover" class="detail-menu" hidden>
+                        <button type="button" disabled>Edit</button>
+                        <button type="button" disabled>Generate password</button>
+                        <button type="button" disabled>Delete item</button>
+                      </div>
+                    </div>
+                  </div>
+                </header>
+
+                <section class="detail-section">
+                  <div class="detail-row" id="detailPrimaryRow">
+                    <div class="detail-row-content">
+                      <p class="detail-label" id="detailPrimaryLabel">Username</p>
+                      <p class="detail-value" id="detailPrimaryValue">—</p>
+                    </div>
+                    <div class="detail-row-actions">
+                      <button type="button" class="row-action" id="detailPrimaryActionA" hidden aria-label="Primary row action"></button>
+                      <button type="button" class="row-action" id="detailPrimaryActionB" hidden aria-label="Primary secondary action"></button>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="detail-section">
+                  <div class="detail-row" id="detailSecondaryRow">
+                    <div class="detail-row-content">
+                      <p class="detail-label" id="detailSecondaryLabel">Password</p>
+                      <p class="detail-value detail-password" id="detailSecondaryValue">••••••••••••</p>
+                    </div>
+                    <div class="detail-row-actions">
+                      <button type="button" class="row-action" id="detailSecondaryActionA" hidden aria-label="Secondary row action"></button>
+                      <button type="button" class="row-action" id="detailSecondaryActionB" hidden aria-label="Secondary secondary action"></button>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="detail-section">
+                  <div class="detail-row" id="detailTertiaryRow">
+                    <div class="detail-row-content">
+                      <p class="detail-label" id="detailTertiaryLabel">URL</p>
+                      <p class="detail-value" id="detailTertiaryValue">No URL</p>
+                    </div>
+                    <div class="detail-row-actions">
+                      <button type="button" class="row-action" id="detailTertiaryActionA" hidden aria-label="Tertiary row action"></button>
+                      <button type="button" class="row-action" id="detailTertiaryActionB" hidden aria-label="Tertiary secondary action"></button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
     </main>
 
     <script type="module" src="popup.js"></script>

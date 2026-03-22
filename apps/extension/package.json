@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "@vaultlite/contracts": "*"
+    "@vaultlite/contracts": "*",
+    "tldts": "^7.0.27"
   },
   "private": true
 }

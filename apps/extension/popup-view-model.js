@@ -33,6 +33,13 @@ export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }
 
+export function toggleSelectedItem(previousItemId, nextItemId) {
+  if (typeof nextItemId !== 'string' || nextItemId.length === 0) {
+    return previousItemId ?? null;
+  }
+  return previousItemId === nextItemId ? null : nextItemId;
+}
+
 export function resolvePopupPhase(state) {
   const knownPhase = state?.phase;
   if (
@@ -49,31 +56,6 @@ export function resolvePopupPhase(state) {
   return 'pairing_required';
 }
 
-function normalizeUrlForFavicon(rawUrl) {
-  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
-    return null;
-  }
-
-  try {
-    const trimmed = rawUrl.trim();
-    const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
-    return parsed.hostname || null;
-  } catch {
-    return null;
-  }
-}
-
-export function buildFaviconCandidates(rawUrl) {
-  const hostname = normalizeUrlForFavicon(rawUrl);
-  if (!hostname) {
-    return [];
-  }
-  return [
-    `https://${hostname}/favicon.ico`,
-    `https://${hostname}/apple-touch-icon.png`,
-  ];
-}
-
 export function toNavigableUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
     return null;
@@ -85,6 +67,63 @@ export function toNavigableUrl(rawUrl) {
   } catch {
     return null;
   }
+}
+
+function isSuggestedLoginForCurrentPage(item) {
+  if (!item || item.itemType !== 'login') {
+    return false;
+  }
+  const matchFlags =
+    item.matchFlags && typeof item.matchFlags === 'object' && !Array.isArray(item.matchFlags)
+      ? item.matchFlags
+      : {};
+  if (matchFlags.exactOrigin === true) {
+    return true;
+  }
+  if (typeof matchFlags.domainScore === 'number' && Number.isFinite(matchFlags.domainScore)) {
+    return matchFlags.domainScore > 0;
+  }
+  return false;
+}
+
+export function resolveRowQuickAction(input) {
+  const item = input?.item ?? null;
+  const hasNavigableUrl = Boolean(toNavigableUrl(item?.firstUrl ?? ''));
+  if (!hasNavigableUrl) {
+    return null;
+  }
+  const isSuggestedLogin = isSuggestedLoginForCurrentPage(item);
+  if (!isSuggestedLogin) {
+    return {
+      type: 'open-url',
+      disabled: false,
+      tooltip: 'Open site URL',
+    };
+  }
+  const pageEligible = input?.pageEligible === true;
+  const fillDisabledReason =
+    typeof input?.fillDisabledReason === 'string' && input.fillDisabledReason.trim().length > 0
+      ? input.fillDisabledReason.trim()
+      : null;
+  if (fillDisabledReason) {
+    return {
+      type: 'fill',
+      disabled: true,
+      tooltip: fillDisabledReason,
+    };
+  }
+  if (!pageEligible) {
+    return {
+      type: 'fill',
+      disabled: true,
+      tooltip: 'Fill unavailable on this page.',
+    };
+  }
+  return {
+    type: 'fill',
+    disabled: false,
+    tooltip: 'Fill credentials on this page',
+  };
 }
 
 export function parsePersistedPopupUiState(rawState) {

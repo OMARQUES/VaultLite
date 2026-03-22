@@ -27,6 +27,7 @@ import {
   normalizeVaultItemPayload,
 } from './runtime-crypto.js';
 import { diagnoseCredentialCache } from './credential-cache-diagnostics.js';
+import { buildFaviconCandidates } from './favicon-candidates.js';
 
 const CREDENTIAL_CACHE_TTL_MS = 60_000;
 const RESTORE_THROTTLE_MS = 15_000;
@@ -1127,25 +1128,6 @@ function truncateText(value, maxLength) {
     return value;
   }
   return `${value.slice(0, Math.max(1, maxLength - 1))}…`;
-}
-
-function buildFaviconCandidates(rawUrl) {
-  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
-    return [];
-  }
-  try {
-    const parsed = new URL(rawUrl.includes('://') ? rawUrl : `https://${rawUrl}`);
-    if (!parsed.hostname) {
-      return [];
-    }
-    const host = parsed.hostname;
-    return [
-      `https://${host}/favicon.ico`,
-      `https://${host}/apple-touch-icon.png`,
-    ];
-  } catch {
-    return [];
-  }
 }
 
 function listManualIconsView() {

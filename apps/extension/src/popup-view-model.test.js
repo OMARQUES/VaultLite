@@ -1,15 +1,17 @@
 import { describe, expect, test } from 'vitest';
 
 import {
-  buildFaviconCandidates,
   buildPersistedPopupUiState,
   buildCredentialMonogram,
   parsePersistedPopupUiState,
+  resolveRowQuickAction,
   resolvePopupPhase,
   toNavigableUrl,
   selectItemIdAfterRefresh,
+  toggleSelectedItem,
   shouldUseExpandedLayout,
 } from '../popup-view-model.js';
+import { buildFaviconCandidates } from '../favicon-candidates.js';
 
 describe('popup view model helpers', () => {
   test('keeps selected item when still present after refresh', () => {
@@ -43,11 +45,52 @@ describe('popup view model helpers', () => {
     expect(shouldUseExpandedLayout('item_1')).toBe(true);
   });
 
+  test('toggles selected item id when clicking the same row again', () => {
+    expect(toggleSelectedItem(null, 'item_1')).toBe('item_1');
+    expect(toggleSelectedItem('item_1', 'item_1')).toBeNull();
+    expect(toggleSelectedItem('item_1', 'item_2')).toBe('item_2');
+  });
+
+  test('prefers quick fill action for suggested login on eligible page', () => {
+    const action = resolveRowQuickAction({
+      item: {
+        itemType: 'login',
+        firstUrl: 'https://kabum.com.br',
+        matchFlags: { exactOrigin: true, domainScore: 5 },
+      },
+      pageEligible: true,
+      fillDisabledReason: null,
+    });
+    expect(action).toEqual({
+      type: 'fill',
+      disabled: false,
+      tooltip: 'Fill credentials on this page',
+    });
+  });
+
+  test('falls back to open-url quick action for non-suggested login', () => {
+    const action = resolveRowQuickAction({
+      item: {
+        itemType: 'login',
+        firstUrl: 'https://amazon.com.br',
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+      },
+      pageEligible: true,
+      fillDisabledReason: null,
+    });
+    expect(action).toEqual({
+      type: 'open-url',
+      disabled: false,
+      tooltip: 'Open site URL',
+    });
+  });
+
   test('builds favicon candidates for valid login urls', () => {
     const candidates = buildFaviconCandidates('https://portal.example.com/login');
     expect(candidates).toEqual([
       'https://portal.example.com/favicon.ico',
       'https://portal.example.com/apple-touch-icon.png',
+      'https://www.google.com/s2/favicons?domain=example.com&sz=64',
     ]);
   });
 

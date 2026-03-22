@@ -14,20 +14,28 @@ import {
   buildWebVaultUrl,
 } from './runtime-onboarding.js';
 import { canonicalizeServerUrl, isPageUrlEligibleForFill } from './runtime-common.js';
-import { shouldDisableControlWhileBusy } from './popup-behavior.js';
+import { describeFillResult, shouldDisableControlWhileBusy } from './popup-behavior.js';
 import {
   buildPersistedPopupUiState,
   buildCredentialMonogram,
   parsePersistedPopupUiState,
+  resolveRowQuickAction,
   resolvePopupPhase,
   selectItemIdAfterRefresh,
-  shouldUseExpandedLayout,
+  toggleSelectedItem,
   toNavigableUrl,
 } from './popup-view-model.js';
+import {
+  resolveLayoutMode,
+  shouldShowLockIcon,
+  shouldUseExpandedPopup,
+} from './popup-layout-state.js';
+import { createFilterDropdown } from './popup-filter-dropdown.js';
+import { buildDetailViewModel, pulseCopyIcon } from './popup-detail-actions.js';
+import { createPopupAutosizer } from './popup-autosize.js';
 
 const elements = {
   siteContext: byId('siteContext'),
-  popupHeader: byId('popupHeader'),
   statusAlert: byId('statusAlert'),
   pairingSection: byId('pairingSection'),
   pairingDescription: byId('pairingDescription'),
@@ -38,19 +46,24 @@ const elements = {
   unlockPasswordInput: byId('unlockPasswordInput'),
   linkPairBtn: byId('linkPairBtn'),
   unlockBtn: byId('unlockBtn'),
-  openWebSettingsPairingBtn: byId('openWebSettingsPairingBtn'),
   linkRequestPanel: byId('linkRequestPanel'),
   linkRequestCode: byId('linkRequestCode'),
   linkRequestPhrase: byId('linkRequestPhrase'),
   linkRequestExpires: byId('linkRequestExpires'),
   linkRequestStatus: byId('linkRequestStatus'),
+  pairingRecovery: byId('pairingRecovery'),
+  openApprovalBtn: byId('openApprovalBtn'),
   cancelLinkPairBtn: byId('cancelLinkPairBtn'),
-  openFullPageBtn: byId('openFullPageBtn'),
+  newItemBtn: byId('newItemBtn'),
   searchInput: byId('searchInput'),
-  suggestedChip: byId('suggestedChip'),
+  headerReadySearch: byId('headerReadySearch'),
+  filterDropdownButton: byId('filterDropdownButton'),
+  filterDropdownLabel: byId('filterDropdownLabel'),
+  filterDropdownIcon: byId('filterDropdownIcon'),
+  filterDropdownMenu: byId('filterDropdownMenu'),
   credentialsList: byId('credentialsList'),
   credentialDetails: byId('credentialDetails'),
-  credentialDetailsEmpty: byId('credentialDetailsEmpty'),
+  credentialDetailsLoading: byId('credentialDetailsLoading'),
   credentialDetailsContent: byId('credentialDetailsContent'),
   detailMonogram: byId('detailMonogram'),
   detailFavicon: byId('detailFavicon'),
@@ -62,13 +75,44 @@ const elements = {
   detailSecondaryValue: byId('detailSecondaryValue'),
   detailTertiaryLabel: byId('detailTertiaryLabel'),
   detailTertiaryValue: byId('detailTertiaryValue'),
-  detailCloseBtn: byId('detailCloseBtn'),
   detailActionPrimary: byId('detailActionPrimary'),
-  detailActionSecondary: byId('detailActionSecondary'),
-  detailActionTertiary: byId('detailActionTertiary'),
+  detailActionMenu: byId('detailActionMenu'),
+  detailMenuPopover: byId('detailMenuPopover'),
+  detailPrimaryRow: byId('detailPrimaryRow'),
+  detailPrimaryActionA: byId('detailPrimaryActionA'),
+  detailPrimaryActionB: byId('detailPrimaryActionB'),
+  detailSecondaryRow: byId('detailSecondaryRow'),
+  detailSecondaryActionA: byId('detailSecondaryActionA'),
+  detailSecondaryActionB: byId('detailSecondaryActionB'),
+  detailTertiaryRow: byId('detailTertiaryRow'),
+  detailTertiaryActionA: byId('detailTertiaryActionA'),
+  detailTertiaryActionB: byId('detailTertiaryActionB'),
   lockBtn: byId('lockBtn'),
-  openWebAppBtn: byId('openWebAppBtn'),
 };
+
+const detailRows = [
+  {
+    row: elements.detailPrimaryRow,
+    label: elements.detailPrimaryLabel,
+    value: elements.detailPrimaryValue,
+    actionA: elements.detailPrimaryActionA,
+    actionB: elements.detailPrimaryActionB,
+  },
+  {
+    row: elements.detailSecondaryRow,
+    label: elements.detailSecondaryLabel,
+    value: elements.detailSecondaryValue,
+    actionA: elements.detailSecondaryActionA,
+    actionB: elements.detailSecondaryActionB,
+  },
+  {
+    row: elements.detailTertiaryRow,
+    label: elements.detailTertiaryLabel,
+    value: elements.detailTertiaryValue,
+    actionA: elements.detailTertiaryActionA,
+    actionB: elements.detailTertiaryActionB,
+  },
+];
 
 let currentState = null;
 let currentItems = [];
@@ -82,6 +126,17 @@ let searchDebounceTimer = null;
 let linkPollingTimer = null;
 let activeLinkRequest = null;
 let popupUiStateHydrated = false;
+let vaultLoading = false;
+let detailLoading = false;
+let listErrorMessage = '';
+let currentLayoutMode = 'pairing';
+let filterDropdown = null;
+let showApprovalRecovery = false;
+let pairingInProgress = false;
+let activePageUrl = '';
+let activePageEligible = false;
+let fillBlockedState = null;
+let popupAutosizer = null;
 const POPUP_UI_STATE_STORAGE_KEY = 'vaultlite.popup.ui.v1';
 const FALLBACK_PAIRING_STATE = {
   phase: 'pairing_required',
@@ -113,6 +168,7 @@ function clearLinkPollingTimer() {
 
 function clearLinkRequestState() {
   activeLinkRequest = null;
+  showApprovalRecovery = false;
   clearLinkPollingTimer();
 }
 
@@ -142,14 +198,36 @@ function syncLinkRequestFromState(nextState) {
 function renderLinkRequestPanel() {
   if (!activeLinkRequest || elements.pairingSection.hidden) {
     elements.linkRequestPanel.hidden = true;
+    elements.pairingRecovery.hidden = true;
+    document.body.dataset.linkRequest = 'closed';
+    popupAutosizer?.schedule();
     return;
   }
+  document.body.dataset.linkRequest = 'open';
   elements.linkRequestPanel.hidden = false;
   elements.linkRequestCode.textContent = activeLinkRequest.shortCode ?? '—';
   elements.linkRequestPhrase.textContent = activeLinkRequest.fingerprintPhrase ?? '—';
   elements.linkRequestExpires.textContent = formatTime(activeLinkRequest.expiresAt ?? '');
   elements.linkRequestStatus.textContent =
     activeLinkRequest.message ?? 'Waiting for approval in trusted surface settings...';
+  if (pairingInProgress && !activeLinkRequest.message) {
+    elements.linkRequestStatus.textContent = 'Starting trusted-device request...';
+  }
+  elements.pairingRecovery.hidden = !showApprovalRecovery;
+  popupAutosizer?.schedule();
+}
+
+function applyLayoutState(phase) {
+  currentLayoutMode = resolveLayoutMode(phase);
+  document.body.dataset.layout = currentLayoutMode;
+  if (currentLayoutMode !== 'pairing') {
+    document.body.dataset.linkRequest = 'closed';
+  }
+  const expanded = shouldUseExpandedPopup(currentLayoutMode, selectedItemId);
+  document.body.dataset.detail = expanded ? 'open' : 'closed';
+  elements.lockBtn.hidden = !shouldShowLockIcon(currentLayoutMode);
+  elements.headerReadySearch.hidden = currentLayoutMode !== 'ready';
+  popupAutosizer?.schedule();
 }
 
 function setBusy(nextBusy) {
@@ -157,19 +235,23 @@ function setBusy(nextBusy) {
   const controls = [
     ['linkPairBtn', elements.linkPairBtn],
     ['unlockBtn', elements.unlockBtn],
-    ['openWebSettingsPairingBtn', elements.openWebSettingsPairingBtn],
+    ['openApprovalBtn', elements.openApprovalBtn],
     ['cancelLinkPairBtn', elements.cancelLinkPairBtn],
-    ['openFullPageBtn', elements.openFullPageBtn],
     ['searchInput', elements.searchInput],
     ['detailActionPrimary', elements.detailActionPrimary],
-    ['detailActionSecondary', elements.detailActionSecondary],
-    ['detailActionTertiary', elements.detailActionTertiary],
+    ['detailActionMenu', elements.detailActionMenu],
     ['lockBtn', elements.lockBtn],
-    ['openWebAppBtn', elements.openWebAppBtn],
   ];
   controls.forEach((control) => {
     const [controlId, controlNode] = control;
     controlNode.disabled = shouldDisableControlWhileBusy(controlId, nextBusy);
+  });
+  if (filterDropdown) {
+    filterDropdown.setDisabled(shouldDisableControlWhileBusy('filterDropdown', nextBusy));
+  }
+  const rowActionButtons = document.querySelectorAll('.row-action');
+  rowActionButtons.forEach((button) => {
+    button.disabled = nextBusy;
   });
 }
 
@@ -178,6 +260,7 @@ function setAlert(kind, message) {
     elements.statusAlert.hidden = true;
     elements.statusAlert.textContent = '';
     elements.statusAlert.className = 'alert alert--warning';
+    popupAutosizer?.schedule();
     return;
   }
 
@@ -185,6 +268,7 @@ function setAlert(kind, message) {
   elements.statusAlert.hidden = false;
   elements.statusAlert.className = `alert alert--${tone}`;
   elements.statusAlert.textContent = message;
+  popupAutosizer?.schedule();
 }
 
 function toggleSections(state) {
@@ -265,32 +349,22 @@ function getCredentialByItemId(itemId) {
   return currentItems.find((item) => item.itemId === itemId) ?? null;
 }
 
-function renderFilterChips() {
-  const chipNodes = document.querySelectorAll('[data-type-filter]');
-  chipNodes.forEach((node) => {
-    if (!(node instanceof HTMLButtonElement)) {
-      return;
-    }
-    const nextFilter = node.dataset.typeFilter ?? 'all';
-    node.classList.toggle('is-active', nextFilter === activeTypeFilter);
-  });
-  elements.suggestedChip.classList.toggle('is-active', suggestedOnly);
+function toggleSelectedItemInState(itemId) {
+  selectedItemId = toggleSelectedItem(selectedItemId, itemId);
 }
 
-function itemTypeLabel(itemType) {
-  if (itemType === 'login') {
-    return 'Login';
+function currentFilterSelectionValue() {
+  if (suggestedOnly) {
+    return 'suggested';
   }
-  if (itemType === 'card') {
-    return 'Card';
+  return activeTypeFilter;
+}
+
+function renderFilterDropdown() {
+  if (!filterDropdown) {
+    return;
   }
-  if (itemType === 'document') {
-    return 'Document';
-  }
-  if (itemType === 'secure_note') {
-    return 'Secure note';
-  }
-  return 'Item';
+  filterDropdown.setValue(currentFilterSelectionValue());
 }
 
 function activeFaviconUrl(item) {
@@ -321,91 +395,126 @@ function buildListLeadingVisual(item) {
   `;
 }
 
-function renderCredentialDetails() {
-  const selectedItem = getSelectedCredential();
-  const useExpandedLayout = shouldUseExpandedLayout(selectedItemId);
-  document.body.classList.toggle('popup-expanded', useExpandedLayout);
-  const disableActions =
-    !selectedItem ||
-    shouldDisableControlWhileBusy('detailActionPrimary', inFlight) ||
-    shouldDisableControlWhileBusy('detailActionSecondary', inFlight) ||
-    shouldDisableControlWhileBusy('detailActionTertiary', inFlight);
+function actionIconSvg(actionId) {
+  if (
+    actionId === 'copy_username' ||
+    actionId === 'copy_password' ||
+    actionId === 'copy_url' ||
+    actionId === 'copy_card_number' ||
+    actionId === 'copy_card_cvv' ||
+    actionId === 'copy_card_expiry' ||
+    actionId === 'copy_note' ||
+    actionId === 'copy_content' ||
+    actionId === 'copy_title'
+  ) {
+    return '<svg viewBox="0 0 24 24"><path d="M9 9h10v10H9z"></path><path d="M5 15H4V5h10v1"></path></svg>';
+  }
+  if (actionId === 'open_url' || actionId === 'open_item_web') {
+    return '<svg viewBox="0 0 24 24"><path d="M7 17l10-10"></path><path d="M10 7h7v7"></path><path d="M7 7h2"></path><path d="M7 7v2"></path></svg>';
+  }
+  return '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8"></circle></svg>';
+}
 
-  if (!selectedItem) {
-    elements.credentialDetailsEmpty.hidden = false;
-    elements.credentialDetailsContent.hidden = true;
-    elements.detailActionPrimary.disabled = disableActions;
-    elements.detailActionSecondary.disabled = disableActions;
-    elements.detailActionTertiary.disabled = disableActions;
+function hideRowAction(button) {
+  button.hidden = true;
+  button.dataset.action = '';
+  button.innerHTML = '';
+  button.removeAttribute('title');
+  button.removeAttribute('aria-label');
+}
+
+function showRowAction(button, action) {
+  if (!action) {
+    hideRowAction(button);
+    return;
+  }
+  button.hidden = false;
+  button.dataset.action = action.id;
+  button.title = action.label;
+  button.setAttribute('aria-label', action.label);
+  button.innerHTML = actionIconSvg(action.id);
+}
+
+function configureDetailRow(nodes, rowModel) {
+  if (!rowModel) {
+    nodes.row.hidden = true;
+    nodes.row.dataset.defaultAction = '';
+    nodes.row.classList.remove('is-clickable');
+    hideRowAction(nodes.actionA);
+    hideRowAction(nodes.actionB);
     return;
   }
 
-  elements.credentialDetailsEmpty.hidden = true;
-  elements.credentialDetailsContent.hidden = false;
+  nodes.row.hidden = false;
+  nodes.label.textContent = rowModel.label;
+  nodes.value.textContent = rowModel.value || '—';
+  nodes.value.classList.toggle('detail-password', rowModel.password === true);
+
+  const defaultAction = rowModel.defaultAction || '';
+  nodes.row.dataset.defaultAction = defaultAction;
+  nodes.row.classList.toggle('is-clickable', Boolean(defaultAction));
+
+  showRowAction(nodes.actionA, rowModel.actions?.[0]);
+  showRowAction(nodes.actionB, rowModel.actions?.[1]);
+}
+
+function closeDetailMenu() {
+  elements.detailMenuPopover.hidden = true;
+}
+
+function toggleDetailMenu() {
+  elements.detailMenuPopover.hidden = !elements.detailMenuPopover.hidden;
+}
+
+function renderCredentialDetails() {
+  const selectedItem = getSelectedCredential();
+  applyLayoutState(resolvePopupPhase(currentState));
+  const disableActions = !selectedItem || inFlight;
+
+  if (!selectedItem) {
+    elements.credentialDetailsLoading.hidden = true;
+    elements.credentialDetailsContent.hidden = true;
+    elements.detailActionPrimary.disabled = true;
+    elements.detailActionMenu.disabled = true;
+    detailRows.forEach((nodes) => {
+      configureDetailRow(nodes, null);
+    });
+    closeDetailMenu();
+    popupAutosizer?.schedule();
+    return;
+  }
+
+  elements.credentialDetailsLoading.hidden = !detailLoading;
+  elements.credentialDetailsContent.hidden = detailLoading;
+  if (detailLoading) {
+    closeDetailMenu();
+    popupAutosizer?.schedule();
+    return;
+  }
+
+  const detailModel = buildDetailViewModel(selectedItem);
   elements.detailMonogram.textContent = buildCredentialMonogram(selectedItem.title);
   const detailFaviconUrl = activeFaviconUrl(selectedItem);
   if (detailFaviconUrl) {
     elements.detailFavicon.hidden = false;
     elements.detailFavicon.src = detailFaviconUrl;
-    elements.detailMonogram.classList.add('is-hidden');
+    elements.detailMonogram.hidden = true;
   } else {
     elements.detailFavicon.hidden = true;
     elements.detailFavicon.removeAttribute('src');
-    elements.detailMonogram.classList.remove('is-hidden');
+    elements.detailMonogram.hidden = false;
   }
-  elements.detailType.textContent = itemTypeLabel(selectedItem.itemType);
-  elements.detailTitle.textContent = selectedItem.title || 'Untitled item';
-
-  const loginLayout = selectedItem.itemType === 'login';
-  const cardLayout = selectedItem.itemType === 'card';
-  const noteLayout = selectedItem.itemType === 'secure_note' || selectedItem.itemType === 'document';
-
-  if (loginLayout) {
-    elements.detailPrimaryLabel.textContent = 'Username';
-    elements.detailPrimaryValue.textContent = selectedItem.subtitle || '—';
-    elements.detailSecondaryLabel.textContent = 'Password';
-    elements.detailSecondaryValue.textContent = '••••••••••••';
-    elements.detailTertiaryLabel.textContent = 'URL';
-    elements.detailTertiaryValue.textContent = selectedItem.firstUrl || selectedItem.urlHostSummary || 'No URL';
-    elements.detailActionPrimary.textContent = 'Fill';
-    elements.detailActionSecondary.textContent = 'Copy username';
-    elements.detailActionTertiary.textContent = 'Copy password';
-  } else if (cardLayout) {
-    elements.detailPrimaryLabel.textContent = 'Card';
-    elements.detailPrimaryValue.textContent = selectedItem.subtitle || '••••';
-    elements.detailSecondaryLabel.textContent = 'Security code';
-    elements.detailSecondaryValue.textContent = '•••';
-    elements.detailTertiaryLabel.textContent = 'Type';
-    elements.detailTertiaryValue.textContent = 'Card';
-    elements.detailActionPrimary.textContent = 'Copy number';
-    elements.detailActionSecondary.textContent = 'Copy CVV';
-    elements.detailActionTertiary.textContent = 'Copy expiry';
-  } else if (noteLayout) {
-    elements.detailPrimaryLabel.textContent = 'Preview';
-    elements.detailPrimaryValue.textContent = selectedItem.subtitle || '—';
-    elements.detailSecondaryLabel.textContent = 'Type';
-    elements.detailSecondaryValue.textContent = itemTypeLabel(selectedItem.itemType);
-    elements.detailTertiaryLabel.textContent = 'Open';
-    elements.detailTertiaryValue.textContent = 'Use Open in web app for full details.';
-    elements.detailActionPrimary.textContent = 'Open in web';
-    elements.detailActionSecondary.textContent = 'Copy title';
-    elements.detailActionTertiary.textContent =
-      selectedItem.itemType === 'document' ? 'Copy content' : 'Copy note';
-  } else {
-    elements.detailPrimaryLabel.textContent = 'Value';
-    elements.detailPrimaryValue.textContent = selectedItem.subtitle || '—';
-    elements.detailSecondaryLabel.textContent = 'Type';
-    elements.detailSecondaryValue.textContent = itemTypeLabel(selectedItem.itemType);
-    elements.detailTertiaryLabel.textContent = 'Info';
-    elements.detailTertiaryValue.textContent = selectedItem.urlHostSummary || '—';
-    elements.detailActionPrimary.textContent = 'Open in web';
-    elements.detailActionSecondary.textContent = 'Copy title';
-    elements.detailActionTertiary.textContent = 'Copy';
-  }
+  elements.detailType.textContent = detailModel.typeLabel;
+  elements.detailTitle.textContent = detailModel.title;
+  elements.detailActionPrimary.textContent = detailModel.primaryAction.label;
+  elements.detailActionPrimary.dataset.action = detailModel.primaryAction.id;
+  detailRows.forEach((nodes, index) => {
+    configureDetailRow(nodes, detailModel.rows[index]);
+  });
 
   elements.detailActionPrimary.disabled = disableActions;
-  elements.detailActionSecondary.disabled = disableActions;
-  elements.detailActionTertiary.disabled = disableActions;
+  elements.detailActionMenu.disabled = disableActions;
+  popupAutosizer?.schedule();
 }
 
 function renderCredentialList(items) {
@@ -414,32 +523,112 @@ function renderCredentialList(items) {
 
   if (currentItems.length === 0) {
     selectedItemId = null;
-    elements.credentialsList.innerHTML = '<p class="empty-state">No credentials found for current filters.</p>';
+    if (vaultLoading) {
+      elements.credentialsList.innerHTML = '<p class="empty-state">Loading vault…</p>';
+      renderCredentialDetails();
+      popupAutosizer?.schedule();
+      return;
+    }
+
+    if (listErrorMessage) {
+      elements.credentialsList.innerHTML = `
+        <div class="empty-state">
+          <p>${sanitizeText(listErrorMessage)}</p>
+          <button type="button" data-empty-action="retry-list">Retry</button>
+        </div>
+      `;
+      renderCredentialDetails();
+      popupAutosizer?.schedule();
+      return;
+    }
+
+    if (elements.searchInput.value.trim().length > 0) {
+      elements.credentialsList.innerHTML = `
+        <div class="empty-state">
+          <p>No results for this search.</p>
+          <button type="button" data-empty-action="clear-search">Clear search</button>
+        </div>
+      `;
+      renderCredentialDetails();
+      popupAutosizer?.schedule();
+      return;
+    }
+
+    if (suggestedOnly) {
+      elements.credentialsList.innerHTML = `
+        <div class="empty-state">
+          <p>No suggested items for this site.</p>
+          <button type="button" data-empty-action="show-all">Show all items</button>
+        </div>
+      `;
+      renderCredentialDetails();
+      return;
+    }
+
+    elements.credentialsList.innerHTML = `
+      <div class="empty-state">
+        <p>No items in your vault yet.</p>
+        <button type="button" data-empty-action="open-web-vault">Create in web app</button>
+      </div>
+    `;
     renderCredentialDetails();
+    popupAutosizer?.schedule();
     return;
   }
 
   const rows = currentItems
     .map((item) => {
       const selectedClass = item.itemId === selectedItemId ? ' is-selected' : '';
-      const goUrl = toNavigableUrl(item.firstUrl);
-      const goDisabledAttr = goUrl ? '' : 'disabled';
+      const quickAction = resolveRowQuickAction({
+        item,
+        pageEligible: activePageEligible,
+        fillDisabledReason:
+          fillBlockedState && fillBlockedState.pageUrl === activePageUrl ? fillBlockedState.reason : null,
+      });
+      const rowClass = quickAction ? ' has-row-action' : '';
+      let sideAction = '';
+      if (quickAction?.type === 'open-url') {
+        sideAction = `
+          <button
+            type="button"
+            class="vault-row-side-hit"
+            data-row-action="open-url"
+            data-item-id="${sanitizeText(item.itemId)}"
+            title="${sanitizeText(quickAction.tooltip)}"
+            aria-label="${sanitizeText(quickAction.tooltip)}"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>
+          </button>
+        `;
+      } else if (quickAction?.type === 'fill') {
+        const disabledAttr = quickAction.disabled ? 'disabled' : '';
+        sideAction = `
+          <button
+            type="button"
+            class="vault-row-side-hit is-fill"
+            data-row-action="quick-fill"
+            data-item-id="${sanitizeText(item.itemId)}"
+            title="${sanitizeText(quickAction.tooltip)}"
+            aria-label="${sanitizeText(quickAction.tooltip)}"
+            ${disabledAttr}
+          >
+            Fill
+          </button>
+        `;
+      }
       return `
-        <article class="vault-row${selectedClass}" data-item-id="${sanitizeText(item.itemId)}">
-          <div class="vault-row-content">
-            ${buildListLeadingVisual(item)}
-            <div class="vault-row-main">
-              <p class="vault-row-title">${sanitizeText(item.title || 'Untitled item')}</p>
-              <p class="vault-row-sub">${sanitizeText(item.subtitle || '—')}</p>
-              <p class="vault-row-sub-2">${sanitizeText(item.urlHostSummary || 'No URL')}</p>
+        <article class="vault-row${selectedClass}${rowClass}" data-item-id="${sanitizeText(item.itemId)}" tabindex="0">
+          <div class="vault-row-main-hit" data-row-action="show-details" data-item-id="${sanitizeText(item.itemId)}">
+            <div class="vault-row-content">
+              ${buildListLeadingVisual(item)}
+              <div class="vault-row-main">
+                <p class="vault-row-title">${sanitizeText(item.title || 'Untitled item')}</p>
+                <p class="vault-row-sub">${sanitizeText(item.subtitle || '—')}</p>
+                <p class="vault-row-sub-2">${sanitizeText(item.urlHostSummary || 'No URL')}</p>
+              </div>
             </div>
           </div>
-          <div class="vault-row-overlay">
-            <div class="vault-row-actions">
-              <button type="button" data-row-action="open-url" data-item-id="${sanitizeText(item.itemId)}" ${goDisabledAttr}>Go</button>
-              <button type="button" data-row-action="show-details" data-item-id="${sanitizeText(item.itemId)}">Details</button>
-            </div>
-          </div>
+          ${sideAction}
         </article>
       `;
     })
@@ -448,15 +637,20 @@ function renderCredentialList(items) {
   elements.credentialsList.innerHTML = rows;
   renderCredentialDetails();
   persistPopupUiState();
+  popupAutosizer?.schedule();
 }
 
 function renderState(payload) {
   currentState = payload.state;
-  const resolvedPhase = resolvePopupPhase(currentState);
-  document.body.classList.toggle('ready-mode', resolvedPhase === 'ready');
-  if (elements.popupHeader) {
-    elements.popupHeader.hidden = resolvedPhase === 'ready';
+  const nextPageUrl = typeof payload.page?.url === 'string' ? payload.page.url : '';
+  const nextPageEligible = payload.page?.eligible === true;
+  if (nextPageUrl !== activePageUrl) {
+    activePageUrl = nextPageUrl;
+    fillBlockedState = null;
   }
+  activePageEligible = nextPageEligible;
+  const resolvedPhase = resolvePopupPhase(currentState);
+  applyLayoutState(resolvedPhase);
   elements.deviceNameInput.value = currentState?.deviceName ?? 'VaultLite Extension';
   if (document.activeElement !== elements.serverUrlInput) {
     elements.serverUrlInput.value = buildServerUrlSuggestion(currentState?.serverOrigin);
@@ -478,11 +672,19 @@ function renderState(payload) {
     elements.siteContext.textContent += ` · Session until ${expiry}`;
   }
 
-  const shouldShowErrorBanner = Boolean(currentState?.lastError) && currentState?.serverOrigin !== null;
+  const shouldShowErrorBanner =
+    resolvedPhase === 'ready' &&
+    Boolean(currentState?.lastError) &&
+    currentState?.serverOrigin !== null;
   if (shouldShowErrorBanner) {
     setAlert('warning', currentState.lastError);
   } else {
-    setAlert('warning', '');
+    const existingWarning = elements.statusAlert.classList.contains('alert--warning');
+    if (resolvedPhase !== 'ready' && existingWarning) {
+      setAlert('warning', '');
+    } else if (resolvedPhase === 'ready') {
+      setAlert('warning', '');
+    }
   }
 
   if (payload.items) {
@@ -490,10 +692,11 @@ function renderState(payload) {
   } else if (resolvedPhase !== 'ready') {
     selectedItemId = null;
     renderCredentialList([]);
-    document.body.classList.remove('popup-expanded');
   }
-  renderFilterChips();
+  renderFilterDropdown();
   renderLinkRequestPanel();
+  closeDetailMenu();
+  popupAutosizer?.schedule();
 }
 
 async function ensureServerOriginConfigured() {
@@ -544,6 +747,11 @@ async function ensureServerOriginConfigured() {
 }
 
 async function refreshStateAndMaybeList() {
+  vaultLoading = true;
+  detailLoading = Boolean(selectedItemId);
+  listErrorMessage = '';
+  renderCredentialList(currentItems);
+
   let stateResponse;
   let localPage = { url: '', eligible: false };
   try {
@@ -569,6 +777,8 @@ async function refreshStateAndMaybeList() {
     localPage = { url: '', eligible: false };
   }
   if (!stateResponse.ok) {
+    vaultLoading = false;
+    detailLoading = false;
     setAlert('danger', stateResponse.message || 'Failed to refresh extension state.');
     return;
   }
@@ -582,11 +792,17 @@ async function refreshStateAndMaybeList() {
     });
 
     if (!listResponse.ok) {
+      vaultLoading = false;
+      detailLoading = false;
+      listErrorMessage = 'Could not load vault.';
       renderState({ state: stateResponse.state, page: {}, items: [] });
-      setAlert('danger', listResponse.message || 'Failed to load credentials.');
+      setAlert('danger', listResponse.message || 'Could not load vault.');
       return;
     }
 
+    vaultLoading = false;
+    detailLoading = false;
+    listErrorMessage = '';
     renderState({
       state: stateResponse.state,
       page: listResponse.page ?? localPage,
@@ -595,6 +811,8 @@ async function refreshStateAndMaybeList() {
     return;
   }
 
+  vaultLoading = false;
+  detailLoading = false;
   renderState({
     state: stateResponse.state,
     page: localPage,
@@ -626,6 +844,7 @@ function scheduleLinkPolling(delayMs) {
 
 async function pollLinkPairingStatus() {
   if (!activeLinkRequest?.requestId) {
+    pairingInProgress = false;
     return;
   }
   const response = await sendBackgroundCommand({
@@ -634,6 +853,7 @@ async function pollLinkPairingStatus() {
   });
   if (!response.ok) {
     clearLinkRequestState();
+    pairingInProgress = false;
     renderLinkRequestPanel();
     setAlert('danger', response.message || 'Trusted-device connection failed.');
     await refreshStateAndMaybeList();
@@ -642,13 +862,16 @@ async function pollLinkPairingStatus() {
 
   if (response.completed) {
     clearLinkRequestState();
-    setAlert('success', response.message || 'Extension connected. Unlock this device to continue.');
+    pairingInProgress = false;
+    showApprovalRecovery = false;
+    setAlert('warning', '');
     await refreshStateAndMaybeList();
     return;
   }
 
   if (response.linkRequest) {
     activeLinkRequest = response.linkRequest;
+    pairingInProgress = true;
     renderLinkRequestPanel();
     scheduleLinkPolling(normalizeIntervalSeconds(response.linkRequest.interval) * 1000);
   } else {
@@ -657,6 +880,8 @@ async function pollLinkPairingStatus() {
 
   if (response.terminal) {
     clearLinkRequestState();
+    pairingInProgress = false;
+    showApprovalRecovery = false;
     renderLinkRequestPanel();
     setAlert('warning', response.message || 'Trusted-device request finished.');
     await refreshStateAndMaybeList();
@@ -664,41 +889,60 @@ async function pollLinkPairingStatus() {
 }
 
 async function startLinkPairing() {
-  const serverSetup = await ensureServerOriginConfigured();
-  if (!serverSetup.ok) {
-    setAlert('danger', serverSetup.message || 'Could not configure server URL.');
-    return;
-  }
-
-  clearLinkRequestState();
-  renderLinkRequestPanel();
-
-  const response = await sendBackgroundCommand({
-    type: 'vaultlite.start_link_pairing',
-    deviceNameHint: elements.deviceNameInput.value,
-  });
-  if (!response.ok) {
-    setAlert('danger', response.message || 'Could not start trusted-device connection.');
-    if (shouldForceStateRefreshAfterError(response.code)) {
-      await refreshStateAndMaybeList();
+  showApprovalRecovery = false;
+  pairingInProgress = true;
+  const previousLabel = elements.linkPairBtn.textContent;
+  elements.linkPairBtn.textContent = 'Connecting...';
+  try {
+    const serverSetup = await ensureServerOriginConfigured();
+    if (!serverSetup.ok) {
+      pairingInProgress = false;
+      setAlert('danger', serverSetup.message || 'Could not configure server URL.');
+      return;
     }
-    return;
-  }
 
-  if (!response.linkRequest) {
-    setAlert('danger', 'Trusted-device connection returned an invalid response.');
-    return;
-  }
+    clearLinkRequestState();
+    renderLinkRequestPanel();
 
-  activeLinkRequest = response.linkRequest;
-  renderLinkRequestPanel();
-  setAlert('warning', response.linkRequest.message || 'Approve this request in trusted surface settings.');
-  scheduleLinkPolling(normalizeIntervalSeconds(response.linkRequest.interval) * 1000);
-  await openWebSettings({ autoFromLinkPair: true });
+    const response = await sendBackgroundCommand({
+      type: 'vaultlite.start_link_pairing',
+      deviceNameHint: elements.deviceNameInput.value,
+    });
+    if (!response.ok) {
+      pairingInProgress = false;
+      setAlert('danger', response.message || 'Could not start trusted-device connection.');
+      if (shouldForceStateRefreshAfterError(response.code)) {
+        await refreshStateAndMaybeList();
+      }
+      return;
+    }
+
+    if (!response.linkRequest) {
+      pairingInProgress = false;
+      setAlert('danger', 'Trusted-device connection returned an invalid response.');
+      return;
+    }
+
+    activeLinkRequest = response.linkRequest;
+    renderLinkRequestPanel();
+    setAlert('warning', response.linkRequest.message || 'Approve this request in trusted surface settings.');
+    scheduleLinkPolling(normalizeIntervalSeconds(response.linkRequest.interval) * 1000);
+    const openResult = await openWebSettings({ autoFromLinkPair: true, silentOnError: true });
+    if (!openResult?.ok) {
+      showApprovalRecovery = true;
+      renderLinkRequestPanel();
+      setAlert('warning', 'Could not open approval page automatically. Use Open approval page.');
+    }
+    pairingInProgress = false;
+  } finally {
+    elements.linkPairBtn.textContent = previousLabel;
+  }
 }
 
 async function cancelLinkPairing() {
   clearLinkRequestState();
+  showApprovalRecovery = false;
+  pairingInProgress = false;
   renderLinkRequestPanel();
   await sendBackgroundCommand({
     type: 'vaultlite.cancel_link_pairing',
@@ -713,12 +957,17 @@ async function handleUnlock() {
     return;
   }
 
+  const previousLabel = elements.unlockBtn.textContent;
+  elements.unlockBtn.textContent = 'Unlocking...';
+  elements.unlockPasswordInput.disabled = true;
   const response = await sendBackgroundCommand({
     type: 'vaultlite.unlock_local',
     password,
   });
 
   if (!response.ok) {
+    elements.unlockBtn.textContent = previousLabel;
+    elements.unlockPasswordInput.disabled = false;
     setAlert('danger', response.message || 'Unlock failed.');
     if (shouldForceStateRefreshAfterError(response.code)) {
       await refreshStateAndMaybeList();
@@ -727,29 +976,38 @@ async function handleUnlock() {
   }
 
   elements.unlockPasswordInput.value = '';
+  elements.unlockBtn.textContent = previousLabel;
+  elements.unlockPasswordInput.disabled = false;
   setAlert('success', 'Extension unlocked.');
   await refreshStateAndMaybeList();
 }
 
 async function openWebSettings(options = {}) {
+  const silent = options?.silentOnError === true;
   const candidate = elements.serverUrlInput.value?.trim();
   let serverOrigin = currentState?.serverOrigin ?? null;
   if (!serverOrigin && candidate) {
     try {
       serverOrigin = canonicalizeServerUrl(candidate);
     } catch {
-      setAlert('warning', 'Set a valid server URL first.');
-      return;
+      if (!silent) {
+        setAlert('warning', 'Set a valid server URL first.');
+      }
+      return { ok: false, reason: 'invalid_server_url' };
     }
   }
   if (!serverOrigin) {
-    setAlert('warning', 'Configure server URL first.');
-    return;
+    if (!silent) {
+      setAlert('warning', 'Configure server URL first.');
+    }
+    return { ok: false, reason: 'missing_server_url' };
   }
   const webSettingsUrl = buildWebSettingsUrl(serverOrigin);
   if (!webSettingsUrl) {
-    setAlert('warning', 'Could not resolve web app URL from server URL.');
-    return;
+    if (!silent) {
+      setAlert('warning', 'Could not resolve web app URL from server URL.');
+    }
+    return { ok: false, reason: 'invalid_web_settings_url' };
   }
   const parsed = new URL(webSettingsUrl);
   if (activeLinkRequest?.shortCode) {
@@ -771,15 +1029,27 @@ async function openWebSettings(options = {}) {
           activeUrl.pathname === targetParsed.pathname &&
           activeCode === targetCode;
         if (alreadyOnTarget) {
-          return;
+          return { ok: true, alreadyOnTarget: true };
         }
       }
     } catch {
       // Fall through and open web settings tab.
     }
   }
-
-  void chrome.tabs.create({ url: targetUrl });
+  try {
+    await Promise.race([
+      chrome.tabs.create({ url: targetUrl }),
+      new Promise((_, reject) => {
+        window.setTimeout(() => reject(new Error('approval_open_timeout')), 2000);
+      }),
+    ]);
+    return { ok: true };
+  } catch {
+    if (!silent) {
+      setAlert('warning', 'Could not open approval page automatically.');
+    }
+    return { ok: false, reason: 'approval_open_failed' };
+  }
 }
 
 function openWebApp() {
@@ -811,8 +1081,7 @@ async function lockExtension() {
     setAlert('danger', response.message || 'Could not lock extension.');
     return;
   }
-  setAlert('success', 'Extension locked.');
-  await refreshStateAndMaybeList();
+  window.close();
 }
 
 async function triggerFill(itemId) {
@@ -825,31 +1094,25 @@ async function triggerFill(itemId) {
     return;
   }
 
-  const result = response.result;
-  if (result === 'filled') {
-    setAlert('success', 'Filled username and password.');
+  const outcome = describeFillResult(response.result);
+  if (outcome.disableFillReason) {
+    fillBlockedState = {
+      pageUrl: activePageUrl,
+      reason: outcome.disableFillReason,
+    };
+    renderCredentialList(currentItems);
     return;
   }
-  if (result === 'credential_not_allowed_for_site') {
-    setAlert('warning', 'Credential not allowed for this site.');
-    return;
+  if (fillBlockedState && fillBlockedState.pageUrl === activePageUrl) {
+    fillBlockedState = null;
+    renderCredentialList(currentItems);
   }
-  if (result === 'page_changed_try_again') {
-    setAlert('warning', 'Page changed during fill. Try again.');
-    return;
+  if (outcome.alert) {
+    setAlert(outcome.alert.level, outcome.alert.message);
   }
-  if (result === 'unsupported_form') {
-    setAlert('warning', 'Manual fill unavailable for this form.');
-    return;
-  }
-  if (result === 'no_eligible_fields') {
-    setAlert('warning', 'No supported fields found on this page.');
-    return;
-  }
-  setAlert('warning', 'Manual fill unavailable on this page.');
 }
 
-async function copyField(itemId, field) {
+async function copyField(itemId, field, sourceButton = null) {
   const response = await sendBackgroundCommand({
     type: 'vaultlite.get_credential_field',
     itemId,
@@ -862,32 +1125,40 @@ async function copyField(itemId, field) {
 
   try {
     await copyToClipboard(response.value || '');
-    if (field === 'password' || field === 'card_cvv') {
-      setAlert('success', 'Secret copied.');
-    } else if (field === 'card_number') {
-      setAlert('success', 'Card number copied.');
-    } else if (field === 'card_expiry') {
-      setAlert('success', 'Expiry copied.');
-    } else if (field === 'content') {
-      setAlert('success', 'Content copied.');
-    } else if (field === 'title') {
-      setAlert('success', 'Title copied.');
-    } else {
-      setAlert('success', 'Value copied.');
+    if (sourceButton) {
+      pulseCopyIcon(sourceButton);
     }
   } catch {
     setAlert('danger', 'Clipboard write failed on this browser context.');
   }
 }
 
-async function openCredentialUrl(itemId) {
+async function copyRawValue(rawValue, sourceButton = null) {
+  if (!rawValue) {
+    setAlert('warning', 'No value available to copy.');
+    return;
+  }
+  try {
+    await copyToClipboard(rawValue);
+    if (sourceButton) {
+      pulseCopyIcon(sourceButton);
+    }
+  } catch {
+    setAlert('danger', 'Clipboard write failed on this browser context.');
+  }
+}
+
+async function openCredentialUrl(itemId, options = {}) {
   const selected = getCredentialByItemId(itemId);
   const candidateUrl = toNavigableUrl(selected?.firstUrl ?? '');
   if (!candidateUrl) {
     setAlert('warning', 'This credential has no valid URL.');
     return;
   }
-  await chrome.tabs.create({ url: candidateUrl });
+  await chrome.tabs.create({ url: candidateUrl, active: true });
+  if (options.closePopup) {
+    window.close();
+  }
 }
 
 function buildWebItemUrl(itemId) {
@@ -921,71 +1192,116 @@ async function openItemInWeb(itemId) {
   await chrome.tabs.create({ url });
 }
 
-async function handleDetailAction(slot) {
+async function handleDetailAction(action, sourceButton = null) {
   const selected = getSelectedCredential();
   if (!selected) {
     return;
   }
 
-  if (slot === 'primary') {
+  if (action === 'fill') {
     if (selected.itemType === 'login') {
       await triggerFill(selected.itemId);
       return;
     }
     if (selected.itemType === 'card') {
-      await copyField(selected.itemId, 'card_number');
+      await copyField(selected.itemId, 'card_number', sourceButton);
       return;
     }
     await openItemInWeb(selected.itemId);
     return;
   }
 
-  if (slot === 'secondary') {
-    if (selected.itemType === 'login') {
-      await copyField(selected.itemId, 'username');
-      return;
-    }
-    if (selected.itemType === 'card') {
-      await copyField(selected.itemId, 'card_cvv');
-      return;
-    }
-    await copyField(selected.itemId, 'title');
+  if (action === 'copy_username') {
+    await copyField(selected.itemId, 'username', sourceButton);
     return;
   }
-
-  if (selected.itemType === 'login') {
-    await copyField(selected.itemId, 'password');
+  if (action === 'copy_password') {
+    await copyField(selected.itemId, 'password', sourceButton);
     return;
   }
-  if (selected.itemType === 'card') {
-    await copyField(selected.itemId, 'card_expiry');
+  if (action === 'copy_url') {
+    await copyRawValue(selected.firstUrl || selected.urlHostSummary || '', sourceButton);
     return;
   }
-  await copyField(selected.itemId, 'content');
+  if (action === 'open_url') {
+    await openCredentialUrl(selected.itemId);
+    return;
+  }
+  if (action === 'copy_card_number') {
+    await copyField(selected.itemId, 'card_number', sourceButton);
+    return;
+  }
+  if (action === 'copy_card_cvv') {
+    await copyField(selected.itemId, 'card_cvv', sourceButton);
+    return;
+  }
+  if (action === 'copy_card_expiry') {
+    await copyField(selected.itemId, 'card_expiry', sourceButton);
+    return;
+  }
+  if (action === 'copy_note' || action === 'copy_content') {
+    await copyField(selected.itemId, 'content', sourceButton);
+    return;
+  }
+  if (action === 'copy_title') {
+    await copyField(selected.itemId, 'title', sourceButton);
+    return;
+  }
+  if (action === 'open_item_web') {
+    await openItemInWeb(selected.itemId);
+    return;
+  }
 }
 
 function wireEvents() {
+  filterDropdown = createFilterDropdown({
+    button: elements.filterDropdownButton,
+    label: elements.filterDropdownLabel,
+    icon: elements.filterDropdownIcon,
+    menu: elements.filterDropdownMenu,
+    onChange: (nextValue) => {
+      if (nextValue === 'suggested') {
+        activeTypeFilter = 'all';
+        suggestedOnly = true;
+      } else {
+        activeTypeFilter = nextValue;
+        suggestedOnly = false;
+      }
+      selectedItemId = null;
+      persistPopupUiState();
+      void refreshStateAndMaybeList();
+    },
+  });
+
   elements.linkPairBtn.addEventListener('click', () => {
     void runAction(startLinkPairing);
   });
   elements.unlockBtn.addEventListener('click', () => {
     void runAction(handleUnlock);
   });
-  elements.openWebSettingsPairingBtn.addEventListener('click', () => {
-    void openWebSettings();
+  elements.unlockPasswordInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void runAction(handleUnlock);
+    }
+  });
+  elements.openApprovalBtn.addEventListener('click', () => {
+    void runAction(async () => {
+      const openResult = await openWebSettings({ autoFromLinkPair: false, silentOnError: false });
+      if (openResult?.ok) {
+        showApprovalRecovery = false;
+        renderLinkRequestPanel();
+      }
+    });
   });
   elements.cancelLinkPairBtn.addEventListener('click', () => {
     void runAction(cancelLinkPairing);
   });
-  elements.openWebAppBtn.addEventListener('click', openWebApp);
   elements.lockBtn.addEventListener('click', () => {
     void runAction(lockExtension);
   });
-  elements.openFullPageBtn.addEventListener('click', () => {
-    void runAction(async () => {
-      await sendBackgroundCommand({ type: 'vaultlite.open_full_page_auth' });
-      window.close();
-    });
+  elements.newItemBtn.addEventListener('click', () => {
+    setAlert('warning', 'New item creation is coming soon.');
   });
 
   elements.searchInput.addEventListener('input', () => {
@@ -1014,29 +1330,9 @@ function wireEvents() {
     }, 120);
   });
 
-  document.querySelectorAll('[data-type-filter]').forEach((node) => {
-    if (!(node instanceof HTMLButtonElement)) {
-      return;
-    }
-    node.addEventListener('click', () => {
-      const nextFilter = node.dataset.typeFilter ?? 'all';
-      activeTypeFilter = nextFilter;
-      selectedItemId = null;
-      persistPopupUiState();
-      void refreshStateAndMaybeList();
-    });
-  });
-
-  elements.suggestedChip.addEventListener('click', () => {
-    suggestedOnly = !suggestedOnly;
-    selectedItemId = null;
-    persistPopupUiState();
-    void refreshStateAndMaybeList();
-  });
-
   elements.credentialsList.addEventListener('click', (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLElement)) {
+    if (!(target instanceof Element)) {
       return;
     }
 
@@ -1045,11 +1341,25 @@ function wireEvents() {
     const actionItemId = actionButton?.getAttribute('data-item-id');
     if (action && actionItemId) {
       if (action === 'open-url') {
-        void runAction(async () => openCredentialUrl(actionItemId));
+        event.preventDefault();
+        event.stopPropagation();
+        if (actionButton instanceof HTMLElement) {
+          actionButton.blur();
+        }
+        void runAction(async () => openCredentialUrl(actionItemId, { closePopup: true }));
+        return;
+      }
+      if (action === 'quick-fill') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (actionButton instanceof HTMLElement) {
+          actionButton.blur();
+        }
+        void runAction(async () => triggerFill(actionItemId));
         return;
       }
       if (action === 'show-details') {
-        selectedItemId = actionItemId;
+        toggleSelectedItemInState(actionItemId);
         renderCredentialList(currentItems);
         return;
       }
@@ -1060,8 +1370,68 @@ function wireEvents() {
     if (!itemId) {
       return;
     }
-    selectedItemId = itemId;
+    toggleSelectedItemInState(itemId);
     renderCredentialList(currentItems);
+  });
+
+  elements.credentialsList.addEventListener('keydown', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const row = target.closest('.vault-row');
+    if (!row) {
+      return;
+    }
+    const itemId = row.getAttribute('data-item-id');
+    if (!itemId) {
+      return;
+    }
+    if (event.key === 'Enter' && event.ctrlKey) {
+      const item = getCredentialByItemId(itemId);
+      const hasUrl = Boolean(toNavigableUrl(item?.firstUrl ?? ''));
+      if (hasUrl) {
+        event.preventDefault();
+        void runAction(async () => openCredentialUrl(itemId, { closePopup: true }));
+      }
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      toggleSelectedItemInState(itemId);
+      renderCredentialList(currentItems);
+    }
+  });
+
+  elements.credentialsList.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const actionButton = target.closest('[data-empty-action]');
+    const action = actionButton?.getAttribute('data-empty-action');
+    if (!action) {
+      return;
+    }
+    if (action === 'clear-search') {
+      elements.searchInput.value = '';
+      persistPopupUiState();
+      void refreshStateAndMaybeList();
+      return;
+    }
+    if (action === 'show-all') {
+      suggestedOnly = false;
+      persistPopupUiState();
+      void refreshStateAndMaybeList();
+      return;
+    }
+    if (action === 'open-web-vault') {
+      openWebApp();
+      return;
+    }
+    if (action === 'retry-list') {
+      void refreshStateAndMaybeList();
+    }
   });
 
   elements.credentialsList.addEventListener(
@@ -1096,21 +1466,68 @@ function wireEvents() {
     true,
   );
 
-  elements.detailCloseBtn.addEventListener('click', () => {
-    selectedItemId = null;
-    renderCredentialList(currentItems);
-  });
-
   elements.detailActionPrimary.addEventListener('click', () => {
-    void runAction(async () => handleDetailAction('primary'));
+    const action = elements.detailActionPrimary.dataset.action;
+    if (!action) {
+      return;
+    }
+    void runAction(async () => handleDetailAction(action, elements.detailActionPrimary));
   });
 
-  elements.detailActionSecondary.addEventListener('click', () => {
-    void runAction(async () => handleDetailAction('secondary'));
+  elements.detailActionMenu.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleDetailMenu();
   });
 
-  elements.detailActionTertiary.addEventListener('click', () => {
-    void runAction(async () => handleDetailAction('tertiary'));
+  document.addEventListener('mousedown', (event) => {
+    const target = event.target;
+    if (!(target instanceof Node)) {
+      return;
+    }
+    if (!elements.detailMenuPopover.hidden) {
+      const insideMenu = elements.detailMenuPopover.contains(target);
+      const insideButton = elements.detailActionMenu.contains(target);
+      if (!insideMenu && !insideButton) {
+        closeDetailMenu();
+      }
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeDetailMenu();
+      filterDropdown?.close();
+    }
+  });
+
+  detailRows.forEach((rowNodes) => {
+    rowNodes.row.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      if (target.closest('button')) {
+        return;
+      }
+      const defaultAction = rowNodes.row.dataset.defaultAction;
+      if (!defaultAction) {
+        return;
+      }
+      void runAction(async () => handleDetailAction(defaultAction));
+    });
+
+    [rowNodes.actionA, rowNodes.actionB].forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const action = button.dataset.action;
+        if (!action) {
+          return;
+        }
+        void runAction(async () => handleDetailAction(action, button));
+      });
+    });
   });
 }
 
@@ -1124,6 +1541,11 @@ function scheduleRefresh() {
 }
 
 wireEvents();
+popupAutosizer = createPopupAutosizer({
+  shell: document.querySelector('.popup-shell'),
+  body: document.body,
+  maxHeight: 600,
+});
 renderState({
   state: { ...FALLBACK_PAIRING_STATE },
   page: {},
