@@ -1898,8 +1898,12 @@ async function listCredentialsInternal(input = {}) {
   }
   armIdleLockTimer();
 
-  const activeTab = await fetchActiveTab();
-  const activePageUrl = activeTab?.tabUrl ?? '';
+  const explicitPageUrl = typeof input.pageUrl === 'string' ? input.pageUrl : '';
+  let activePageUrl = explicitPageUrl;
+  if (!activePageUrl) {
+    const activeTab = await fetchActiveTab();
+    activePageUrl = activeTab?.tabUrl ?? '';
+  }
   const pageEligible = isPageUrlEligibleForFill(activePageUrl);
 
   let projectedItems = projectCredentialsForPage(activePageUrl);
@@ -2571,6 +2575,7 @@ async function handleCommand(command, senderContext, sender) {
         query: command.query ?? '',
         typeFilter: command.typeFilter ?? 'all',
         suggestedOnly: command.suggestedOnly === true,
+        pageUrl: typeof command.pageUrl === 'string' ? command.pageUrl : '',
       });
     }
     case 'vaultlite.fill_credential': {

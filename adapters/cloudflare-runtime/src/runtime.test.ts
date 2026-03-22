@@ -16,7 +16,7 @@ describe('cloudflare runtime adapter', () => {
     });
     const serialized = serializeCookie(bundle.session.name, 'session_1', bundle.session);
     expect(serialized).toContain('HttpOnly');
-    expect(serialized).toContain('SameSite=Strict');
+    expect(serialized).toContain('SameSite=Lax');
     expect(serialized).toContain('Secure');
 
     const parsed = parseCookieHeader('vl_session=session_1; vl_csrf=csrf_1');

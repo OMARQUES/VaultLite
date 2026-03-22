@@ -87,6 +87,10 @@ function createMockDependencies() {
         ok: true,
         result: 'success_changed',
       }),
+      requestUnlockGrant: vi.fn().mockRejectedValue(new Error('unlock_grant_unavailable')),
+      getUnlockGrantStatus: vi.fn(),
+      consumeUnlockGrant: vi.fn(),
+      approveUnlockGrant: vi.fn(),
     },
     trustedLocalStateStore: {
       load: vi.fn().mockResolvedValue({
@@ -116,6 +120,8 @@ describe('createSessionStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     globalThis.localStorage?.removeItem('vaultlite:auto-lock-after-ms');
+    globalThis.localStorage?.removeItem('vaultlite:web-unlock-cache.v1');
+    globalThis.sessionStorage?.removeItem('vaultlite:web-unlock-cache.v1');
   });
 
   test('restores a valid server session into local unlock state', async () => {
@@ -126,6 +132,66 @@ describe('createSessionStore', () => {
 
     expect(store.state.phase).toBe('local_unlock_required');
     expect(store.state.username).toBe('alice');
+  });
+
+  test('restores ready state from shared localStorage unlock cache across tabs', async () => {
+    const dependencies = createMockDependencies();
+    globalThis.localStorage?.setItem(
+      'vaultlite:web-unlock-cache.v1',
+      JSON.stringify({
+        username: 'alice',
+        deviceId: 'device_1',
+        accountKey: 'A'.repeat(43),
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    const store = createSessionStore(dependencies as never);
+
+    await store.restoreSession();
+
+    expect(store.state.phase).toBe('ready');
+    expect(store.state.username).toBe('alice');
+    expect(dependencies.authClient.requestUnlockGrant).not.toHaveBeenCalled();
+  });
+
+  test('migrates legacy unlock cache from sessionStorage to localStorage', async () => {
+    const dependencies = createMockDependencies();
+    globalThis.sessionStorage?.setItem(
+      'vaultlite:web-unlock-cache.v1',
+      JSON.stringify({
+        username: 'alice',
+        deviceId: 'device_1',
+        accountKey: 'A'.repeat(43),
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    const store = createSessionStore(dependencies as never);
+
+    await store.restoreSession();
+
+    expect(store.state.phase).toBe('ready');
+    expect(globalThis.localStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeTruthy();
+    expect(globalThis.sessionStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeNull();
+  });
+
+  test('restoreSession does not block UI while unlock grant polling is pending', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.requestUnlockGrant.mockReturnValue(
+      new Promise(() => {
+        // Keep pending to validate restore fallback path is non-blocking.
+      }),
+    );
+    const store = createSessionStore(dependencies as never);
+
+    const result = await Promise.race([
+      store.restoreSession().then(() => 'resolved'),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), 100);
+      }),
+    ]);
+
+    expect(result).toBe('resolved');
+    expect(store.state.phase).toBe('local_unlock_required');
   });
 
   test('locks after auto-lock threshold when ready', () => {

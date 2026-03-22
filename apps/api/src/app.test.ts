@@ -883,19 +883,21 @@ describe('createVaultLiteApi', () => {
         }),
       });
       expect(discoverResponse.status).toBe(200);
-      expect(await discoverResponse.json()).toEqual({
-        ok: true,
-        icons: [
-          {
-            domain: 'portal.example.com',
-            dataUrl: expect.stringContaining('data:image/png;base64,'),
-            source: 'automatic',
-            sourceUrl: 'https://portal.example.com/favicon.png',
-            updatedAt: expect.any(String),
-          },
-        ],
-        unresolved: [],
-      });
+      expect(await discoverResponse.json()).toEqual(
+        expect.objectContaining({
+          ok: true,
+          unresolved: [],
+          icons: [
+            expect.objectContaining({
+              domain: 'portal.example.com',
+              dataUrl: expect.stringContaining('data:image/png;base64,'),
+              source: 'automatic',
+              sourceUrl: 'https://portal.example.com/favicon.png',
+              updatedAt: expect.any(String),
+            }),
+          ],
+        }),
+      );
 
       const resolveResponse = await app.request('/api/icons/resolve', {
         method: 'POST',
@@ -908,18 +910,20 @@ describe('createVaultLiteApi', () => {
         }),
       });
       expect(resolveResponse.status).toBe(200);
-      expect(await resolveResponse.json()).toEqual({
-        ok: true,
-        icons: [
-          {
-            domain: 'portal.example.com',
-            dataUrl: expect.stringContaining('data:image/png;base64,'),
-            source: 'automatic',
-            sourceUrl: 'https://portal.example.com/favicon.png',
-            updatedAt: expect.any(String),
-          },
-        ],
-      });
+      expect(await resolveResponse.json()).toEqual(
+        expect.objectContaining({
+          ok: true,
+          icons: [
+            expect.objectContaining({
+              domain: 'portal.example.com',
+              dataUrl: expect.stringContaining('data:image/png;base64,'),
+              source: 'automatic',
+              sourceUrl: 'https://portal.example.com/favicon.png',
+              updatedAt: expect.any(String),
+            }),
+          ],
+        }),
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

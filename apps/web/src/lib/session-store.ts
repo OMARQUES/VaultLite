@@ -236,17 +236,17 @@ function persistAutoLockAfterMs(value: number) {
   }
 }
 
-function loadWebUnlockCache(): WebUnlockCacheRecord | null {
+function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecord | null {
+  if (!rawValue) {
+    return null;
+  }
   try {
-    const rawValue = globalThis.sessionStorage?.getItem(WEB_UNLOCK_CACHE_STORAGE_KEY);
-    if (!rawValue) {
-      return null;
-    }
     const parsed = JSON.parse(rawValue) as Partial<WebUnlockCacheRecord>;
     if (
       typeof parsed?.username !== 'string' ||
       typeof parsed?.deviceId !== 'string' ||
       typeof parsed?.accountKey !== 'string' ||
+      parsed.accountKey.length < 20 ||
       typeof parsed?.expiresAt !== 'number'
     ) {
       return null;
@@ -262,9 +262,35 @@ function loadWebUnlockCache(): WebUnlockCacheRecord | null {
   }
 }
 
+function loadWebUnlockCache(): WebUnlockCacheRecord | null {
+  try {
+    const localCache = parseWebUnlockCacheRecord(
+      globalThis.localStorage?.getItem(WEB_UNLOCK_CACHE_STORAGE_KEY) ?? null,
+    );
+    if (localCache) {
+      return localCache;
+    }
+
+    // Legacy migration path from per-tab sessionStorage cache.
+    const sessionCache = parseWebUnlockCacheRecord(
+      globalThis.sessionStorage?.getItem(WEB_UNLOCK_CACHE_STORAGE_KEY) ?? null,
+    );
+    if (!sessionCache) {
+      return null;
+    }
+
+    globalThis.localStorage?.setItem(WEB_UNLOCK_CACHE_STORAGE_KEY, JSON.stringify(sessionCache));
+    globalThis.sessionStorage?.removeItem(WEB_UNLOCK_CACHE_STORAGE_KEY);
+    return sessionCache;
+  } catch {
+    return null;
+  }
+}
+
 function persistWebUnlockCache(record: WebUnlockCacheRecord) {
   try {
-    globalThis.sessionStorage?.setItem(WEB_UNLOCK_CACHE_STORAGE_KEY, JSON.stringify(record));
+    globalThis.localStorage?.setItem(WEB_UNLOCK_CACHE_STORAGE_KEY, JSON.stringify(record));
+    globalThis.sessionStorage?.removeItem(WEB_UNLOCK_CACHE_STORAGE_KEY);
   } catch {
     // Ignore storage failures and keep in-memory unlock only.
   }
@@ -272,6 +298,7 @@ function persistWebUnlockCache(record: WebUnlockCacheRecord) {
 
 function clearWebUnlockCache() {
   try {
+    globalThis.localStorage?.removeItem(WEB_UNLOCK_CACHE_STORAGE_KEY);
     globalThis.sessionStorage?.removeItem(WEB_UNLOCK_CACHE_STORAGE_KEY);
   } catch {
     // Ignore storage failures.
@@ -737,7 +764,7 @@ export function createSessionStore(input: {
         return;
       }
 
-      const unlockedViaGrant = await tryUnlockViaExtensionGrant({
+      const unlockGrantInput = {
         username: restored.user.username,
         userId: restored.user.userId,
         role: restored.user.role,
@@ -746,12 +773,7 @@ export function createSessionStore(input: {
         lifecycleState: restored.user.lifecycleState,
         bundleVersion: restored.user.bundleVersion,
         trustedLocalEncryptedBundle: trustedLocalState.encryptedAccountBundle,
-      });
-      if (unlockedViaGrant) {
-        void maybeAutoApproveUnlockGrants();
-        return;
-      }
-
+      };
       transition({
         phase: 'local_unlock_required',
         username: restored.user.username,
@@ -764,6 +786,14 @@ export function createSessionStore(input: {
         lastError: null,
         lastActivityAt: null,
       });
+
+      if (restored.unlockGrantEnabled !== false) {
+        void tryUnlockViaExtensionGrant(unlockGrantInput).then((unlockedViaGrant) => {
+          if (unlockedViaGrant) {
+            void maybeAutoApproveUnlockGrants();
+          }
+        });
+      }
     },
     async prepareOnboarding(onboarding) {
       transition({

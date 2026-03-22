@@ -6,16 +6,24 @@ export interface SiteIconDiscoveryRecord {
   sourceUrl: string | null;
   fetchedAt: string;
   updatedAt: string;
+  resolvedBy?: string;
+  finalUrl?: string | null;
+  candidateCount?: number;
+  reasonCode?: string;
 }
 
 interface CandidateIconUrl {
   url: string;
   score: number;
+  resolvedBy: string;
+  reasonCode: string;
 }
 
 interface ParsedLinkTag {
   rel: string;
   href: string;
+  type: string;
+  sizes: string;
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 3_500;
@@ -130,18 +138,95 @@ export function registrableDomain(hostname: string): string | null {
   return getDomain(normalized, { allowPrivateDomains: false });
 }
 
-function parseLinkTagAttributes(rawTag: string): ParsedLinkTag | null {
-  const relMatch = rawTag.match(/\brel\s*=\s*(['"])(.*?)\1/iu);
-  const hrefMatch = rawTag.match(/\bhref\s*=\s*(['"])(.*?)\1/iu);
-  if (!hrefMatch || !hrefMatch[2]) {
-    return null;
+function parseTagAttributes(rawTag: string): Map<string, string> {
+  const attributes = new Map<string, string>();
+  const matcher = /\b([^\s"'=<>`\/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu;
+  let match = matcher.exec(rawTag);
+  while (match) {
+    const key = String(match[1] ?? '').trim().toLowerCase();
+    if (key && key !== 'link') {
+      const value = String(match[2] ?? match[3] ?? match[4] ?? '').trim();
+      attributes.set(key, value);
+    }
+    match = matcher.exec(rawTag);
   }
-  const rel = String(relMatch?.[2] ?? '').trim().toLowerCase();
-  const href = String(hrefMatch[2]).trim();
+  return attributes;
+}
+
+function parseLinkTagAttributes(rawTag: string): ParsedLinkTag | null {
+  const attributes = parseTagAttributes(rawTag);
+  const href = String(attributes.get('href') ?? '').trim();
   if (!href) {
     return null;
   }
-  return { rel, href };
+  const rel = String(attributes.get('rel') ?? '').trim().toLowerCase();
+  const type = String(attributes.get('type') ?? '').trim().toLowerCase();
+  const sizes = String(attributes.get('sizes') ?? '').trim().toLowerCase();
+  return { rel, href, type, sizes };
+}
+
+function iconSizeBonus(rawSizes: string): number {
+  const sizes = String(rawSizes ?? '').trim().toLowerCase();
+  if (!sizes) {
+    return 0;
+  }
+  if (sizes.includes('any')) {
+    return 10;
+  }
+  let maxSize = 0;
+  const entries = sizes.split(/\s+/u);
+  for (const entry of entries) {
+    const match = /^(\d{1,4})x(\d{1,4})$/u.exec(entry);
+    if (!match) {
+      continue;
+    }
+    const width = Number.parseInt(match[1], 10);
+    const height = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      continue;
+    }
+    maxSize = Math.max(maxSize, Math.min(width, height));
+  }
+  if (maxSize >= 192) {
+    return 24;
+  }
+  if (maxSize >= 128) {
+    return 20;
+  }
+  if (maxSize >= 64) {
+    return 14;
+  }
+  if (maxSize >= 32) {
+    return 8;
+  }
+  if (maxSize > 0) {
+    return 4;
+  }
+  return 0;
+}
+
+function iconTypeBonus(rawType: string): number {
+  const mime = String(rawType ?? '').trim().toLowerCase();
+  if (!mime) {
+    return 0;
+  }
+  if (mime === 'image/svg+xml') {
+    return 8;
+  }
+  if (mime === 'image/png' || mime === 'image/webp') {
+    return 6;
+  }
+  if (mime === 'image/x-icon' || mime === 'image/vnd.microsoft.icon') {
+    return 4;
+  }
+  if (mime.startsWith('image/')) {
+    return 2;
+  }
+  return 0;
+}
+
+function scoreFromMetadata(baseScore: number, parsed: ParsedLinkTag): number {
+  return baseScore + iconSizeBonus(parsed.sizes) + iconTypeBonus(parsed.type);
 }
 
 function resolveCandidateUrl(href: string, baseUrl: string): string | null {
@@ -188,15 +273,30 @@ function parseHeadCandidates(input: {
     const isMaskIcon = relTokens.includes('mask-icon');
 
     if (isIcon) {
-      icons.push({ url: candidateUrl, score: 120 });
+      icons.push({
+        url: candidateUrl,
+        score: scoreFromMetadata(120, parsed),
+        resolvedBy: 'html_link_icon',
+        reasonCode: 'head_link_icon',
+      });
       continue;
     }
     if (isAppleTouch) {
-      icons.push({ url: candidateUrl, score: 100 });
+      icons.push({
+        url: candidateUrl,
+        score: scoreFromMetadata(100, parsed),
+        resolvedBy: 'apple_touch_icon',
+        reasonCode: 'head_apple_touch_icon',
+      });
       continue;
     }
     if (isMaskIcon) {
-      icons.push({ url: candidateUrl, score: 60 });
+      icons.push({
+        url: candidateUrl,
+        score: scoreFromMetadata(60, parsed),
+        resolvedBy: 'mask_icon',
+        reasonCode: 'head_mask_icon',
+      });
     }
   }
 
@@ -205,7 +305,9 @@ function parseHeadCandidates(input: {
 
 function parseManifestIconCandidates(input: { manifestPayload: string; manifestUrl: string }): CandidateIconUrl[] {
   try {
-    const parsed = JSON.parse(input.manifestPayload) as { icons?: Array<{ src?: string }> };
+    const parsed = JSON.parse(input.manifestPayload) as {
+      icons?: Array<{ src?: string; sizes?: string; type?: string; purpose?: string }>;
+    };
     if (!Array.isArray(parsed.icons)) {
       return [];
     }
@@ -218,7 +320,15 @@ function parseManifestIconCandidates(input: { manifestPayload: string; manifestU
       if (!candidateUrl) {
         continue;
       }
-      candidates.push({ url: candidateUrl, score: 80 });
+      const sizesBonus = iconSizeBonus(String(icon.sizes ?? ''));
+      const typeBonus = iconTypeBonus(String(icon.type ?? ''));
+      const purposeBonus = String(icon.purpose ?? '').toLowerCase().includes('maskable') ? 6 : 0;
+      candidates.push({
+        url: candidateUrl,
+        score: 80 + sizesBonus + typeBonus + purposeBonus,
+        resolvedBy: 'manifest_icon',
+        reasonCode: 'manifest_icon',
+      });
     }
     return candidates;
   } catch {
@@ -243,6 +353,74 @@ function asBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(bytes[index] ?? 0);
   }
   return btoa(binary);
+}
+
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/x-icon',
+  'image/vnd.microsoft.icon',
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/webp',
+  'image/svg+xml',
+  'image/gif',
+  'image/avif',
+  'image/apng',
+]);
+
+function startsWithBytes(bytes: Uint8Array, signature: number[]): boolean {
+  if (bytes.byteLength < signature.length) {
+    return false;
+  }
+  for (let index = 0; index < signature.length; index += 1) {
+    if (bytes[index] !== signature[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function detectImageMimeFromBytes(bytes: Uint8Array): string | null {
+  if (startsWithBytes(bytes, [0, 0, 1, 0])) {
+    return 'image/x-icon';
+  }
+  if (startsWithBytes(bytes, [137, 80, 78, 71, 13, 10, 26, 10])) {
+    return 'image/png';
+  }
+  if (startsWithBytes(bytes, [255, 216, 255])) {
+    return 'image/jpeg';
+  }
+  if (startsWithBytes(bytes, [82, 73, 70, 70]) && bytes.byteLength >= 12) {
+    const webpMarker = [87, 69, 66, 80];
+    if (
+      bytes[8] === webpMarker[0] &&
+      bytes[9] === webpMarker[1] &&
+      bytes[10] === webpMarker[2] &&
+      bytes[11] === webpMarker[3]
+    ) {
+      return 'image/webp';
+    }
+  }
+  const probeLength = Math.min(bytes.byteLength, 512);
+  const probeText = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, probeLength)).toLowerCase();
+  if (probeText.includes('<svg') || probeText.startsWith('<?xml')) {
+    return 'image/svg+xml';
+  }
+  return null;
+}
+
+function resolveEffectiveImageMime(contentTypeHeader: string, bytes: Uint8Array): string | null {
+  const headerMime = String(contentTypeHeader ?? '')
+    .split(';')[0]
+    ?.trim()
+    .toLowerCase();
+  if (headerMime && ALLOWED_IMAGE_MIME_TYPES.has(headerMime)) {
+    return headerMime;
+  }
+  if (headerMime && headerMime.startsWith('image/')) {
+    return headerMime;
+  }
+  return detectImageMimeFromBytes(bytes);
 }
 
 async function readResponseTextWithLimit(response: Response, maxBytes: number): Promise<string | null> {
@@ -356,28 +534,89 @@ export async function discoverSiteIcon(input: {
     );
   }
 
-  const conventionalCandidates: CandidateIconUrl[] = [
-    { url: `https://${normalizedDomain}/favicon.ico`, score: 70 },
-    { url: `https://${normalizedDomain}/apple-touch-icon.png`, score: 65 },
-    { url: `https://${normalizedDomain}/favicon.svg`, score: 62 },
-    { url: `https://${normalizedDomain}/favicon.png`, score: 60 },
-    { url: `https://${normalizedDomain}/favicon.jpg`, score: 58 },
-    { url: `https://${normalizedDomain}/favicon.jpeg`, score: 57 },
-    { url: `https://${normalizedDomain}/favicon.webp`, score: 56 },
-    { url: `https://${normalizedDomain}/apple-touch-icon-precomposed.png`, score: 55 },
-  ];
+  const candidateHosts = new Set<string>([normalizedDomain]);
+  const registrable = registrableDomain(normalizedDomain);
+  if (normalizedDomain.startsWith('www.') && normalizedDomain.length > 4) {
+    candidateHosts.add(normalizedDomain.slice(4));
+  }
+  if (registrable) {
+    candidateHosts.add(registrable);
+    candidateHosts.add(`www.${registrable}`);
+  }
+  const hostList = Array.from(candidateHosts).filter((host) => host.length > 0);
+
+  const conventionalCandidates: CandidateIconUrl[] = [];
+  for (const host of hostList) {
+    const hostPenalty = host === normalizedDomain ? 0 : 8;
+    conventionalCandidates.push(
+      {
+        url: `https://${host}/favicon.ico`,
+        score: 70 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_ico' : 'conventional_favicon_ico_alias',
+      },
+      {
+        url: `https://${host}/apple-touch-icon.png`,
+        score: 65 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_apple_touch_icon' : 'conventional_apple_touch_icon_alias',
+      },
+      {
+        url: `https://${host}/favicon.svg`,
+        score: 62 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_svg' : 'conventional_favicon_svg_alias',
+      },
+      {
+        url: `https://${host}/favicon.png`,
+        score: 60 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_png' : 'conventional_favicon_png_alias',
+      },
+      {
+        url: `https://${host}/favicon.jpg`,
+        score: 58 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_jpg' : 'conventional_favicon_jpg_alias',
+      },
+      {
+        url: `https://${host}/favicon.jpeg`,
+        score: 57 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_jpeg' : 'conventional_favicon_jpeg_alias',
+      },
+      {
+        url: `https://${host}/favicon.webp`,
+        score: 56 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode: host === normalizedDomain ? 'conventional_favicon_webp' : 'conventional_favicon_webp_alias',
+      },
+      {
+        url: `https://${host}/apple-touch-icon-precomposed.png`,
+        score: 55 - hostPenalty,
+        resolvedBy: 'conventional_path',
+        reasonCode:
+          host === normalizedDomain
+            ? 'conventional_apple_touch_icon_precomposed'
+            : 'conventional_apple_touch_icon_precomposed_alias',
+      },
+    );
+  }
 
   const fallbackCandidates: CandidateIconUrl[] = [
     {
       url: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(normalizedDomain)}&sz=64`,
       score: 30,
+      resolvedBy: 's2_fallback',
+      reasonCode: 'fallback_s2_host',
     },
   ];
-  const registrable = registrableDomain(normalizedDomain);
   if (registrable && registrable !== normalizedDomain) {
     fallbackCandidates.push({
       url: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(registrable)}&sz=64`,
       score: 20,
+      resolvedBy: 's2_fallback',
+      reasonCode: 'fallback_s2_registrable',
     });
   }
 
@@ -405,13 +644,12 @@ export async function discoverSiteIcon(input: {
         continue;
       }
     }
-    const contentTypeRaw = response.headers.get('content-type') ?? '';
-    const mimeType = contentTypeRaw.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (!mimeType.startsWith('image/')) {
-      continue;
-    }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength === 0 || bytes.byteLength > maxImageBytes) {
+      continue;
+    }
+    const mimeType = resolveEffectiveImageMime(response.headers.get('content-type') ?? '', bytes);
+    if (!mimeType) {
       continue;
     }
     const dataUrl = `data:${mimeType};base64,${asBase64(bytes)}`;
@@ -421,6 +659,10 @@ export async function discoverSiteIcon(input: {
       sourceUrl: candidate.url,
       fetchedAt: input.nowIso,
       updatedAt: input.nowIso,
+      resolvedBy: candidate.resolvedBy,
+      finalUrl: response.url || candidate.url,
+      candidateCount: candidates.length,
+      reasonCode: candidate.reasonCode,
     };
   }
 

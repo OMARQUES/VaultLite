@@ -141,6 +141,8 @@ let activePageUrl = '';
 let activePageEligible = false;
 let fillBlockedState = null;
 let popupAutosizer = null;
+let pendingListScrollRestoreFramePrimary = null;
+let pendingListScrollRestoreFrameSecondary = null;
 const POPUP_UI_STATE_STORAGE_KEY = 'vaultlite.popup.ui.v1';
 const FALLBACK_PAIRING_STATE = {
   phase: 'pairing_required',
@@ -620,6 +622,28 @@ function restoreListScrollAnchor(input) {
   elements.credentialsList.scrollTop = Number(input.scrollTop ?? 0);
 }
 
+function cancelScheduledListScrollRestore() {
+  if (pendingListScrollRestoreFramePrimary !== null) {
+    window.cancelAnimationFrame(pendingListScrollRestoreFramePrimary);
+    pendingListScrollRestoreFramePrimary = null;
+  }
+  if (pendingListScrollRestoreFrameSecondary !== null) {
+    window.cancelAnimationFrame(pendingListScrollRestoreFrameSecondary);
+    pendingListScrollRestoreFrameSecondary = null;
+  }
+}
+
+function scheduleStableListScrollRestore(anchor) {
+  cancelScheduledListScrollRestore();
+  pendingListScrollRestoreFramePrimary = window.requestAnimationFrame(() => {
+    pendingListScrollRestoreFramePrimary = null;
+    pendingListScrollRestoreFrameSecondary = window.requestAnimationFrame(() => {
+      pendingListScrollRestoreFrameSecondary = null;
+      restoreListScrollAnchor(anchor);
+    });
+  });
+}
+
 function renderCredentialList(items) {
   const previousItems = currentItems;
   const previousSelectedItemId = selectedItemId;
@@ -632,6 +656,7 @@ function renderCredentialList(items) {
     currentItems.length > 0;
 
   if (currentItems.length === 0) {
+    cancelScheduledListScrollRestore();
     selectedItemId = null;
     if (vaultLoading) {
       elements.credentialsList.innerHTML = '<p class="empty-state">Loading vault…</p>';
@@ -698,6 +723,9 @@ function renderCredentialList(items) {
     });
   if (canReuseExistingRows) {
     patchListFavicons(previousItems, currentItems);
+    if (preserveScroll) {
+      scheduleStableListScrollRestore(previousAnchor);
+    }
     renderCredentialDetails();
     persistPopupUiState();
     popupAutosizer?.schedule();
@@ -763,7 +791,9 @@ function renderCredentialList(items) {
 
   elements.credentialsList.innerHTML = rows;
   if (preserveScroll) {
-    restoreListScrollAnchor(previousAnchor);
+    scheduleStableListScrollRestore(previousAnchor);
+  } else {
+    cancelScheduledListScrollRestore();
   }
   renderCredentialDetails();
   persistPopupUiState();
@@ -941,6 +971,7 @@ async function refreshStateAndMaybeList(options = {}) {
       query: elements.searchInput.value,
       typeFilter: activeTypeFilter,
       suggestedOnly,
+      pageUrl: localPage.url || activePageUrl,
     });
 
     if (!listResponse.ok) {
@@ -1468,6 +1499,7 @@ function wireEvents() {
           query: elements.searchInput.value,
           typeFilter: activeTypeFilter,
           suggestedOnly,
+          pageUrl: activePageUrl,
         });
         if (!response.ok) {
           setAlert('warning', response.message || 'Could not refresh search results.');

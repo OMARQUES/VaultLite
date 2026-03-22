@@ -75,7 +75,7 @@ export function createSessionCookieBundle(input: {
       path: '/',
       secure: input.secure,
       httpOnly: true,
-      sameSite: 'Strict',
+      sameSite: 'Lax',
       maxAgeSeconds: input.sessionMaxAgeSeconds,
     },
     csrf: {

@@ -294,7 +294,23 @@ type ResolvedSiteIcon = {
   dataUrl: string;
   source: 'manual' | 'automatic';
   sourceUrl: string | null;
+  resolvedBy?: string;
+  finalUrl?: string | null;
+  candidateCount?: number;
+  reasonCode?: string;
   updatedAt: string;
+};
+
+type AutomaticSiteIconRecord = {
+  domain: string;
+  dataUrl: string;
+  sourceUrl: string | null;
+  fetchedAt: string;
+  updatedAt: string;
+  resolvedBy?: string;
+  finalUrl?: string | null;
+  candidateCount?: number;
+  reasonCode?: string;
 };
 
 function normalizeSiteIconDomains(rawDomains: string[]): string[] {
@@ -312,7 +328,7 @@ function normalizeSiteIconDomains(rawDomains: string[]): string[] {
 function mergeResolvedSiteIcons(input: {
   domains: string[];
   manual: Array<{ domain: string; dataUrl: string; source: 'url' | 'file'; updatedAt: string }>;
-  automatic: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }>;
+  automatic: AutomaticSiteIconRecord[];
 }): ResolvedSiteIcon[] {
   const manualByDomain = new Map<string, ResolvedSiteIcon>(
     input.manual.map((entry) => [
@@ -334,6 +350,10 @@ function mergeResolvedSiteIcons(input: {
         dataUrl: entry.dataUrl,
         source: 'automatic',
         sourceUrl: entry.sourceUrl,
+        resolvedBy: entry.resolvedBy ?? 'cache',
+        finalUrl: entry.finalUrl ?? entry.sourceUrl,
+        candidateCount: entry.candidateCount,
+        reasonCode: entry.reasonCode ?? 'cache_hit',
         updatedAt: entry.updatedAt,
       },
     ]),
@@ -359,10 +379,28 @@ async function discoverAndPersistSiteIcons(input: {
   nowIso: string;
   storage: VaultLiteStorage;
 }): Promise<{
-  discovered: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }>;
+  discovered: Array<{
+    domain: string;
+    dataUrl: string;
+    sourceUrl: string | null;
+    updatedAt: string;
+    resolvedBy?: string;
+    finalUrl?: string | null;
+    candidateCount?: number;
+    reasonCode?: string;
+  }>;
   unresolved: string[];
 }> {
-  const discovered: Array<{ domain: string; dataUrl: string; sourceUrl: string | null; updatedAt: string }> = [];
+  const discovered: Array<{
+    domain: string;
+    dataUrl: string;
+    sourceUrl: string | null;
+    updatedAt: string;
+    resolvedBy?: string;
+    finalUrl?: string | null;
+    candidateCount?: number;
+    reasonCode?: string;
+  }> = [];
   const unresolved: string[] = [];
 
   for (const domain of input.domains) {
@@ -385,6 +423,10 @@ async function discoverAndPersistSiteIcons(input: {
       domain: next.domain,
       dataUrl: next.dataUrl,
       sourceUrl: next.sourceUrl,
+      resolvedBy: next.resolvedBy,
+      finalUrl: next.finalUrl ?? null,
+      candidateCount: next.candidateCount,
+      reasonCode: next.reasonCode,
       updatedAt: next.updatedAt,
     });
   }
@@ -3976,10 +4018,12 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     const manualDomains = new Set(manualIcons.map((entry) => entry.domain));
     const discoverableDomains = domains.filter((domain) => !manualDomains.has(domain));
 
-    const existingAutomatic = input.forceRefresh
+    const existingAutomatic: AutomaticSiteIconRecord[] = input.forceRefresh
       ? []
       : await options.storage.siteIconCache.listByDomains(discoverableDomains);
-    const existingAutomaticByDomain = new Map(existingAutomatic.map((entry) => [entry.domain, entry]));
+    const existingAutomaticByDomain = new Map<string, AutomaticSiteIconRecord>(
+      existingAutomatic.map((entry) => [entry.domain, entry]),
+    );
     const targetDiscoveryDomains = discoverableDomains.filter(
       (domain) => input.forceRefresh === true || !existingAutomaticByDomain.has(domain),
     );
@@ -3990,12 +4034,16 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       storage: options.storage,
     });
 
-    const automaticMerged = [...existingAutomatic];
+    const automaticMerged: AutomaticSiteIconRecord[] = [...existingAutomatic];
     for (const discovered of discovery.discovered) {
       existingAutomaticByDomain.set(discovered.domain, {
         domain: discovered.domain,
         dataUrl: discovered.dataUrl,
         sourceUrl: discovered.sourceUrl,
+        resolvedBy: discovered.resolvedBy,
+        finalUrl: discovered.finalUrl ?? null,
+        candidateCount: discovered.candidateCount,
+        reasonCode: discovered.reasonCode,
         fetchedAt: discovered.updatedAt,
         updatedAt: discovered.updatedAt,
       });
@@ -4012,6 +4060,10 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
           domain: entry.domain,
           dataUrl: entry.dataUrl,
           sourceUrl: entry.sourceUrl,
+          resolvedBy: entry.resolvedBy,
+          finalUrl: entry.finalUrl ?? null,
+          candidateCount: entry.candidateCount,
+          reasonCode: entry.reasonCode,
           fetchedAt: entry.updatedAt,
           updatedAt: entry.updatedAt,
         })),

@@ -962,6 +962,10 @@ export const SiteIconRecordSchema = z
     dataUrl: z.string().min(32),
     source: SiteIconSourceSchema,
     sourceUrl: z.string().url().nullable(),
+    resolvedBy: z.string().min(1).optional(),
+    finalUrl: z.string().url().nullable().optional(),
+    candidateCount: z.number().int().nonnegative().optional(),
+    reasonCode: z.string().min(1).optional(),
     updatedAt: isoDatetimeSchema,
   })
   .strict();
