@@ -11,6 +11,8 @@ import type {
   CompleteOnboardingAtomicResult,
   DeviceRecord,
   DeviceRepository,
+  ExtensionSessionRecoverSecretRecord,
+  ExtensionSessionRecoverSecretRepository,
   ManualSiteIconOverrideRecord,
   ManualSiteIconOverrideRepository,
   ExtensionLinkRequestRecord,
@@ -22,6 +24,13 @@ import type {
   InviteRepository,
   IdempotencyRecord,
   IdempotencyRepository,
+  SessionPolicyRecord,
+  SessionPolicyRepository,
+  SurfaceLinkRecord,
+  SurfaceLinkRepository,
+  UnlockGrantRecord,
+  UnlockGrantRepository,
+  UnlockGrantStatus,
   SessionRecord,
   SessionRepository,
   RotatePasswordAtomicInput,
@@ -366,6 +375,69 @@ CREATE INDEX IF NOT EXISTS idx_manual_site_icon_overrides_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_manual_site_icon_overrides_domain
   ON manual_site_icon_overrides (domain);`,
+  },
+  {
+    id: '0012_session_policy_unlock_grants',
+    filename: '0012_session_policy_unlock_grants.sql',
+    sql: `CREATE TABLE IF NOT EXISTS session_policies (
+  user_id TEXT PRIMARY KEY,
+  unlock_idle_timeout_ms INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS surface_links (
+  user_id TEXT NOT NULL,
+  web_device_id TEXT NOT NULL,
+  extension_device_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, web_device_id, extension_device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_surface_links_user_web
+  ON surface_links (user_id, web_device_id);
+
+CREATE INDEX IF NOT EXISTS idx_surface_links_user_extension
+  ON surface_links (user_id, extension_device_id);
+
+CREATE TABLE IF NOT EXISTS unlock_grants (
+  request_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  deployment_fingerprint TEXT NOT NULL,
+  server_origin TEXT NOT NULL,
+  requester_surface TEXT NOT NULL,
+  requester_device_id TEXT NOT NULL,
+  requester_public_key TEXT NOT NULL,
+  requester_client_nonce TEXT NOT NULL,
+  approver_surface TEXT NOT NULL,
+  approver_device_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  approved_at TEXT NULL,
+  approved_by_device_id TEXT NULL,
+  unlock_account_key TEXT NULL,
+  rejected_at TEXT NULL,
+  rejection_reason_code TEXT NULL,
+  consumed_at TEXT NULL,
+  consumed_by_device_id TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_unlock_grants_approver_status
+  ON unlock_grants (user_id, approver_surface, approver_device_id, status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_unlock_grants_expires
+  ON unlock_grants (expires_at);
+
+CREATE TABLE IF NOT EXISTS extension_session_recover_secrets (
+  device_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  secret_hash TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_session_recover_secrets_user
+  ON extension_session_recover_secrets (user_id);`,
   },
 ];
 
@@ -897,6 +969,343 @@ class CloudflareSessionRepository implements SessionRepository {
       revokedAtIso,
       deviceId,
     ]);
+  }
+}
+
+class CloudflareSessionPolicyRepository implements SessionPolicyRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async findByUserId(userId: string): Promise<SessionPolicyRecord | null> {
+    return selectOne<SessionPolicyRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              unlock_idle_timeout_ms AS unlockIdleTimeoutMs,
+              updated_at AS updatedAt
+       FROM session_policies
+       WHERE user_id = ?`,
+      [userId],
+    );
+  }
+
+  async upsert(record: SessionPolicyRecord): Promise<SessionPolicyRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO session_policies (user_id, unlock_idle_timeout_ms, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         unlock_idle_timeout_ms = excluded.unlock_idle_timeout_ms,
+         updated_at = excluded.updated_at`,
+      [record.userId, record.unlockIdleTimeoutMs, record.updatedAt],
+    );
+    return { ...record };
+  }
+}
+
+class CloudflareSurfaceLinkRepository implements SurfaceLinkRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async upsert(record: SurfaceLinkRecord): Promise<SurfaceLinkRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO surface_links (user_id, web_device_id, extension_device_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, web_device_id, extension_device_id) DO UPDATE SET
+         updated_at = excluded.updated_at`,
+      [
+        record.userId,
+        record.webDeviceId,
+        record.extensionDeviceId,
+        record.createdAt,
+        record.updatedAt,
+      ],
+    );
+    return { ...record };
+  }
+
+  async findByWebDeviceId(userId: string, webDeviceId: string): Promise<SurfaceLinkRecord | null> {
+    return selectOne<SurfaceLinkRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              web_device_id AS webDeviceId,
+              extension_device_id AS extensionDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM surface_links
+       WHERE user_id = ? AND web_device_id = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [userId, webDeviceId],
+    );
+  }
+
+  async findByExtensionDeviceId(
+    userId: string,
+    extensionDeviceId: string,
+  ): Promise<SurfaceLinkRecord | null> {
+    return selectOne<SurfaceLinkRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              web_device_id AS webDeviceId,
+              extension_device_id AS extensionDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM surface_links
+       WHERE user_id = ? AND extension_device_id = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [userId, extensionDeviceId],
+    );
+  }
+
+  async removeByDeviceId(userId: string, deviceId: string): Promise<void> {
+    await executeOne(
+      this.db,
+      `DELETE FROM surface_links
+       WHERE user_id = ?
+         AND (web_device_id = ? OR extension_device_id = ?)`,
+      [userId, deviceId, deviceId],
+    );
+  }
+}
+
+class CloudflareUnlockGrantRepository implements UnlockGrantRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: UnlockGrantRecord): Promise<UnlockGrantRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO unlock_grants (
+          request_id,
+          user_id,
+          deployment_fingerprint,
+          server_origin,
+          requester_surface,
+          requester_device_id,
+          requester_public_key,
+          requester_client_nonce,
+          approver_surface,
+          approver_device_id,
+          status,
+          created_at,
+          expires_at,
+          approved_at,
+          approved_by_device_id,
+          unlock_account_key,
+          rejected_at,
+          rejection_reason_code,
+          consumed_at,
+          consumed_by_device_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.requestId,
+        record.userId,
+        record.deploymentFingerprint,
+        record.serverOrigin,
+        record.requesterSurface,
+        record.requesterDeviceId,
+        record.requesterPublicKey,
+        record.requesterClientNonce,
+        record.approverSurface,
+        record.approverDeviceId,
+        record.status,
+        record.createdAt,
+        record.expiresAt,
+        record.approvedAt,
+        record.approvedByDeviceId,
+        record.unlockAccountKey,
+        record.rejectedAt,
+        record.rejectionReasonCode,
+        record.consumedAt,
+        record.consumedByDeviceId,
+      ],
+    );
+    return { ...record };
+  }
+
+  async findByRequestId(requestId: string): Promise<UnlockGrantRecord | null> {
+    return selectOne<UnlockGrantRecord>(
+      this.db,
+      `SELECT request_id AS requestId,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              requester_surface AS requesterSurface,
+              requester_device_id AS requesterDeviceId,
+              requester_public_key AS requesterPublicKey,
+              requester_client_nonce AS requesterClientNonce,
+              approver_surface AS approverSurface,
+              approver_device_id AS approverDeviceId,
+              status AS status,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              approved_at AS approvedAt,
+              approved_by_device_id AS approvedByDeviceId,
+              unlock_account_key AS unlockAccountKey,
+              rejected_at AS rejectedAt,
+              rejection_reason_code AS rejectionReasonCode,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM unlock_grants
+       WHERE request_id = ?`,
+      [requestId],
+    );
+  }
+
+  async listPendingForApprover(
+    userId: string,
+    approverSurface: UnlockGrantRecord['approverSurface'],
+    approverDeviceId: string,
+    nowIso: string,
+    limit: number,
+  ): Promise<UnlockGrantRecord[]> {
+    return selectMany<UnlockGrantRecord>(
+      this.db,
+      `SELECT request_id AS requestId,
+              user_id AS userId,
+              deployment_fingerprint AS deploymentFingerprint,
+              server_origin AS serverOrigin,
+              requester_surface AS requesterSurface,
+              requester_device_id AS requesterDeviceId,
+              requester_public_key AS requesterPublicKey,
+              requester_client_nonce AS requesterClientNonce,
+              approver_surface AS approverSurface,
+              approver_device_id AS approverDeviceId,
+              status AS status,
+              created_at AS createdAt,
+              expires_at AS expiresAt,
+              approved_at AS approvedAt,
+              approved_by_device_id AS approvedByDeviceId,
+              unlock_account_key AS unlockAccountKey,
+              rejected_at AS rejectedAt,
+              rejection_reason_code AS rejectionReasonCode,
+              consumed_at AS consumedAt,
+              consumed_by_device_id AS consumedByDeviceId
+       FROM unlock_grants
+       WHERE user_id = ?
+         AND approver_surface = ?
+         AND approver_device_id = ?
+         AND status = 'pending'
+         AND expires_at > ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [userId, approverSurface, approverDeviceId, nowIso, Math.max(1, limit)],
+    );
+  }
+
+  async approve(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    approvedAt: string;
+    approvedByDeviceId: string;
+    unlockAccountKey: string | null;
+  }): Promise<UnlockGrantRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE unlock_grants
+       SET status = 'approved',
+           approved_at = ?,
+           approved_by_device_id = ?,
+           unlock_account_key = ?,
+           rejected_at = NULL,
+           rejection_reason_code = NULL
+       WHERE request_id = ?
+         AND status = ?`,
+      [input.approvedAt, input.approvedByDeviceId, input.unlockAccountKey, input.requestId, input.expectedStatus],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
+  }
+
+  async reject(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    rejectedAt: string;
+    reasonCode: string | null;
+  }): Promise<UnlockGrantRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE unlock_grants
+       SET status = 'rejected',
+           unlock_account_key = NULL,
+           rejected_at = ?,
+           rejection_reason_code = ?
+       WHERE request_id = ?
+         AND status = ?`,
+      [input.rejectedAt, input.reasonCode, input.requestId, input.expectedStatus],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
+  }
+
+  async consume(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<UnlockGrantRecord | null> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `UPDATE unlock_grants
+       SET status = 'consumed',
+           consumed_at = ?,
+           consumed_by_device_id = ?
+       WHERE request_id = ?
+         AND status = ?`,
+      [input.consumedAt, input.consumedByDeviceId, input.requestId, input.expectedStatus],
+    );
+    if (changed !== 1) {
+      return null;
+    }
+    return this.findByRequestId(input.requestId);
+  }
+}
+
+class CloudflareExtensionSessionRecoverSecretRepository
+  implements ExtensionSessionRecoverSecretRepository
+{
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async findByDeviceId(deviceId: string): Promise<ExtensionSessionRecoverSecretRecord | null> {
+    return selectOne<ExtensionSessionRecoverSecretRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              device_id AS deviceId,
+              secret_hash AS secretHash,
+              updated_at AS updatedAt
+       FROM extension_session_recover_secrets
+       WHERE device_id = ?`,
+      [deviceId],
+    );
+  }
+
+  async upsert(
+    record: ExtensionSessionRecoverSecretRecord,
+  ): Promise<ExtensionSessionRecoverSecretRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO extension_session_recover_secrets (device_id, user_id, secret_hash, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(device_id) DO UPDATE SET
+         user_id = excluded.user_id,
+         secret_hash = excluded.secret_hash,
+         updated_at = excluded.updated_at`,
+      [record.deviceId, record.userId, record.secretHash, record.updatedAt],
+    );
+    return { ...record };
+  }
+
+  async removeByDeviceId(deviceId: string): Promise<void> {
+    await executeOne(this.db, `DELETE FROM extension_session_recover_secrets WHERE device_id = ?`, [
+      deviceId,
+    ]);
+  }
+
+  async removeByUserId(userId: string): Promise<void> {
+    await executeOne(this.db, `DELETE FROM extension_session_recover_secrets WHERE user_id = ?`, [userId]);
   }
 }
 
@@ -2230,8 +2639,12 @@ export function createCloudflareVaultLiteStorage(input: {
   const users = new CloudflareUserAccountRepository(input.db);
   const devices = new CloudflareDeviceRepository(input.db);
   const sessions = new CloudflareSessionRepository(input.db);
+  const sessionPolicies = new CloudflareSessionPolicyRepository(input.db);
   const extensionPairings = new CloudflareExtensionPairingRepository(input.db);
   const extensionLinkRequests = new CloudflareExtensionLinkRequestRepository(input.db);
+  const surfaceLinks = new CloudflareSurfaceLinkRepository(input.db);
+  const unlockGrants = new CloudflareUnlockGrantRepository(input.db);
+  const extensionSessionRecoverSecrets = new CloudflareExtensionSessionRecoverSecretRepository(input.db);
   const siteIconCache = new CloudflareSiteIconCacheRepository(input.db);
   const manualSiteIconOverrides = new CloudflareManualSiteIconOverrideRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
@@ -2242,8 +2655,12 @@ export function createCloudflareVaultLiteStorage(input: {
     users,
     devices,
     sessions,
+    sessionPolicies,
     extensionPairings,
     extensionLinkRequests,
+    surfaceLinks,
+    unlockGrants,
+    extensionSessionRecoverSecrets,
     siteIconCache,
     manualSiteIconOverrides,
     authRateLimits: new CloudflareAuthRateLimitRepository(input.db),
@@ -2365,6 +2782,15 @@ export function createCloudflareVaultLiteStorage(input: {
              SET revoked_at = ?
              WHERE user_id = ? AND device_id = ?`,
           ).bind(inputRecord.revokedAtIso, inputRecord.userId, inputRecord.deviceId),
+          input.db.prepare(
+            `DELETE FROM surface_links
+             WHERE user_id = ?
+               AND (web_device_id = ? OR extension_device_id = ?)`,
+          ).bind(inputRecord.userId, inputRecord.deviceId, inputRecord.deviceId),
+          input.db.prepare(
+            `DELETE FROM extension_session_recover_secrets
+             WHERE device_id = ?`,
+          ).bind(inputRecord.deviceId),
         ]);
         return;
       }
@@ -2384,6 +2810,19 @@ export function createCloudflareVaultLiteStorage(input: {
            SET revoked_at = ?
            WHERE user_id = ? AND device_id = ?`,
           [inputRecord.revokedAtIso, inputRecord.userId, inputRecord.deviceId],
+        );
+        await executeOne(
+          input.db,
+          `DELETE FROM surface_links
+           WHERE user_id = ?
+             AND (web_device_id = ? OR extension_device_id = ?)`,
+          [inputRecord.userId, inputRecord.deviceId, inputRecord.deviceId],
+        );
+        await executeOne(
+          input.db,
+          `DELETE FROM extension_session_recover_secrets
+           WHERE device_id = ?`,
+          [inputRecord.deviceId],
         );
         await input.db.exec('COMMIT');
       } catch (error) {
@@ -2482,6 +2921,10 @@ export function createCloudflareVaultLiteStorage(input: {
             nextBundleVersion,
             inputRecord.nextAuthVerifier,
           ),
+          input.db.prepare(
+            `DELETE FROM extension_session_recover_secrets
+             WHERE user_id = ?`,
+          ).bind(inputRecord.userId),
         ])) as unknown[];
 
         const updateChanges = extractChangedRows(results[0]);
@@ -2538,6 +2981,12 @@ export function createCloudflareVaultLiteStorage(input: {
               inputRecord.newSession.revokedAt,
               inputRecord.newSession.rotatedFromSessionId,
             ],
+          );
+          await executeOne(
+            input.db,
+            `DELETE FROM extension_session_recover_secrets
+             WHERE user_id = ?`,
+            [inputRecord.userId],
           );
 
           await input.db.exec('COMMIT');

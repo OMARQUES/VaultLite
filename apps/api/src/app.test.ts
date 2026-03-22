@@ -273,6 +273,8 @@ describe('createVaultLiteApi', () => {
     expect(await restoreResponse.json()).toEqual({
       ok: true,
       sessionState: 'local_unlock_required',
+      unlockGrantEnabled: true,
+      unlockIdleTimeoutMs: 300000,
       user: {
         userId: 'user_2',
         username: 'bob',

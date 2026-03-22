@@ -27,12 +27,14 @@ import {
   normalizeVaultItemPayload,
 } from './runtime-crypto.js';
 import { diagnoseCredentialCache } from './credential-cache-diagnostics.js';
-import { buildFaviconCandidates } from './favicon-candidates.js';
+import { buildFaviconCandidates, registrableDomain } from './favicon-candidates.js';
 
 const CREDENTIAL_CACHE_TTL_MS = 60_000;
 const RESTORE_THROTTLE_MS = 15_000;
 const DEFAULT_DEVICE_NAME = 'VaultLite Extension';
-const MEMORY_IDLE_LOCK_MS = 5 * 60 * 1000;
+const MEMORY_IDLE_LOCK_DEFAULT_MS = 5 * 60 * 1000;
+const MEMORY_IDLE_LOCK_MIN_MS = 30 * 1000;
+const MEMORY_IDLE_LOCK_MAX_MS = 24 * 60 * 60 * 1000;
 const AUTO_PAIR_BRIDGE_SCRIPT_ID = 'vaultlite-auto-pair-bridge-v1';
 const EXTENSION_LINK_FALLBACK_INTERVAL_SECONDS = 5;
 const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
@@ -40,7 +42,10 @@ const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
 const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const ICON_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
+const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_WAIT_BUDGET_MS = 900;
+const STORAGE_UNLOCK_CONTEXT_KEY = 'vaultlite.unlocked_context.v1';
+const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
 
 const state = {
   phase: 'anonymous',
@@ -50,6 +55,7 @@ const state = {
   deviceId: null,
   deviceName: null,
   sessionExpiresAt: null,
+  unlockIdleTimeoutMs: MEMORY_IDLE_LOCK_DEFAULT_MS,
   hasTrustedState: false,
   lastError: null,
 };
@@ -64,10 +70,14 @@ let credentialsCache = {
 };
 const canonicalIconCacheByDomain = new Map();
 const iconDiscoverLastAttemptByDomain = new Map();
+const iconResolveMissByDomain = new Map();
 let iconHydrationInFlight = null;
 let lastRestoreAttemptAt = 0;
 let idleLockTimer = null;
 let restoreInFlightPromise = null;
+let unlockGrantApproveInFlight = null;
+let unlockGrantConsumeInFlight = null;
+let lastUnlockGrantAttemptAt = 0;
 let lastEmptyCacheRetryAt = 0;
 let linkPairingSession = null;
 
@@ -106,6 +116,20 @@ function normalizeLinkInterval(value) {
   }
   if (parsed > EXTENSION_LINK_MAX_INTERVAL_SECONDS) {
     return EXTENSION_LINK_MAX_INTERVAL_SECONDS;
+  }
+  return parsed;
+}
+
+function normalizeUnlockIdleTimeoutMs(value) {
+  if (!Number.isFinite(value)) {
+    return MEMORY_IDLE_LOCK_DEFAULT_MS;
+  }
+  const parsed = Math.trunc(value);
+  if (parsed < MEMORY_IDLE_LOCK_MIN_MS) {
+    return MEMORY_IDLE_LOCK_MIN_MS;
+  }
+  if (parsed > MEMORY_IDLE_LOCK_MAX_MS) {
+    return MEMORY_IDLE_LOCK_MAX_MS;
   }
   return parsed;
 }
@@ -238,6 +262,36 @@ async function signLinkProof(input) {
   };
 }
 
+function buildUnlockGrantSignaturePayload(input) {
+  return new TextEncoder().encode(
+    [
+      'vaultlite-unlock-grant-v1',
+      input.action,
+      input.requestId,
+      input.nonce,
+      input.clientNonce,
+      input.serverOrigin,
+      input.deploymentFingerprint,
+    ].join('|'),
+  );
+}
+
+async function signUnlockGrantProof(input) {
+  const payload = buildUnlockGrantSignaturePayload(input);
+  const signature = await crypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: 'SHA-256',
+    },
+    input.privateKey,
+    payload,
+  );
+  return {
+    nonce: input.nonce,
+    signature: toBase64Url(new Uint8Array(signature)),
+  };
+}
+
 function ok(data = {}) {
   return { ok: true, ...data };
 }
@@ -250,6 +304,12 @@ function fail(code, message) {
   };
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
 function setPhase(phase, errorMessage = null) {
   state.phase = phase;
   state.lastError = errorMessage;
@@ -257,6 +317,7 @@ function setPhase(phase, errorMessage = null) {
 
 function clearSensitiveMemory() {
   unlockedContext = null;
+  void clearPersistedUnlockedContext();
   clearLinkPairingSession();
   void clearPersistedLinkPairingSession();
   credentialsCache = {
@@ -277,9 +338,59 @@ function armIdleLockTimer() {
   if (idleLockTimer !== null) {
     clearTimeout(idleLockTimer);
   }
+  const delayMs = Math.max(
+    1_000,
+    Math.min(
+      state.unlockIdleTimeoutMs,
+      Math.max(
+        1_000,
+        Number.isFinite(unlockedContext?.unlockedUntil)
+          ? unlockedContext.unlockedUntil - Date.now()
+          : state.unlockIdleTimeoutMs,
+      ),
+    ),
+  );
   idleLockTimer = setTimeout(() => {
     void lockInternal();
-  }, MEMORY_IDLE_LOCK_MS);
+  }, delayMs);
+}
+
+async function persistUnlockedContext() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  if (!unlockedContext || typeof unlockedContext.accountKey !== 'string') {
+    await sessionStorage.remove(STORAGE_UNLOCK_CONTEXT_KEY);
+    return;
+  }
+  await sessionStorage.set({
+    [STORAGE_UNLOCK_CONTEXT_KEY]: {
+      accountKey: unlockedContext.accountKey,
+      unlockedAt: unlockedContext.unlockedAt,
+      unlockedUntil: unlockedContext.unlockedUntil,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+async function clearPersistedUnlockedContext() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  await sessionStorage.remove(STORAGE_UNLOCK_CONTEXT_KEY);
+}
+
+function touchUnlockedContext() {
+  if (state.phase !== 'ready' || !unlockedContext) {
+    return;
+  }
+  const now = Date.now();
+  unlockedContext.unlockedAt = now;
+  unlockedContext.unlockedUntil = now + state.unlockIdleTimeoutMs;
+  void persistUnlockedContext();
+  armIdleLockTimer();
 }
 
 async function persistConfig(config) {
@@ -406,6 +517,9 @@ function withSessionIdentity(input) {
   state.deviceId = input.device?.deviceId ?? state.deviceId;
   state.deviceName = input.device?.deviceName ?? state.deviceName;
   state.sessionExpiresAt = input.sessionExpiresAt ?? state.sessionExpiresAt;
+  if (Number.isFinite(input.unlockIdleTimeoutMs)) {
+    state.unlockIdleTimeoutMs = normalizeUnlockIdleTimeoutMs(input.unlockIdleTimeoutMs);
+  }
 }
 
 function snapshotForUi() {
@@ -428,6 +542,7 @@ function snapshotForUi() {
     deviceId: state.deviceId,
     deviceName: state.deviceName,
     sessionExpiresAt: state.sessionExpiresAt,
+    unlockIdleTimeoutMs: state.unlockIdleTimeoutMs,
     hasTrustedState: state.hasTrustedState,
     hasTokenInMemory: Boolean(sessionToken),
     lastError: state.lastError,
@@ -456,7 +571,11 @@ async function loadPersistedState() {
   let sessionState = {};
   if (sessionStorage) {
     try {
-      sessionState = await sessionStorage.get([STORAGE_SESSION_KEY, STORAGE_LINK_PAIRING_SESSION_KEY]);
+      sessionState = await sessionStorage.get([
+        STORAGE_SESSION_KEY,
+        STORAGE_LINK_PAIRING_SESSION_KEY,
+        STORAGE_UNLOCK_CONTEXT_KEY,
+      ]);
     } catch {
       sessionState = {};
     }
@@ -467,12 +586,28 @@ async function loadPersistedState() {
   const rawManualIcons = localState?.[MANUAL_ICON_STORAGE_KEY] ?? {};
   const sessionEntry = sessionState?.[STORAGE_SESSION_KEY] ?? null;
   const linkPairingEntry = sessionState?.[STORAGE_LINK_PAIRING_SESSION_KEY] ?? null;
+  const unlockContextEntry = sessionState?.[STORAGE_UNLOCK_CONTEXT_KEY] ?? null;
 
   state.serverOrigin = config?.serverOrigin ?? null;
   state.deploymentFingerprint = trusted?.deploymentFingerprint ?? config?.deploymentFingerprint ?? null;
   trustedState = trusted;
   state.hasTrustedState = Boolean(trustedState);
   sessionToken = typeof sessionEntry?.token === 'string' ? sessionEntry.token : null;
+  unlockedContext = null;
+  if (
+    unlockContextEntry &&
+    typeof unlockContextEntry === 'object' &&
+    typeof unlockContextEntry.accountKey === 'string' &&
+    typeof unlockContextEntry.unlockedAt === 'number' &&
+    typeof unlockContextEntry.unlockedUntil === 'number' &&
+    unlockContextEntry.unlockedUntil > Date.now()
+  ) {
+    unlockedContext = {
+      accountKey: unlockContextEntry.accountKey,
+      unlockedAt: unlockContextEntry.unlockedAt,
+      unlockedUntil: unlockContextEntry.unlockedUntil,
+    };
+  }
 
   linkPairingSession = null;
   if (isValidLinkPairingSessionStorageShape(linkPairingEntry)) {
@@ -824,25 +959,38 @@ async function restoreSessionInternal(force = false) {
     return;
   }
 
+  const hasValidUnlockedContext = () =>
+    Boolean(
+      unlockedContext &&
+        typeof unlockedContext.accountKey === 'string' &&
+        Number.isFinite(unlockedContext.unlockedUntil) &&
+        unlockedContext.unlockedUntil > Date.now(),
+    );
+
+  const recoverExtensionSessionInternal = async (apiClient) => {
+    if (!trustedState?.deviceId || !trustedState?.sessionRecoverKey) {
+      return false;
+    }
+    try {
+      const recovered = await apiClient.recoverExtensionSession({
+        deviceId: trustedState.deviceId,
+        sessionRecoverKey: trustedState.sessionRecoverKey,
+      });
+      if (!recovered?.extensionSessionToken) {
+        return false;
+      }
+      sessionToken = recovered.extensionSessionToken;
+      withSessionIdentity(recovered);
+      await persistSessionToken();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   restoreInFlightPromise = (async () => {
     if (!state.serverOrigin) {
       setPhase('pairing_required', null);
-      return;
-    }
-    if (!sessionToken) {
-      if (trustedState) {
-        setPhase(
-          'remote_authentication_required',
-          'Session expired. Start a new trusted-device request from the extension popup.',
-        );
-      } else if (linkPairingSession) {
-        setPhase(
-          'pairing_required',
-          linkPairingStatusMessage(linkPairingSession.lastStatus ?? 'authorization_pending'),
-        );
-      } else {
-        setPhase('pairing_required', 'Connect this extension from web settings.');
-      }
       return;
     }
     const now = Date.now();
@@ -853,6 +1001,27 @@ async function restoreSessionInternal(force = false) {
 
     const apiClient = currentApiClient();
     if (!apiClient) {
+      return;
+    }
+
+    if (!sessionToken && trustedState) {
+      const recovered = await recoverExtensionSessionInternal(apiClient);
+      if (!recovered) {
+        setPhase(
+          'remote_authentication_required',
+          'Session expired. Start a new trusted-device request from the extension popup.',
+        );
+        return;
+      }
+    } else if (!sessionToken) {
+      if (linkPairingSession) {
+        setPhase(
+          'pairing_required',
+          linkPairingStatusMessage(linkPairingSession.lastStatus ?? 'authorization_pending'),
+        );
+      } else {
+        setPhase('pairing_required', 'Connect this extension from web settings.');
+      }
       return;
     }
 
@@ -897,22 +1066,39 @@ async function restoreSessionInternal(force = false) {
         return;
       }
 
-      if (state.phase !== 'ready') {
-        setPhase('local_unlock_required', null);
+      if (hasValidUnlockedContext()) {
+        setPhase('ready', null);
+        touchUnlockedContext();
+        void maybeAutoApproveUnlockGrants();
       } else {
-        armIdleLockTimer();
+        unlockedContext = null;
+        void clearPersistedUnlockedContext();
+        setPhase('local_unlock_required', null);
+        void tryAutoUnlockViaGrantInternal();
       }
     } catch (error) {
       const described = describeError(error, 'restore_failed');
-      clearSensitiveMemory();
       if (described.code === 'unauthorized' || described.code === 'request_failed_401') {
         await clearExtensionSessionToken();
+        const recovered = await recoverExtensionSessionInternal(apiClient);
+        if (recovered) {
+          if (hasValidUnlockedContext()) {
+            setPhase('ready', null);
+            touchUnlockedContext();
+            void maybeAutoApproveUnlockGrants();
+          } else {
+            setPhase('local_unlock_required', null);
+            void tryAutoUnlockViaGrantInternal();
+          }
+          return;
+        }
         setPhase(
           'remote_authentication_required',
           'Session no longer valid. Start a new trusted-device request from the extension popup.',
         );
         return;
       }
+      clearSensitiveMemory();
       setPhase('remote_authentication_required', described.message);
     }
   })();
@@ -932,7 +1118,191 @@ async function ensureReadyState() {
   if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
     return fail('remote_authentication_required', state.lastError ?? 'Session expired.');
   }
+  touchUnlockedContext();
   return null;
+}
+
+async function maybeAutoApproveUnlockGrants() {
+  if (unlockGrantApproveInFlight) {
+    return unlockGrantApproveInFlight;
+  }
+  if (state.phase !== 'ready' || !sessionToken) {
+    return null;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient) {
+    return null;
+  }
+  unlockGrantApproveInFlight = (async () => {
+    try {
+      const pending = await apiClient.listPendingUnlockGrants({
+        bearerToken: sessionToken,
+      });
+      const requests = Array.isArray(pending?.requests) ? pending.requests : [];
+      for (const request of requests) {
+        if (request?.status !== 'pending' || typeof request?.requestId !== 'string') {
+          continue;
+        }
+        try {
+          await apiClient.approveUnlockGrant({
+            bearerToken: sessionToken,
+            requestId: request.requestId,
+            approvalNonce: randomBase64Url(16),
+            unlockAccountKey: unlockedContext?.accountKey ?? undefined,
+          });
+        } catch {
+          // Keep best-effort approval behavior to avoid blocking extension flow.
+        }
+      }
+    } catch {
+      // Best effort only.
+    }
+  })();
+  try {
+    await unlockGrantApproveInFlight;
+  } finally {
+    unlockGrantApproveInFlight = null;
+  }
+  return null;
+}
+
+async function tryAutoUnlockViaGrantInternal() {
+  if (unlockGrantConsumeInFlight) {
+    return unlockGrantConsumeInFlight;
+  }
+  if (
+    state.phase !== 'local_unlock_required' ||
+    !trustedState ||
+    !sessionToken ||
+    !state.serverOrigin
+  ) {
+    return false;
+  }
+  const now = Date.now();
+  if (now - lastUnlockGrantAttemptAt < UNLOCK_GRANT_RETRY_COOLDOWN_MS) {
+    return false;
+  }
+  lastUnlockGrantAttemptAt = now;
+  const apiClient = currentApiClient();
+  if (!apiClient) {
+    return false;
+  }
+
+  unlockGrantConsumeInFlight = (async () => {
+    try {
+      const deploymentFingerprint = await resolveDeploymentFingerprint(apiClient);
+      const keyPair = await crypto.subtle.generateKey(
+        {
+          name: 'ECDSA',
+          namedCurve: 'P-256',
+        },
+        true,
+        ['sign', 'verify'],
+      );
+      const publicSpki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+      const requestPublicKey = toBase64Url(new Uint8Array(publicSpki));
+      const clientNonce = randomBase64Url(16);
+
+      const request = await apiClient.requestUnlockGrant({
+        bearerToken: sessionToken,
+        deploymentFingerprint,
+        targetSurface: 'web',
+        requestPublicKey,
+        clientNonce,
+      });
+
+      const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
+      const serverOrigin =
+        typeof request?.serverOrigin === 'string' && request.serverOrigin.length > 0
+          ? request.serverOrigin
+          : state.serverOrigin;
+      let intervalSeconds = normalizeLinkInterval(request?.interval ?? UNLOCK_GRANT_DEFAULT_INTERVAL_SECONDS);
+      const expiresAtMs = Date.parse(request?.expiresAt ?? '');
+      const deadline = Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + UNLOCK_GRANT_TTL_SECONDS * 1_000;
+
+      while (Date.now() < deadline) {
+        try {
+          const statusNonce = randomBase64Url(16);
+          const statusProof = await signUnlockGrantProof({
+            action: 'status',
+            requestId,
+            nonce: statusNonce,
+            clientNonce,
+            serverOrigin,
+            deploymentFingerprint,
+            privateKey: keyPair.privateKey,
+          });
+          const status = await apiClient.getUnlockGrantStatus({
+            requestId,
+            requestProof: statusProof,
+          });
+          const statusCode = typeof status?.status === 'string' ? status.status : 'denied';
+          if (statusCode === 'authorization_pending' || statusCode === 'slow_down') {
+            intervalSeconds = normalizeLinkInterval(status?.interval ?? intervalSeconds + 1);
+            await delay(intervalSeconds * 1_000);
+            continue;
+          }
+          if (statusCode === 'approved') {
+            const consumeNonce = randomBase64Url(16);
+            const consumeProof = await signUnlockGrantProof({
+              action: 'consume',
+              requestId,
+              nonce: consumeNonce,
+              clientNonce,
+              serverOrigin,
+              deploymentFingerprint,
+              privateKey: keyPair.privateKey,
+            });
+            const consumed = await apiClient.consumeUnlockGrant({
+              requestId,
+              requestProof: consumeProof,
+              consumeNonce: randomBase64Url(16),
+            });
+            if (consumed?.extensionSessionToken) {
+              sessionToken = consumed.extensionSessionToken;
+              await persistSessionToken();
+            }
+            withSessionIdentity(consumed ?? {});
+            if (typeof consumed?.unlockAccountKey === 'string' && consumed.unlockAccountKey.length >= 20) {
+              const unlockedAt = Date.now();
+              unlockedContext = {
+                accountKey: consumed.unlockAccountKey,
+                unlockedAt,
+                unlockedUntil: unlockedAt + state.unlockIdleTimeoutMs,
+              };
+              await persistUnlockedContext();
+              setPhase('ready', null);
+              armIdleLockTimer();
+              await refreshCredentialCache({ force: true });
+              return true;
+            }
+            return false;
+          }
+          return false;
+        } catch (error) {
+          const described = describeError(error, 'unlock_grant_failed');
+          if (described.code === 'slow_down') {
+            const nextInterval = Number.isFinite(error?.interval)
+              ? Number(error.interval)
+              : intervalSeconds + UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS;
+            intervalSeconds = normalizeLinkInterval(nextInterval);
+            await delay(intervalSeconds * 1_000);
+            continue;
+          }
+          return false;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  })();
+
+  try {
+    return await unlockGrantConsumeInFlight;
+  } finally {
+    unlockGrantConsumeInFlight = null;
+  }
 }
 
 async function fetchActiveTab() {
@@ -1149,16 +1519,33 @@ function normalizeIconDomainFromUrl(rawUrl) {
   }
 }
 
+function iconDomainAliases(domain) {
+  const safeDomain = sanitizeIconHost(String(domain ?? ''));
+  if (!safeDomain) {
+    return [];
+  }
+  const aliases = [safeDomain];
+  const rootDomain = sanitizeIconHost(registrableDomain(safeDomain) ?? '');
+  if (rootDomain && rootDomain !== safeDomain) {
+    aliases.push(rootDomain);
+  }
+  return aliases;
+}
+
 function iconCacheEntryForDomain(domain) {
-  const entry = canonicalIconCacheByDomain.get(domain);
-  if (!entry) {
-    return null;
+  const aliases = iconDomainAliases(domain);
+  for (const alias of aliases) {
+    const entry = canonicalIconCacheByDomain.get(alias);
+    if (!entry) {
+      continue;
+    }
+    if (Date.now() - entry.cachedAt > ICON_CACHE_TTL_MS) {
+      canonicalIconCacheByDomain.delete(alias);
+      continue;
+    }
+    return entry;
   }
-  if (Date.now() - entry.cachedAt > ICON_CACHE_TTL_MS) {
-    canonicalIconCacheByDomain.delete(domain);
-    return null;
-  }
-  return entry;
+  return null;
 }
 
 function cacheResolvedIcons(icons) {
@@ -1174,13 +1561,21 @@ function cacheResolvedIcons(icons) {
     if (!safeDomain || !validateManualIconDataUrl(String(icon.dataUrl ?? ''))) {
       continue;
     }
-    canonicalIconCacheByDomain.set(safeDomain, {
+    const cacheEntry = {
       domain: safeDomain,
       dataUrl: icon.dataUrl,
       sourceUrl: typeof icon.sourceUrl === 'string' ? icon.sourceUrl : null,
       updatedAt: typeof icon.updatedAt === 'string' ? icon.updatedAt : nowIso(),
       cachedAt: now,
-    });
+    };
+    const aliases = iconDomainAliases(safeDomain);
+    for (const alias of aliases) {
+      canonicalIconCacheByDomain.set(alias, {
+        ...cacheEntry,
+        domain: alias,
+      });
+      iconResolveMissByDomain.delete(alias);
+    }
   }
 }
 
@@ -1250,12 +1645,26 @@ async function hydrateCanonicalIconsForDomains(domains) {
   if (uniqueDomains.length === 0) {
     return;
   }
+  const now = Date.now();
+  const resolveableDomains = uniqueDomains.filter((domain) => {
+    if (iconCacheEntryForDomain(domain)) {
+      return false;
+    }
+    const lastMissAt = iconResolveMissByDomain.get(domain) ?? 0;
+    if (now - lastMissAt < ICON_RESOLVE_MISS_RETRY_MS) {
+      return false;
+    }
+    return true;
+  });
+  if (resolveableDomains.length === 0) {
+    return;
+  }
 
   let resolvedIcons = [];
   try {
     const resolved = await apiClient.resolveSiteIcons({
       bearerToken: sessionToken,
-      domains: uniqueDomains,
+      domains: resolveableDomains,
     });
     resolvedIcons = Array.isArray(resolved?.icons) ? resolved.icons : [];
     cacheResolvedIcons(resolvedIcons);
@@ -1268,8 +1677,12 @@ async function hydrateCanonicalIconsForDomains(domains) {
       .map((entry) => sanitizeIconHost(String(entry?.domain ?? '')))
       .filter((entry) => Boolean(entry)),
   );
-  const now = Date.now();
-  const discoverableDomains = uniqueDomains.filter((domain) => {
+  for (const domain of resolveableDomains) {
+    if (!resolvedDomains.has(domain)) {
+      iconResolveMissByDomain.set(domain, now);
+    }
+  }
+  const discoverableDomains = resolveableDomains.filter((domain) => {
     if (resolvedDomains.has(domain)) {
       return false;
     }
@@ -1498,7 +1911,7 @@ async function listCredentialsInternal(input = {}) {
   })
     .sort(sortProjectedCredentials);
 
-  await ensureProjectedIconsHydrated(projections);
+  void ensureProjectedIconsHydrated(projections);
   projections = applyCachedIconsToProjection(projections);
 
   const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
@@ -1526,7 +1939,7 @@ async function listCredentialsInternal(input = {}) {
       suggestedOnly: input.suggestedOnly,
     })
       .sort(sortProjectedCredentials);
-    await ensureProjectedIconsHydrated(projections);
+    void ensureProjectedIconsHydrated(projections);
     projections = applyCachedIconsToProjection(projections);
   }
 
@@ -1670,6 +2083,8 @@ async function applyTrustedPairingResult(pairingResult) {
     encryptedAccountBundle: pairingResult.package.encryptedAccountBundle,
     accountKeyWrapped: pairingResult.package.accountKeyWrapped,
     localUnlockEnvelope: pairingResult.package.localUnlockEnvelope,
+    sessionRecoverKey:
+      typeof pairingResult.sessionRecoverKey === 'string' ? pairingResult.sessionRecoverKey : null,
     deploymentFingerprint: null,
     serverOrigin: state.serverOrigin,
     createdAt: nowIso(),
@@ -1962,12 +2377,16 @@ async function unlockLocalInternal(input) {
     }
 
     clearSensitiveMemory();
+    const unlockedAt = Date.now();
     unlockedContext = {
       accountKey: unlockedPayload.accountKey,
-      unlockedAt: Date.now(),
+      unlockedAt,
+      unlockedUntil: unlockedAt + state.unlockIdleTimeoutMs,
     };
     setPhase('ready', null);
+    await persistUnlockedContext();
     armIdleLockTimer();
+    void maybeAutoApproveUnlockGrants();
 
     const warmupResult = await refreshCredentialCache();
     if (!warmupResult.ok) {

@@ -8,7 +8,9 @@ function createResponse(input: {
   body?: string | Uint8Array;
   url?: string;
 }): Response {
-  const response = new Response(input.body ?? '', {
+  const responseBody =
+    input.body instanceof Uint8Array ? new Blob([new Uint8Array(Array.from(input.body))]) : (input.body ?? '');
+  const response = new Response(responseBody, {
     status: input.status ?? 200,
     headers: input.headers ?? {},
   });
@@ -123,5 +125,48 @@ describe('site icon discovery', () => {
       fetchCalls.some((entry) => entry.includes('domain=foo.bar.example.com')),
     ).toBe(true);
     expect(fetchCalls.some((entry) => entry.includes('domain=example.com'))).toBe(true);
+  });
+
+  test('falls back to conventional /favicon.ico even when homepage fetch fails', async () => {
+    const fetchCalls: string[] = [];
+    const fetchImpl = async (url: string | URL): Promise<Response> => {
+      const value = String(url);
+      fetchCalls.push(value);
+      if (value === 'https://direct-icon.example.com/') {
+        return createResponse({
+          status: 403,
+          headers: { 'content-type': 'text/plain' },
+          body: 'forbidden',
+          url: value,
+        });
+      }
+      if (value === 'https://direct-icon.example.com/favicon.ico') {
+        return createResponse({
+          headers: { 'content-type': 'image/x-icon' },
+          body: new Uint8Array([0, 1, 2, 3, 4, 5]),
+          url: value,
+        });
+      }
+      return createResponse({
+        status: 404,
+        headers: { 'content-type': 'text/plain' },
+        body: 'not-found',
+        url: value,
+      });
+    };
+
+    const resolved = await discoverSiteIcon({
+      domain: 'direct-icon.example.com',
+      nowIso: '2026-03-22T12:00:00.000Z',
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        domain: 'direct-icon.example.com',
+        sourceUrl: 'https://direct-icon.example.com/favicon.ico',
+      }),
+    );
+    expect(fetchCalls).toContain('https://direct-icon.example.com/favicon.ico');
   });
 });

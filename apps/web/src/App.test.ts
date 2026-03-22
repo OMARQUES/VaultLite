@@ -36,6 +36,10 @@ function createSessionStore(
     }),
     refreshBootstrapState: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(undefined),
+    refreshSessionPolicy: vi.fn().mockResolvedValue(undefined),
+    updateSessionPolicy: vi.fn().mockResolvedValue({
+      policy: { unlockIdleTimeoutMs: 5 * 60 * 1000 },
+    }),
     prepareOnboarding: vi.fn(),
     finalizeOnboarding: vi.fn(),
     remoteAuthenticate: vi.fn(),

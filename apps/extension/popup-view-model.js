@@ -44,6 +44,63 @@ export function hasSameItemOrder(previousItems, nextItems) {
   return previousItems.length > 0;
 }
 
+function normalizeRenderText(value) {
+  return typeof value === 'string' ? value : '';
+}
+
+function quickActionSignature(item, input) {
+  const quickAction = resolveRowQuickAction({
+    item,
+    pageEligible: input?.pageEligible === true,
+    fillDisabledReason:
+      typeof input?.fillDisabledReason === 'string' && input.fillDisabledReason.trim().length > 0
+        ? input.fillDisabledReason.trim()
+        : null,
+  });
+  if (!quickAction) {
+    return 'none';
+  }
+  return `${quickAction.type}:${quickAction.disabled ? 'disabled' : 'enabled'}:${quickAction.tooltip}`;
+}
+
+export function hasSameRenderableRows(previousItems, nextItems, input) {
+  if (!Array.isArray(previousItems) || !Array.isArray(nextItems)) {
+    return false;
+  }
+  if (previousItems.length !== nextItems.length) {
+    return false;
+  }
+  for (let index = 0; index < previousItems.length; index += 1) {
+    const previous = previousItems[index] ?? null;
+    const next = nextItems[index] ?? null;
+    if (!previous || !next) {
+      return false;
+    }
+    if (previous.itemId !== next.itemId) {
+      return false;
+    }
+    if (normalizeRenderText(previous.itemType) !== normalizeRenderText(next.itemType)) {
+      return false;
+    }
+    if (normalizeRenderText(previous.title) !== normalizeRenderText(next.title)) {
+      return false;
+    }
+    if (normalizeRenderText(previous.subtitle) !== normalizeRenderText(next.subtitle)) {
+      return false;
+    }
+    if (normalizeRenderText(previous.urlHostSummary) !== normalizeRenderText(next.urlHostSummary)) {
+      return false;
+    }
+    if (normalizeRenderText(previous.firstUrl) !== normalizeRenderText(next.firstUrl)) {
+      return false;
+    }
+    if (quickActionSignature(previous, input) !== quickActionSignature(next, input)) {
+      return false;
+    }
+  }
+  return previousItems.length > 0;
+}
+
 export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }

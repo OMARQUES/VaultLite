@@ -73,6 +73,82 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken }),
       });
     },
+    async getSessionPolicy(bearerToken) {
+      return requestJson(`${base}/api/auth/session-policy`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken }),
+      });
+    },
+    async requestUnlockGrant(input) {
+      return requestJson(`${base}/api/auth/unlock-grant/request`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          deploymentFingerprint: input?.deploymentFingerprint,
+          targetSurface: input?.targetSurface,
+          requestPublicKey: input?.requestPublicKey,
+          clientNonce: input?.clientNonce,
+        }),
+      });
+    },
+    async listPendingUnlockGrants(input = {}) {
+      return requestJson(`${base}/api/auth/unlock-grant/pending`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async approveUnlockGrant(input) {
+      return requestJson(`${base}/api/auth/unlock-grant/approve`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          requestId: input?.requestId,
+          approvalNonce: input?.approvalNonce,
+          unlockAccountKey: input?.unlockAccountKey,
+        }),
+      });
+    },
+    async rejectUnlockGrant(input) {
+      return requestJson(`${base}/api/auth/unlock-grant/reject`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          requestId: input?.requestId,
+          rejectionReasonCode: input?.rejectionReasonCode,
+        }),
+      });
+    },
+    async getUnlockGrantStatus(input) {
+      return requestJson(`${base}/api/auth/unlock-grant/status`, {
+        method: 'POST',
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          requestId: input?.requestId,
+          requestProof: input?.requestProof,
+        }),
+      });
+    },
+    async consumeUnlockGrant(input) {
+      return requestJson(`${base}/api/auth/unlock-grant/consume`, {
+        method: 'POST',
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          requestId: input?.requestId,
+          requestProof: input?.requestProof,
+          consumeNonce: input?.consumeNonce,
+        }),
+      });
+    },
+    async recoverExtensionSession(input) {
+      return requestJson(`${base}/api/auth/extension/session/recover`, {
+        method: 'POST',
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          deviceId: input?.deviceId,
+          sessionRecoverKey: input?.sessionRecoverKey,
+        }),
+      });
+    },
     async fetchSnapshot(input) {
       const query = new URLSearchParams();
       if (input?.snapshotToken) {

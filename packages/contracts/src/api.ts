@@ -586,6 +586,8 @@ export const SessionRestoreResponseSchema = z
     sessionState: SessionStateSchema,
     extensionSessionToken: z.string().min(1).optional(),
     sessionExpiresAt: isoDatetimeSchema.optional(),
+    unlockIdleTimeoutMs: z.number().int().positive().optional(),
+    unlockGrantEnabled: z.boolean().optional(),
     user: z
       .object({
         userId: z.string().min(1),
@@ -604,6 +606,194 @@ export const SessionRestoreResponseSchema = z
       })
       .strict()
       .optional(),
+  })
+  .strict();
+
+export const SessionPolicySchema = z
+  .object({
+    unlockIdleTimeoutMs: z.number().int().min(30_000).max(24 * 60 * 60 * 1000),
+  })
+  .strict();
+
+export const SessionPolicyOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    policy: SessionPolicySchema,
+    bounds: z
+      .object({
+        minUnlockIdleTimeoutMs: z.number().int().positive(),
+        maxUnlockIdleTimeoutMs: z.number().int().positive(),
+        defaultUnlockIdleTimeoutMs: z.number().int().positive(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const SessionPolicyUpdateInputSchema = SessionPolicySchema;
+
+export const UnlockGrantSurfaceSchema = z.enum(['web', 'extension']);
+
+export const UnlockGrantRequestPublicKeySchema = base64UrlSchema.min(40);
+
+export const UnlockGrantRequestInputSchema = z
+  .object({
+    deploymentFingerprint: z.string().min(1),
+    targetSurface: UnlockGrantSurfaceSchema,
+    requestPublicKey: UnlockGrantRequestPublicKeySchema,
+    clientNonce: base64UrlSchema.min(16),
+  })
+  .strict();
+
+export const UnlockGrantRequestOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    requestId: z.string().min(16),
+    expiresAt: isoDatetimeSchema,
+    interval: z.number().int().positive(),
+    serverOrigin: z.string().url(),
+    targetSurface: UnlockGrantSurfaceSchema,
+  })
+  .strict();
+
+export const UnlockGrantPendingRecordSchema = z
+  .object({
+    requestId: z.string().min(16),
+    requesterSurface: UnlockGrantSurfaceSchema,
+    requesterDeviceId: z.string().min(1),
+    approverSurface: UnlockGrantSurfaceSchema,
+    approverDeviceId: z.string().min(1),
+    status: z.enum(['pending', 'approved', 'rejected', 'consumed', 'expired']),
+    createdAt: isoDatetimeSchema,
+    expiresAt: isoDatetimeSchema,
+    approvedAt: isoDatetimeSchema.nullable(),
+  })
+  .strict();
+
+export const UnlockGrantPendingListOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    requests: z.array(UnlockGrantPendingRecordSchema),
+  })
+  .strict();
+
+export const UnlockGrantActionOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const UnlockGrantProofSchema = z
+  .object({
+    nonce: base64UrlSchema.min(16),
+    signature: base64UrlSchema.min(40),
+  })
+  .strict();
+
+export const UnlockGrantApproveInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    approvalNonce: base64UrlSchema.min(16),
+    unlockAccountKey: z.string().min(20).optional(),
+  })
+  .strict();
+
+export const UnlockGrantRejectInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    rejectionReasonCode: z.string().min(1).max(64).optional(),
+  })
+  .strict();
+
+export const UnlockGrantStatusInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    requestProof: UnlockGrantProofSchema,
+  })
+  .strict();
+
+export const UnlockGrantStatusOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    status: z.enum([
+      'authorization_pending',
+      'slow_down',
+      'approved',
+      'rejected',
+      'consumed',
+      'expired',
+      'denied',
+    ]),
+    interval: z.number().int().positive().optional(),
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const UnlockGrantConsumeInputSchema = z
+  .object({
+    requestId: z.string().min(16),
+    requestProof: UnlockGrantProofSchema,
+    consumeNonce: base64UrlSchema.min(16),
+  })
+  .strict();
+
+export const UnlockGrantConsumeOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    extensionSessionToken: z.string().min(1).optional(),
+    sessionExpiresAt: isoDatetimeSchema.optional(),
+    unlockAccountKey: z.string().min(20).optional(),
+    sessionState: SessionStateSchema,
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const ExtensionSessionRecoverInputSchema = z
+  .object({
+    deviceId: z.string().min(1),
+    sessionRecoverKey: base64UrlSchema.min(24),
+  })
+  .strict();
+
+export const ExtensionSessionRecoverOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    extensionSessionToken: z.string().min(1),
+    sessionExpiresAt: isoDatetimeSchema,
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
   })
   .strict();
 
@@ -630,6 +820,7 @@ export const ExtensionTrustedSessionOutputSchema = z
     result: CanonicalResultSchema,
     extensionSessionToken: z.string().min(1),
     sessionExpiresAt: isoDatetimeSchema,
+    sessionRecoverKey: base64UrlSchema.min(24).optional(),
     user: z
       .object({
         userId: z.string().min(1),
@@ -945,9 +1136,27 @@ export type AttachmentUploadFinalizeOutput = z.infer<typeof AttachmentUploadFina
 export type AttachmentUploadEnvelopeOutput = z.infer<typeof AttachmentUploadEnvelopeOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
+export type SessionPolicy = z.infer<typeof SessionPolicySchema>;
+export type SessionPolicyOutput = z.infer<typeof SessionPolicyOutputSchema>;
+export type SessionPolicyUpdateInput = z.infer<typeof SessionPolicyUpdateInputSchema>;
 export type LocalUnlockEnvelope = z.infer<typeof LocalUnlockEnvelopeSchema>;
 export type ExtensionTrustedPackage = z.infer<typeof ExtensionTrustedPackageSchema>;
 export type ExtensionTrustedSessionOutput = z.infer<typeof ExtensionTrustedSessionOutputSchema>;
+export type UnlockGrantSurface = z.infer<typeof UnlockGrantSurfaceSchema>;
+export type UnlockGrantRequestInput = z.infer<typeof UnlockGrantRequestInputSchema>;
+export type UnlockGrantRequestOutput = z.infer<typeof UnlockGrantRequestOutputSchema>;
+export type UnlockGrantPendingRecord = z.infer<typeof UnlockGrantPendingRecordSchema>;
+export type UnlockGrantPendingListOutput = z.infer<typeof UnlockGrantPendingListOutputSchema>;
+export type UnlockGrantActionOutput = z.infer<typeof UnlockGrantActionOutputSchema>;
+export type UnlockGrantProof = z.infer<typeof UnlockGrantProofSchema>;
+export type UnlockGrantApproveInput = z.infer<typeof UnlockGrantApproveInputSchema>;
+export type UnlockGrantRejectInput = z.infer<typeof UnlockGrantRejectInputSchema>;
+export type UnlockGrantStatusInput = z.infer<typeof UnlockGrantStatusInputSchema>;
+export type UnlockGrantStatusOutput = z.infer<typeof UnlockGrantStatusOutputSchema>;
+export type UnlockGrantConsumeInput = z.infer<typeof UnlockGrantConsumeInputSchema>;
+export type UnlockGrantConsumeOutput = z.infer<typeof UnlockGrantConsumeOutputSchema>;
+export type ExtensionSessionRecoverInput = z.infer<typeof ExtensionSessionRecoverInputSchema>;
+export type ExtensionSessionRecoverOutput = z.infer<typeof ExtensionSessionRecoverOutputSchema>;
 export type ExtensionLinkRequestInput = z.infer<typeof ExtensionLinkRequestInputSchema>;
 export type ExtensionLinkRequestOutput = z.infer<typeof ExtensionLinkRequestOutputSchema>;
 export type ExtensionLinkApproveInput = z.infer<typeof ExtensionLinkApproveInputSchema>;

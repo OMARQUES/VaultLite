@@ -19,6 +19,7 @@ import {
   buildPersistedPopupUiState,
   buildCredentialMonogram,
   hasSameItemOrder,
+  hasSameRenderableRows,
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
@@ -390,6 +391,62 @@ function nextFaviconCandidate(item) {
   return candidates[nextIndex] ?? null;
 }
 
+function firstFaviconCandidate(item) {
+  const candidates = Array.isArray(item?.faviconCandidates) ? item.faviconCandidates : [];
+  if (candidates.length === 0) {
+    return '';
+  }
+  return typeof candidates[0] === 'string' ? candidates[0] : '';
+}
+
+function patchListFavicons(previousItems, nextItems) {
+  const previousByItemId = new Map(
+    (Array.isArray(previousItems) ? previousItems : [])
+      .filter((item) => item && typeof item.itemId === 'string')
+      .map((item) => [item.itemId, item]),
+  );
+  const rowsByItemId = new Map(
+    Array.from(elements.credentialsList.querySelectorAll('.vault-row[data-item-id]')).map((row) => [
+      row.getAttribute('data-item-id'),
+      row,
+    ]),
+  );
+  for (const item of Array.isArray(nextItems) ? nextItems : []) {
+    if (!item || typeof item.itemId !== 'string') {
+      continue;
+    }
+    const previousItem = previousByItemId.get(item.itemId) ?? null;
+    const previousFirst = firstFaviconCandidate(previousItem);
+    const nextFirst = firstFaviconCandidate(item);
+    if (previousFirst === nextFirst) {
+      continue;
+    }
+    faviconIndexByItemId.set(item.itemId, 0);
+    const row = rowsByItemId.get(item.itemId) ?? null;
+    const shell = row?.querySelector('.monogram');
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+    if (!nextFirst) {
+      shell.classList.remove('monogram--with-image');
+      shell.textContent = buildCredentialMonogram(item.title);
+      continue;
+    }
+    shell.classList.add('monogram--with-image');
+    let image = shell.querySelector('.credential-favicon');
+    if (!(image instanceof HTMLImageElement)) {
+      shell.textContent = '';
+      image = document.createElement('img');
+      image.className = 'credential-favicon';
+      image.alt = '';
+      image.loading = 'lazy';
+      shell.append(image);
+    }
+    image.dataset.itemId = item.itemId;
+    image.src = nextFirst;
+  }
+}
+
 function buildListLeadingVisual(item) {
   const faviconUrl = activeFaviconUrl(item);
   if (!faviconUrl) {
@@ -565,6 +622,7 @@ function restoreListScrollAnchor(input) {
 
 function renderCredentialList(items) {
   const previousItems = currentItems;
+  const previousSelectedItemId = selectedItemId;
   const previousAnchor = captureListScrollAnchor();
   currentItems = Array.isArray(items) ? items : [];
   selectedItemId = selectItemIdAfterRefresh(selectedItemId, currentItems);
@@ -628,14 +686,31 @@ function renderCredentialList(items) {
     return;
   }
 
+  const fillDisabledReason =
+    fillBlockedState && fillBlockedState.pageUrl === activePageUrl ? fillBlockedState.reason : null;
+  const canReuseExistingRows =
+    !vaultLoading &&
+    !listErrorMessage &&
+    previousSelectedItemId === selectedItemId &&
+    hasSameRenderableRows(previousItems, currentItems, {
+      pageEligible: activePageEligible,
+      fillDisabledReason,
+    });
+  if (canReuseExistingRows) {
+    patchListFavicons(previousItems, currentItems);
+    renderCredentialDetails();
+    persistPopupUiState();
+    popupAutosizer?.schedule();
+    return;
+  }
+
   const rows = currentItems
     .map((item) => {
       const selectedClass = item.itemId === selectedItemId ? ' is-selected' : '';
       const quickAction = resolveRowQuickAction({
         item,
         pageEligible: activePageEligible,
-        fillDisabledReason:
-          fillBlockedState && fillBlockedState.pageUrl === activePageUrl ? fillBlockedState.reason : null,
+        fillDisabledReason,
       });
       const rowClass = quickAction ? ' has-row-action' : '';
       let sideAction = '';
@@ -688,8 +763,6 @@ function renderCredentialList(items) {
 
   elements.credentialsList.innerHTML = rows;
   if (preserveScroll) {
-    restoreListScrollAnchor(previousAnchor);
-  } else if (previousAnchor.scrollTop > 0) {
     restoreListScrollAnchor(previousAnchor);
   }
   renderCredentialDetails();
@@ -805,11 +878,20 @@ async function ensureServerOriginConfigured() {
   return { ok: true };
 }
 
-async function refreshStateAndMaybeList() {
-  vaultLoading = true;
-  detailLoading = Boolean(selectedItemId);
-  listErrorMessage = '';
-  renderCredentialList(currentItems);
+async function refreshStateAndMaybeList(options = {}) {
+  const fetchList = options?.fetchList !== false;
+  const showLoading = options?.showLoading !== false && fetchList;
+  if (showLoading) {
+    vaultLoading = true;
+    detailLoading = Boolean(selectedItemId);
+    listErrorMessage = '';
+    if (currentItems.length === 0) {
+      renderCredentialList(currentItems);
+    } else {
+      renderCredentialDetails();
+      popupAutosizer?.schedule();
+    }
+  }
 
   let stateResponse;
   let localPage = { url: '', eligible: false };
@@ -843,6 +925,17 @@ async function refreshStateAndMaybeList() {
   }
 
   if (resolvePopupPhase(stateResponse.state) === 'ready') {
+    if (!fetchList) {
+      const pageChanged = localPage.url !== activePageUrl || localPage.eligible !== activePageEligible;
+      renderState({
+        state: stateResponse.state,
+        page: localPage,
+      });
+      if (pageChanged && currentItems.length > 0) {
+        renderCredentialList(currentItems);
+      }
+      return;
+    }
     const listResponse = await sendBackgroundCommand({
       type: 'vaultlite.list_credentials',
       query: elements.searchInput.value,
@@ -1611,7 +1704,10 @@ function scheduleRefresh() {
     window.clearInterval(refreshTimer);
   }
   refreshTimer = window.setInterval(() => {
-    void refreshStateAndMaybeList();
+    void refreshStateAndMaybeList({
+      fetchList: false,
+      showLoading: false,
+    });
   }, 20_000);
 }
 
@@ -1619,6 +1715,7 @@ wireEvents();
 popupAutosizer = createPopupAutosizer({
   shell: document.querySelector('.popup-shell'),
   body: document.body,
+  preservedScrollNode: elements.credentialsList,
   maxHeight: 600,
 });
 renderState({

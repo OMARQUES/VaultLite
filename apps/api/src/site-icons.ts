@@ -321,21 +321,24 @@ export async function discoverSiteIcon(input: {
   const maxHtmlBytes = input.maxHtmlBytes ?? DEFAULT_MAX_HTML_BYTES;
 
   const homepageUrl = `https://${normalizedDomain}/`;
-  const homepageResponse = await fetchWithTimeout(fetchImpl, homepageUrl, timeoutMs);
-  if (!homepageResponse || !homepageResponse.ok) {
-    return null;
-  }
-  const homepageHtml = await readResponseTextWithLimit(homepageResponse, maxHtmlBytes);
-  if (!homepageHtml) {
-    return null;
-  }
-  const baseUrl = homepageResponse.url || homepageUrl;
-  const { icons: linkIcons, manifests } = parseHeadCandidates({
-    html: homepageHtml,
-    baseUrl,
-  });
-
+  const linkIcons: CandidateIconUrl[] = [];
   const manifestIcons: CandidateIconUrl[] = [];
+  const manifests: string[] = [];
+
+  const homepageResponse = await fetchWithTimeout(fetchImpl, homepageUrl, timeoutMs);
+  if (homepageResponse && homepageResponse.ok) {
+    const homepageHtml = await readResponseTextWithLimit(homepageResponse, maxHtmlBytes);
+    if (homepageHtml) {
+      const baseUrl = homepageResponse.url || homepageUrl;
+      const parsedHead = parseHeadCandidates({
+        html: homepageHtml,
+        baseUrl,
+      });
+      linkIcons.push(...parsedHead.icons);
+      manifests.push(...parsedHead.manifests);
+    }
+  }
+
   for (const manifestUrl of manifests) {
     const response = await fetchWithTimeout(fetchImpl, manifestUrl, timeoutMs);
     if (!response || !response.ok) {
@@ -356,7 +359,12 @@ export async function discoverSiteIcon(input: {
   const conventionalCandidates: CandidateIconUrl[] = [
     { url: `https://${normalizedDomain}/favicon.ico`, score: 70 },
     { url: `https://${normalizedDomain}/apple-touch-icon.png`, score: 65 },
+    { url: `https://${normalizedDomain}/favicon.svg`, score: 62 },
     { url: `https://${normalizedDomain}/favicon.png`, score: 60 },
+    { url: `https://${normalizedDomain}/favicon.jpg`, score: 58 },
+    { url: `https://${normalizedDomain}/favicon.jpeg`, score: 57 },
+    { url: `https://${normalizedDomain}/favicon.webp`, score: 56 },
+    { url: `https://${normalizedDomain}/apple-touch-icon-precomposed.png`, score: 55 },
   ];
 
   const fallbackCandidates: CandidateIconUrl[] = [

@@ -7,6 +7,7 @@ import {
   resolveRowQuickAction,
   resolvePopupPhase,
   hasSameItemOrder,
+  hasSameRenderableRows,
   toNavigableUrl,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
@@ -77,6 +78,42 @@ describe('popup view model helpers', () => {
         ],
       ),
     ).toBe(false);
+  });
+
+  test('detects renderable row stability while allowing favicon-only updates', () => {
+    const base = [
+      {
+        itemId: 'a',
+        itemType: 'login',
+        title: 'Amazon',
+        subtitle: 'user@example.com',
+        urlHostSummary: 'amazon.com',
+        firstUrl: 'https://amazon.com',
+        matchFlags: { exactOrigin: true, domainScore: 4 },
+        faviconCandidates: ['data:image/png;base64,AAA'],
+      },
+    ];
+    const same = [
+      {
+        itemId: 'a',
+        itemType: 'login',
+        title: 'Amazon',
+        subtitle: 'user@example.com',
+        urlHostSummary: 'amazon.com',
+        firstUrl: 'https://amazon.com',
+        matchFlags: { exactOrigin: true, domainScore: 4 },
+        faviconCandidates: ['data:image/png;base64,AAA'],
+      },
+    ];
+    const changedFavicon = [
+      {
+        ...same[0],
+        faviconCandidates: ['data:image/png;base64,BBB'],
+      },
+    ];
+
+    expect(hasSameRenderableRows(base, same, { pageEligible: true, fillDisabledReason: null })).toBe(true);
+    expect(hasSameRenderableRows(base, changedFavicon, { pageEligible: true, fillDisabledReason: null })).toBe(true);
   });
 
   test('prefers quick fill action for suggested login on eligible page', () => {

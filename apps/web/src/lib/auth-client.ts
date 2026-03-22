@@ -38,8 +38,18 @@ import type {
   RecentReauthOutput,
   RemoteAuthenticationChallengeOutput,
   RuntimeMetadata,
+  SessionPolicyOutput,
+  SessionPolicyUpdateInput,
   SessionRestoreResponse,
   TrustedSessionResponse,
+  UnlockGrantActionOutput,
+  UnlockGrantConsumeInput,
+  UnlockGrantConsumeOutput,
+  UnlockGrantPendingListOutput,
+  UnlockGrantRequestInput,
+  UnlockGrantRequestOutput,
+  UnlockGrantStatusInput,
+  UnlockGrantStatusOutput,
 } from '@vaultlite/contracts';
 import { dispatchVaultUnauthorizedEvent } from './http-events';
 
@@ -117,6 +127,18 @@ export interface VaultLiteAuthClient {
   listExtensionLinkPending(): Promise<ExtensionLinkPendingListOutput>;
   approveExtensionLink(input: ExtensionLinkApproveInput): Promise<ExtensionLinkActionOutput>;
   rejectExtensionLink(input: ExtensionLinkRejectInput): Promise<ExtensionLinkActionOutput>;
+  getSessionPolicy(): Promise<SessionPolicyOutput>;
+  updateSessionPolicy(input: SessionPolicyUpdateInput): Promise<SessionPolicyOutput>;
+  requestUnlockGrant(input: UnlockGrantRequestInput): Promise<UnlockGrantRequestOutput>;
+  listPendingUnlockGrants(): Promise<UnlockGrantPendingListOutput>;
+  approveUnlockGrant(input: {
+    requestId: string;
+    approvalNonce: string;
+    unlockAccountKey?: string;
+  }): Promise<UnlockGrantActionOutput>;
+  rejectUnlockGrant(input: { requestId: string; rejectionReasonCode?: string }): Promise<UnlockGrantActionOutput>;
+  getUnlockGrantStatus(input: UnlockGrantStatusInput): Promise<UnlockGrantStatusOutput>;
+  consumeUnlockGrant(input: UnlockGrantConsumeInput): Promise<UnlockGrantConsumeOutput>;
   resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
   discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
   listManualSiteIcons(): Promise<SiteIconManualListOutput>;
@@ -432,6 +454,78 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
           method: 'POST',
           body: JSON.stringify(input),
         }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    getSessionPolicy() {
+      return requestJson<SessionPolicyOutput>(`${baseUrl}/api/auth/session-policy`, undefined, {
+        emitUnauthorizedEvent: true,
+      });
+    },
+    updateSessionPolicy(input) {
+      return requestJson<SessionPolicyOutput>(
+        `${baseUrl}/api/auth/session-policy`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    requestUnlockGrant(input) {
+      return requestJson<UnlockGrantRequestOutput>(
+        `${baseUrl}/api/auth/unlock-grant/request`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listPendingUnlockGrants() {
+      return requestJson<UnlockGrantPendingListOutput>(
+        `${baseUrl}/api/auth/unlock-grant/pending`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    approveUnlockGrant(input) {
+      return requestJson<UnlockGrantActionOutput>(
+        `${baseUrl}/api/auth/unlock-grant/approve`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    rejectUnlockGrant(input) {
+      return requestJson<UnlockGrantActionOutput>(
+        `${baseUrl}/api/auth/unlock-grant/reject`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    getUnlockGrantStatus(input) {
+      return requestJson<UnlockGrantStatusOutput>(
+        `${baseUrl}/api/auth/unlock-grant/status`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    consumeUnlockGrant(input) {
+      return requestJson<UnlockGrantConsumeOutput>(
+        `${baseUrl}/api/auth/unlock-grant/consume`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
         { emitUnauthorizedEvent: true },
       );
     },

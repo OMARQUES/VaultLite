@@ -220,6 +220,7 @@ onMounted(() => {
   window.addEventListener('message', handleBridgeResponseEvent as EventListener);
   void refreshDevices();
   void refreshRuntimeMetadata();
+  void sessionStore.refreshSessionPolicy().catch(() => undefined);
   void refreshExtensionLinkRequests();
   void refreshManualIcons();
   if (showExtensionSection.value) {
@@ -442,14 +443,21 @@ async function lockNow() {
   await router.push('/unlock');
 }
 
-function updateAutoLockSetting() {
+async function updateAutoLockSetting() {
   const parsedValue = Number.parseInt(selectedAutoLockAfterMs.value, 10);
   if (!Number.isFinite(parsedValue)) {
     return;
   }
 
-  sessionStore.setAutoLockAfterMs(parsedValue);
-  showToast('Lock timeout updated');
+  try {
+    await sessionStore.updateSessionPolicy({
+      unlockIdleTimeoutMs: parsedValue,
+    });
+    showToast('Lock timeout updated');
+  } catch (error) {
+    errorMessage.value = toHumanErrorMessage(error);
+    selectedAutoLockAfterMs.value = String(sessionStore.state.autoLockAfterMs);
+  }
 }
 
 async function refreshDevices() {

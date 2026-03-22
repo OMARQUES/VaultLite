@@ -56,6 +56,12 @@ export interface SessionRecord {
   rotatedFromSessionId: string | null;
 }
 
+export interface SessionPolicyRecord {
+  userId: string;
+  unlockIdleTimeoutMs: number;
+  updatedAt: string;
+}
+
 export interface ExtensionPairingRecord {
   pairingId: string;
   codeHash: string;
@@ -102,6 +108,48 @@ export interface ExtensionLinkRequestRecord {
   rejectionReasonCode: string | null;
   consumedAt: string | null;
   consumedByDeviceId: string | null;
+}
+
+export interface SurfaceLinkRecord {
+  userId: string;
+  webDeviceId: string;
+  extensionDeviceId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type UnlockGrantStatus = 'pending' | 'approved' | 'rejected' | 'consumed';
+
+export type UnlockGrantSurface = 'web' | 'extension';
+
+export interface UnlockGrantRecord {
+  requestId: string;
+  userId: string;
+  deploymentFingerprint: string;
+  serverOrigin: string;
+  requesterSurface: UnlockGrantSurface;
+  requesterDeviceId: string;
+  requesterPublicKey: string;
+  requesterClientNonce: string;
+  approverSurface: UnlockGrantSurface;
+  approverDeviceId: string;
+  status: UnlockGrantStatus;
+  createdAt: string;
+  expiresAt: string;
+  approvedAt: string | null;
+  approvedByDeviceId: string | null;
+  unlockAccountKey: string | null;
+  rejectedAt: string | null;
+  rejectionReasonCode: string | null;
+  consumedAt: string | null;
+  consumedByDeviceId: string | null;
+}
+
+export interface ExtensionSessionRecoverSecretRecord {
+  userId: string;
+  deviceId: string;
+  secretHash: string;
+  updatedAt: string;
 }
 
 export interface SiteIconCacheRecord {
@@ -253,6 +301,11 @@ export interface SessionRepository {
   revokeByDeviceId(deviceId: string, revokedAtIso: string): Promise<void>;
 }
 
+export interface SessionPolicyRepository {
+  findByUserId(userId: string): Promise<SessionPolicyRecord | null>;
+  upsert(record: SessionPolicyRecord): Promise<SessionPolicyRecord>;
+}
+
 export interface ExtensionPairingRepository {
   create(record: ExtensionPairingRecord): Promise<ExtensionPairingRecord>;
   findByCodeHashAny(codeHash: string): Promise<ExtensionPairingRecord | null>;
@@ -292,6 +345,51 @@ export interface ExtensionLinkRequestRepository {
     consumedAt: string;
     consumedByDeviceId: string;
   }): Promise<ExtensionLinkRequestRecord | null>;
+}
+
+export interface SurfaceLinkRepository {
+  upsert(record: SurfaceLinkRecord): Promise<SurfaceLinkRecord>;
+  findByWebDeviceId(userId: string, webDeviceId: string): Promise<SurfaceLinkRecord | null>;
+  findByExtensionDeviceId(userId: string, extensionDeviceId: string): Promise<SurfaceLinkRecord | null>;
+  removeByDeviceId(userId: string, deviceId: string): Promise<void>;
+}
+
+export interface UnlockGrantRepository {
+  create(record: UnlockGrantRecord): Promise<UnlockGrantRecord>;
+  findByRequestId(requestId: string): Promise<UnlockGrantRecord | null>;
+  listPendingForApprover(
+    userId: string,
+    approverSurface: UnlockGrantSurface,
+    approverDeviceId: string,
+    nowIso: string,
+    limit: number,
+  ): Promise<UnlockGrantRecord[]>;
+  approve(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    approvedAt: string;
+    approvedByDeviceId: string;
+    unlockAccountKey: string | null;
+  }): Promise<UnlockGrantRecord | null>;
+  reject(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    rejectedAt: string;
+    reasonCode: string | null;
+  }): Promise<UnlockGrantRecord | null>;
+  consume(input: {
+    requestId: string;
+    expectedStatus: UnlockGrantStatus;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<UnlockGrantRecord | null>;
+}
+
+export interface ExtensionSessionRecoverSecretRepository {
+  findByDeviceId(deviceId: string): Promise<ExtensionSessionRecoverSecretRecord | null>;
+  upsert(record: ExtensionSessionRecoverSecretRecord): Promise<ExtensionSessionRecoverSecretRecord>;
+  removeByDeviceId(deviceId: string): Promise<void>;
+  removeByUserId(userId: string): Promise<void>;
 }
 
 export interface AuthRateLimitRepository {
@@ -442,8 +540,12 @@ export interface VaultLiteStorage {
   users: UserAccountRepository;
   devices: DeviceRepository;
   sessions: SessionRepository;
+  sessionPolicies: SessionPolicyRepository;
   extensionPairings: ExtensionPairingRepository;
   extensionLinkRequests: ExtensionLinkRequestRepository;
+  surfaceLinks: SurfaceLinkRepository;
+  unlockGrants: UnlockGrantRepository;
+  extensionSessionRecoverSecrets: ExtensionSessionRecoverSecretRepository;
   siteIconCache: SiteIconCacheRepository;
   manualSiteIconOverrides: ManualSiteIconOverrideRepository;
   authRateLimits: AuthRateLimitRepository;
@@ -468,8 +570,12 @@ export function createInMemoryVaultLiteStorage(input: {
   const usersByUsername = new Map<string, UserAccountRecord>();
   const devices = new Map<string, DeviceRecord>();
   const sessions = new Map<string, SessionRecord>();
+  const sessionPolicies = new Map<string, SessionPolicyRecord>();
   const extensionPairings = new Map<string, ExtensionPairingRecord>();
   const extensionLinkRequests = new Map<string, ExtensionLinkRequestRecord>();
+  const surfaceLinksByPair = new Map<string, SurfaceLinkRecord>();
+  const unlockGrants = new Map<string, UnlockGrantRecord>();
+  const extensionSessionRecoverSecrets = new Map<string, ExtensionSessionRecoverSecretRecord>();
   const siteIconCache = new Map<string, SiteIconCacheRecord>();
   const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
   const rateLimits = new Map<string, AuthRateLimitRecord>();
@@ -749,6 +855,16 @@ export function createInMemoryVaultLiteStorage(input: {
         }
       },
     },
+    sessionPolicies: {
+      async findByUserId(userId) {
+        const record = sessionPolicies.get(userId);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        sessionPolicies.set(record.userId, { ...record });
+        return { ...record };
+      },
+    },
     extensionPairings: {
       async create(record) {
         extensionPairings.set(record.pairingId, { ...record });
@@ -856,6 +972,133 @@ export function createInMemoryVaultLiteStorage(input: {
         };
         extensionLinkRequests.set(next.requestId, next);
         return { ...next };
+      },
+    },
+    surfaceLinks: {
+      async upsert(record) {
+        const key = `${record.userId}:${record.webDeviceId}:${record.extensionDeviceId}`;
+        const existing = surfaceLinksByPair.get(key);
+        const next: SurfaceLinkRecord = existing
+          ? { ...existing, updatedAt: record.updatedAt }
+          : { ...record };
+        surfaceLinksByPair.set(key, next);
+        return { ...next };
+      },
+      async findByWebDeviceId(userId, webDeviceId) {
+        for (const record of surfaceLinksByPair.values()) {
+          if (record.userId === userId && record.webDeviceId === webDeviceId) {
+            return { ...record };
+          }
+        }
+        return null;
+      },
+      async findByExtensionDeviceId(userId, extensionDeviceId) {
+        for (const record of surfaceLinksByPair.values()) {
+          if (record.userId === userId && record.extensionDeviceId === extensionDeviceId) {
+            return { ...record };
+          }
+        }
+        return null;
+      },
+      async removeByDeviceId(userId, deviceId) {
+        for (const [key, record] of surfaceLinksByPair.entries()) {
+          if (
+            record.userId === userId &&
+            (record.webDeviceId === deviceId || record.extensionDeviceId === deviceId)
+          ) {
+            surfaceLinksByPair.delete(key);
+          }
+        }
+      },
+    },
+    unlockGrants: {
+      async create(record) {
+        unlockGrants.set(record.requestId, { ...record });
+        return { ...record };
+      },
+      async findByRequestId(requestId) {
+        const record = unlockGrants.get(requestId);
+        return record ? { ...record } : null;
+      },
+      async listPendingForApprover(userId, approverSurface, approverDeviceId, nowIso, limit) {
+        return Array.from(unlockGrants.values())
+          .filter(
+            (record) =>
+              record.userId === userId &&
+              record.approverSurface === approverSurface &&
+              record.approverDeviceId === approverDeviceId &&
+              record.status === 'pending' &&
+              record.expiresAt > nowIso,
+          )
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+          .slice(0, Math.max(1, limit))
+          .map((record) => ({ ...record }));
+      },
+      async approve(inputRecord) {
+        const record = unlockGrants.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: UnlockGrantRecord = {
+          ...record,
+          status: 'approved',
+          approvedAt: inputRecord.approvedAt,
+          approvedByDeviceId: inputRecord.approvedByDeviceId,
+          unlockAccountKey: inputRecord.unlockAccountKey,
+          rejectedAt: null,
+          rejectionReasonCode: null,
+        };
+        unlockGrants.set(next.requestId, next);
+        return { ...next };
+      },
+      async reject(inputRecord) {
+        const record = unlockGrants.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: UnlockGrantRecord = {
+          ...record,
+          status: 'rejected',
+          unlockAccountKey: null,
+          rejectedAt: inputRecord.rejectedAt,
+          rejectionReasonCode: inputRecord.reasonCode,
+        };
+        unlockGrants.set(next.requestId, next);
+        return { ...next };
+      },
+      async consume(inputRecord) {
+        const record = unlockGrants.get(inputRecord.requestId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: UnlockGrantRecord = {
+          ...record,
+          status: 'consumed',
+          consumedAt: inputRecord.consumedAt,
+          consumedByDeviceId: inputRecord.consumedByDeviceId,
+        };
+        unlockGrants.set(next.requestId, next);
+        return { ...next };
+      },
+    },
+    extensionSessionRecoverSecrets: {
+      async findByDeviceId(deviceId) {
+        const record = extensionSessionRecoverSecrets.get(deviceId);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        extensionSessionRecoverSecrets.set(record.deviceId, { ...record });
+        return { ...record };
+      },
+      async removeByDeviceId(deviceId) {
+        extensionSessionRecoverSecrets.delete(deviceId);
+      },
+      async removeByUserId(userId) {
+        for (const [deviceId, record] of extensionSessionRecoverSecrets.entries()) {
+          if (record.userId === userId) {
+            extensionSessionRecoverSecrets.delete(deviceId);
+          }
+        }
       },
     },
     siteIconCache: {
@@ -1274,6 +1517,15 @@ export function createInMemoryVaultLiteStorage(input: {
           });
         }
       }
+      for (const [key, link] of surfaceLinksByPair.entries()) {
+        if (
+          link.userId === inputRecord.userId &&
+          (link.webDeviceId === inputRecord.deviceId || link.extensionDeviceId === inputRecord.deviceId)
+        ) {
+          surfaceLinksByPair.delete(key);
+        }
+      }
+      extensionSessionRecoverSecrets.delete(inputRecord.deviceId);
     },
     async rotatePasswordAtomic(inputRecord) {
       const user = usersById.get(inputRecord.userId);
@@ -1312,6 +1564,11 @@ export function createInMemoryVaultLiteStorage(input: {
             ...session,
             revokedAt: inputRecord.revokedAtIso,
           });
+        }
+      }
+      for (const [deviceId, secret] of extensionSessionRecoverSecrets.entries()) {
+        if (secret.userId === inputRecord.userId) {
+          extensionSessionRecoverSecrets.delete(deviceId);
         }
       }
       sessions.set(inputRecord.newSession.sessionId, { ...inputRecord.newSession });

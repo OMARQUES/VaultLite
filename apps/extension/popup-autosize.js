@@ -46,6 +46,7 @@ export function createPopupAutosizer(input) {
   const header = input?.header ?? shell?.querySelector?.('.popup-header') ?? null;
   const content = input?.content ?? shell?.querySelector?.('.popup-content') ?? null;
   const body = input?.body ?? document.body;
+  const preservedScrollNode = input?.preservedScrollNode ?? null;
   const maxHeight = Math.max(200, toFiniteNumber(input?.maxHeight, MAX_POPUP_HEIGHT));
   if (!(shell instanceof HTMLElement) || !(body instanceof HTMLElement)) {
     return {
@@ -64,7 +65,9 @@ export function createPopupAutosizer(input) {
     if (destroyed) {
       return;
     }
-    body.style.height = 'auto';
+    const previousHeight = Number.parseInt(body.style.height, 10);
+    const previousScrollTop =
+      preservedScrollNode instanceof HTMLElement ? preservedScrollNode.scrollTop : null;
     const nextHeight = measurePopupHeight({
       shell,
       header,
@@ -73,7 +76,13 @@ export function createPopupAutosizer(input) {
       linkRequestOpen: body.dataset.linkRequest === 'open',
       maxHeight,
     });
+    if (Number.isFinite(previousHeight) && Math.abs(previousHeight - nextHeight) <= 1) {
+      return;
+    }
     body.style.height = `${nextHeight}px`;
+    if (preservedScrollNode instanceof HTMLElement && typeof previousScrollTop === 'number' && previousScrollTop > 0) {
+      preservedScrollNode.scrollTop = previousScrollTop;
+    }
   }
 
   function schedule() {

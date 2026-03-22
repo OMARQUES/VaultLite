@@ -29,6 +29,8 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     },
     refreshBootstrapState: vi.fn(async () => undefined),
     restoreSession: vi.fn(async () => undefined),
+    refreshSessionPolicy: vi.fn(async () => undefined),
+    updateSessionPolicy: vi.fn(async () => undefined),
     prepareOnboarding: vi.fn(),
     finalizeOnboarding: vi.fn(),
     remoteAuthenticate: vi.fn(),

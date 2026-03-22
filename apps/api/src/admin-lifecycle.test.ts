@@ -239,6 +239,8 @@ describe('admin lifecycle API', () => {
     expect(await restoreAfterSuspend.json()).toEqual({
       ok: true,
       sessionState: 'remote_authentication_required',
+      unlockGrantEnabled: true,
+      unlockIdleTimeoutMs: 300000,
     });
 
     const protectedAfterSuspend = await app.request('/api/sync/snapshot', {
