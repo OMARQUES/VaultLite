@@ -18,6 +18,7 @@ import { describeFillResult, shouldDisableControlWhileBusy } from './popup-behav
 import {
   buildPersistedPopupUiState,
   buildCredentialMonogram,
+  hasSameItemOrder,
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
@@ -40,6 +41,8 @@ const elements = {
   pairingSection: byId('pairingSection'),
   pairingDescription: byId('pairingDescription'),
   unlockSection: byId('unlockSection'),
+  unlockAccountValue: byId('unlockAccountValue'),
+  unlockDeviceValue: byId('unlockDeviceValue'),
   readySection: byId('readySection'),
   serverUrlInput: byId('serverUrlInput'),
   deviceNameInput: byId('deviceNameInput'),
@@ -376,6 +379,17 @@ function activeFaviconUrl(item) {
   return candidates[candidateIndex] ?? null;
 }
 
+function nextFaviconCandidate(item) {
+  const candidates = Array.isArray(item?.faviconCandidates) ? item.faviconCandidates : [];
+  if (candidates.length === 0) {
+    return null;
+  }
+  const currentIndex = faviconIndexByItemId.get(item.itemId) ?? 0;
+  const nextIndex = currentIndex + 1;
+  faviconIndexByItemId.set(item.itemId, nextIndex);
+  return candidates[nextIndex] ?? null;
+}
+
 function buildListLeadingVisual(item) {
   const faviconUrl = activeFaviconUrl(item);
   if (!faviconUrl) {
@@ -518,8 +532,14 @@ function renderCredentialDetails() {
 }
 
 function renderCredentialList(items) {
+  const previousItems = currentItems;
+  const previousScrollTop = elements.credentialsList.scrollTop;
   currentItems = Array.isArray(items) ? items : [];
   selectedItemId = selectItemIdAfterRefresh(selectedItemId, currentItems);
+  const preserveScroll =
+    previousScrollTop > 0 &&
+    hasSameItemOrder(previousItems, currentItems) &&
+    currentItems.length > 0;
 
   if (currentItems.length === 0) {
     selectedItemId = null;
@@ -635,6 +655,9 @@ function renderCredentialList(items) {
     .join('');
 
   elements.credentialsList.innerHTML = rows;
+  if (preserveScroll) {
+    elements.credentialsList.scrollTop = previousScrollTop;
+  }
   renderCredentialDetails();
   persistPopupUiState();
   popupAutosizer?.schedule();
@@ -652,6 +675,8 @@ function renderState(payload) {
   const resolvedPhase = resolvePopupPhase(currentState);
   applyLayoutState(resolvedPhase);
   elements.deviceNameInput.value = currentState?.deviceName ?? 'VaultLite Extension';
+  elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';
+  elements.unlockDeviceValue.textContent = currentState?.deviceName ?? 'This device';
   if (document.activeElement !== elements.serverUrlInput) {
     elements.serverUrlInput.value = buildServerUrlSuggestion(currentState?.serverOrigin);
   }
@@ -1445,9 +1470,20 @@ function wireEvents() {
       if (!itemId) {
         return;
       }
-      const currentIndex = faviconIndexByItemId.get(itemId) ?? 0;
-      faviconIndexByItemId.set(itemId, currentIndex + 1);
-      renderCredentialList(currentItems);
+      const item = getCredentialByItemId(itemId);
+      const nextCandidate = nextFaviconCandidate(item);
+      if (nextCandidate) {
+        target.src = nextCandidate;
+        return;
+      }
+      const shell = target.closest('.monogram');
+      if (shell instanceof HTMLElement) {
+        shell.classList.remove('monogram--with-image');
+        shell.textContent = buildCredentialMonogram(item?.title ?? '');
+      }
+      if (selectedItemId === itemId) {
+        renderCredentialDetails();
+      }
     },
     true,
   );
@@ -1459,9 +1495,14 @@ function wireEvents() {
       if (!selected) {
         return;
       }
-      const currentIndex = faviconIndexByItemId.get(selected.itemId) ?? 0;
-      faviconIndexByItemId.set(selected.itemId, currentIndex + 1);
-      renderCredentialList(currentItems);
+      const nextCandidate = nextFaviconCandidate(selected);
+      if (nextCandidate) {
+        elements.detailFavicon.src = nextCandidate;
+        return;
+      }
+      elements.detailFavicon.hidden = true;
+      elements.detailFavicon.removeAttribute('src');
+      elements.detailMonogram.hidden = false;
     },
     true,
   );

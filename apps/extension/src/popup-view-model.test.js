@@ -6,6 +6,7 @@ import {
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
+  hasSameItemOrder,
   toNavigableUrl,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
@@ -51,6 +52,33 @@ describe('popup view model helpers', () => {
     expect(toggleSelectedItem('item_1', 'item_2')).toBe('item_2');
   });
 
+  test('detects stable item order for list scroll preservation', () => {
+    expect(
+      hasSameItemOrder(
+        [
+          { itemId: 'a' },
+          { itemId: 'b' },
+        ],
+        [
+          { itemId: 'a' },
+          { itemId: 'b' },
+        ],
+      ),
+    ).toBe(true);
+    expect(
+      hasSameItemOrder(
+        [
+          { itemId: 'a' },
+          { itemId: 'b' },
+        ],
+        [
+          { itemId: 'b' },
+          { itemId: 'a' },
+        ],
+      ),
+    ).toBe(false);
+  });
+
   test('prefers quick fill action for suggested login on eligible page', () => {
     const action = resolveRowQuickAction({
       item: {
@@ -89,7 +117,10 @@ describe('popup view model helpers', () => {
     const candidates = buildFaviconCandidates('https://portal.example.com/login');
     expect(candidates).toEqual([
       'https://portal.example.com/favicon.ico',
+      'https://portal.example.com/favicon.png',
       'https://portal.example.com/apple-touch-icon.png',
+      'https://portal.example.com/apple-touch-icon-precomposed.png',
+      'https://www.google.com/s2/favicons?domain=portal.example.com&sz=64',
       'https://www.google.com/s2/favicons?domain=example.com&sz=64',
     ]);
   });

@@ -60,6 +60,7 @@
       body[data-layout='pairing'] {
         width: var(--pairing-width);
         min-height: var(--pairing-min-height);
+        background: #19181d;
       }
 
       body[data-layout='pairing'][data-link-request='open'] {
@@ -69,6 +70,7 @@
       body[data-layout='unlock'] {
         width: var(--unlock-width);
         min-height: var(--unlock-min-height);
+        background: #19181d;
       }
 
       body[data-layout='ready'] {
@@ -290,6 +292,35 @@
         font-size: 15px;
         color: var(--vl-text-muted);
         line-height: 1.4;
+      }
+
+      .unlock-context {
+        margin-top: 2px;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 78%, transparent);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--vl-surface) 70%, transparent);
+        padding: 10px 12px;
+      }
+
+      .unlock-context-row + .unlock-context-row {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid color-mix(in srgb, var(--vl-divider) 88%, transparent);
+      }
+
+      .unlock-context-label {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text-muted);
+      }
+
+      .unlock-context-value {
+        margin: 4px 0 0;
+        font-size: 33px;
+        font-size: clamp(20px, 3.2vw, 30px);
+        line-height: 1.1;
+        font-weight: 700;
+        color: var(--vl-text);
       }
 
       .field {
@@ -982,9 +1013,19 @@
         </section>
 
         <section id="unlockSection" class="compact-stage" hidden>
-          <p class="compact-intro popup-subtitle">Unlock this trusted device locally.</p>
+          <p class="compact-intro popup-subtitle">Enter your master password to unlock this trusted device.</p>
+          <section class="unlock-context" aria-label="Trusted device context">
+            <div class="unlock-context-row">
+              <p class="unlock-context-label">Account</p>
+              <p class="unlock-context-value" id="unlockAccountValue">—</p>
+            </div>
+            <div class="unlock-context-row">
+              <p class="unlock-context-label">Device</p>
+              <p class="unlock-context-value" id="unlockDeviceValue">—</p>
+            </div>
+          </section>
           <label class="field">
-            <span>Account password</span>
+            <span>Master password</span>
             <input id="unlockPasswordInput" type="password" autocomplete="current-password" />
           </label>
           <div class="actions">

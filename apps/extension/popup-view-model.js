@@ -29,6 +29,21 @@ export function buildCredentialMonogram(title) {
   return `${(parts[0] ?? '').slice(0, 1)}${(parts[1] ?? '').slice(0, 1)}`.toUpperCase();
 }
 
+export function hasSameItemOrder(previousItems, nextItems) {
+  if (!Array.isArray(previousItems) || !Array.isArray(nextItems)) {
+    return false;
+  }
+  if (previousItems.length !== nextItems.length) {
+    return false;
+  }
+  for (let index = 0; index < previousItems.length; index += 1) {
+    if (previousItems[index]?.itemId !== nextItems[index]?.itemId) {
+      return false;
+    }
+  }
+  return previousItems.length > 0;
+}
+
 export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }

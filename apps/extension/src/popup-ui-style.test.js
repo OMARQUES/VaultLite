@@ -49,5 +49,17 @@ describe('popup ui style regressions', () => {
     expect(source).toContain("body[data-layout='pairing'] .popup-content,");
     expect(source).toContain("body[data-layout='unlock'] .popup-content {");
     expect(source).toContain('justify-content: flex-start;');
+    expect(source).toContain("body[data-layout='pairing'] {");
+    expect(source).toContain("body[data-layout='unlock'] {");
+    expect(source).toContain('background: #19181d;');
+  });
+
+  test('renders unlock context block with account and device details', () => {
+    const source = readFileSync(popupHtmlPath, 'utf8');
+    expect(source).toContain('class="unlock-context"');
+    expect(source).toContain('id="unlockAccountValue"');
+    expect(source).toContain('id="unlockDeviceValue"');
+    expect(source).toContain('Enter your master password to unlock this trusted device.');
+    expect(source).toContain('<span>Master password</span>');
   });
 });

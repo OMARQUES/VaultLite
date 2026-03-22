@@ -57,11 +57,16 @@ export function buildFaviconCandidates(rawUrl) {
   }
   const candidates = [
     `https://${host}/favicon.ico`,
+    `https://${host}/favicon.png`,
     `https://${host}/apple-touch-icon.png`,
+    `https://${host}/apple-touch-icon-precomposed.png`,
   ];
+  candidates.push(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`);
   const rootDomain = registrableDomain(host);
-  if (rootDomain) {
-    candidates.push(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(rootDomain)}&sz=64`);
+  if (rootDomain && rootDomain !== host) {
+    candidates.push(
+      `https://www.google.com/s2/favicons?domain=${encodeURIComponent(rootDomain)}&sz=64`,
+    );
   }
   return candidates;
 }

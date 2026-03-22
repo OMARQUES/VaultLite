@@ -9,5 +9,12 @@ describe('popup pairing completion messaging', () => {
     const source = readFileSync(popupScriptPath, 'utf8');
     expect(source).not.toContain("setAlert('success', response.message || 'Extension connected. Unlock this device to continue.');");
   });
-});
 
+  test('binds unlock context values from current extension state', () => {
+    const source = readFileSync(popupScriptPath, 'utf8');
+    expect(source).toContain("unlockAccountValue: byId('unlockAccountValue')");
+    expect(source).toContain("unlockDeviceValue: byId('unlockDeviceValue')");
+    expect(source).toContain("elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';");
+    expect(source).toContain("elements.unlockDeviceValue.textContent = currentState?.deviceName ?? 'This device';");
+  });
+});
