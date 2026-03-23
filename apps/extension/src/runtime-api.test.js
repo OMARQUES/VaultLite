@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createExtensionApiClient } from '../runtime-api.js';
 
@@ -135,5 +135,71 @@ describe('runtime api client', () => {
       cache: 'no-store',
       credentials: 'omit',
     });
+  });
+});
+
+describe('runtime api client manual icon payloads', () => {
+  const serverOrigin = 'http://127.0.0.1:8787';
+  const api = createExtensionApiClient(serverOrigin);
+  const fetchMock = vi.fn();
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    globalThis.fetch = fetchMock;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test('upsertManualSiteIcon does not leak bearerToken in request body', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: 'success_changed' }),
+    });
+
+    await api.upsertManualSiteIcon({
+      bearerToken: 'secret-token',
+      domain: 'example.com',
+      dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+      source: 'file',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${serverOrigin}/api/icons/manual/upsert`);
+    const parsedBody = JSON.parse(String(init.body));
+    expect(parsedBody).toEqual({
+      domain: 'example.com',
+      dataUrl: 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCC',
+      source: 'file',
+    });
+    expect(parsedBody).not.toHaveProperty('bearerToken');
+    expect(init.headers.authorization).toBe('Bearer secret-token');
+  });
+
+  test('removeManualSiteIcon does not leak bearerToken in request body', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: 'success_changed' }),
+    });
+
+    await api.removeManualSiteIcon({
+      bearerToken: 'secret-token',
+      domain: 'example.com',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${serverOrigin}/api/icons/manual/remove`);
+    const parsedBody = JSON.parse(String(init.body));
+    expect(parsedBody).toEqual({
+      domain: 'example.com',
+    });
+    expect(parsedBody).not.toHaveProperty('bearerToken');
+    expect(init.headers.authorization).toBe('Bearer secret-token');
   });
 });

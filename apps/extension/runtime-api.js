@@ -216,14 +216,20 @@ export function createExtensionApiClient(serverOrigin) {
       return requestJson(`${base}/api/icons/manual/upsert`, {
         method: 'POST',
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          domain: input?.domain,
+          dataUrl: input?.dataUrl,
+          source: input?.source,
+        }),
       });
     },
     async removeManualSiteIcon(input) {
       return requestJson(`${base}/api/icons/manual/remove`, {
         method: 'POST',
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          domain: input?.domain,
+        }),
       });
     },
   };

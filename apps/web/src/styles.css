@@ -1649,6 +1649,41 @@ h2 {
   font-weight: 700;
 }
 
+.detail-card__avatar-shell {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+}
+
+.detail-card__avatar-shell.is-editable:hover .detail-card__avatar {
+  filter: blur(1.6px) brightness(0.8);
+}
+
+.detail-card__avatar-edit {
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--vl-primary) 56%, var(--vl-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--vl-shell) 72%, transparent);
+  color: color-mix(in srgb, var(--vl-text) 88%, var(--vl-primary));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.detail-card__avatar-shell.is-editable:hover .detail-card__avatar-edit,
+.detail-card__avatar-shell.is-editable:focus-within .detail-card__avatar-edit {
+  opacity: 1;
+}
+
+.detail-card__avatar-edit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vl-primary) 18%, var(--vl-shell));
+  color: var(--vl-text);
+}
+
 .detail-actions {
   justify-content: flex-end;
   padding: 4px;

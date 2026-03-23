@@ -153,6 +153,11 @@ export function isAllowedSettingsPath(input) {
   return params.get('panel') === 'extension';
 }
 
+export function isAllowedUnlockPath(input) {
+  const pathname = typeof input?.pathname === 'string' ? input.pathname : '';
+  return pathname === '/unlock' || pathname === '/unlock/';
+}
+
 function normalizePort(protocol, port) {
   if (port) {
     return port;

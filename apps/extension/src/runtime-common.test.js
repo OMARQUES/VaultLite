@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 
 import {
   deriveWebOriginFromServerOrigin,
+  isAllowedUnlockPath,
   isAllowedSettingsPath,
   resolveSenderContext,
 } from '../runtime-common.js';
@@ -125,6 +126,34 @@ describe('isAllowedSettingsPath', () => {
       isAllowedSettingsPath({
         pathname: '/settings',
         search: '?panel=data',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('isAllowedUnlockPath', () => {
+  test('allows unlock route with optional trailing slash', () => {
+    expect(
+      isAllowedUnlockPath({
+        pathname: '/unlock',
+      }),
+    ).toBe(true);
+    expect(
+      isAllowedUnlockPath({
+        pathname: '/unlock/',
+      }),
+    ).toBe(true);
+  });
+
+  test('rejects non-unlock routes', () => {
+    expect(
+      isAllowedUnlockPath({
+        pathname: '/settings',
+      }),
+    ).toBe(false);
+    expect(
+      isAllowedUnlockPath({
+        pathname: '/unlocking',
       }),
     ).toBe(false);
   });

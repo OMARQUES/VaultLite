@@ -188,6 +188,37 @@
         color: #96a2b8;
       }
 
+      .search-clear {
+        width: 26px;
+        height: 26px;
+        min-width: 26px;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--vl-text-soft);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        cursor: pointer;
+      }
+
+      .search-clear:hover,
+      .search-clear:focus-visible {
+        background: color-mix(in srgb, var(--vl-surface-3) 70%, transparent);
+        color: var(--vl-text);
+      }
+
+      .search-clear svg {
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
       .header-actions {
         display: inline-flex;
         align-items: center;
@@ -775,6 +806,7 @@
       }
 
       .detail-icon-shell {
+        position: relative;
         width: 48px;
         height: 48px;
         border-radius: 12px;
@@ -784,6 +816,50 @@
         align-items: center;
         justify-content: center;
         background: linear-gradient(180deg, #2c3748, #20293a);
+      }
+
+      .detail-icon-shell.is-editable:hover .detail-favicon,
+      .detail-icon-shell.is-editable:hover .monogram {
+        filter: blur(1.6px) brightness(0.8);
+      }
+
+      .detail-icon-edit {
+        position: absolute;
+        inset: 0;
+        border: 1px solid color-mix(in srgb, var(--vl-primary) 58%, var(--vl-border));
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--vl-shell) 72%, transparent);
+        color: color-mix(in srgb, var(--vl-text) 88%, var(--vl-primary));
+        display: grid;
+        place-items: center;
+        padding: 0;
+        line-height: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.16s ease;
+      }
+
+      .detail-icon-edit svg {
+        display: block;
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .detail-icon-shell.is-editable:hover .detail-icon-edit {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .detail-icon-edit:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--vl-primary) 18%, var(--vl-shell));
+        color: var(--vl-text);
       }
 
       .detail-favicon {
@@ -961,6 +1037,16 @@
               <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path></svg>
             </span>
             <input id="searchInput" autocomplete="off" placeholder="Search vault" />
+            <button
+              id="searchClearBtn"
+              class="search-clear"
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+              hidden
+            >
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>
+            </button>
           </div>
           <div class="header-actions">
             <button
@@ -1056,9 +1142,19 @@
               <div id="credentialDetailsContent" hidden>
                 <header class="detail-head">
                   <div class="detail-head-main">
-                    <div class="detail-icon-shell">
+                    <div class="detail-icon-shell" id="detailIconShell">
                       <div class="monogram" id="detailMonogram">VL</div>
                       <img id="detailFavicon" class="detail-favicon" alt="" hidden />
+                      <button
+                        type="button"
+                        id="detailIconEditBtn"
+                        class="detail-icon-edit"
+                        title="Change icon"
+                        aria-label="Change icon"
+                        hidden
+                      >
+                        <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3"></path><path d="M14 7l3 3"></path></svg>
+                      </button>
                     </div>
                     <div>
                       <p class="detail-type" id="detailType">LOGIN</p>
@@ -1072,6 +1168,7 @@
                         <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
                       </button>
                       <div id="detailMenuPopover" class="detail-menu" hidden>
+                        <button type="button" id="detailActionIconWeb">Edit icon in web app</button>
                         <button type="button" disabled>Edit</button>
                         <button type="button" disabled>Generate password</button>
                         <button type="button" disabled>Delete item</button>
@@ -1122,6 +1219,12 @@
             </article>
           </div>
         </section>
+        <input
+          id="detailIconFileInput"
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon"
+          hidden
+        />
       </div>
     </main>
 

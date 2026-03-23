@@ -16,8 +16,9 @@ const authClient = createVaultLiteAuthClient();
 const accountKit = ref<Awaited<ReturnType<typeof sessionStore.reissueAccountKit>> | null>(null);
 const acknowledged = ref(false);
 const downloadAttempted = ref(false);
-const busy = ref(false);
 const preparingAccountKit = ref(false);
+const downloadingAccountKit = ref(false);
+const finishingSetup = ref(false);
 const errorMessage = ref<string | null>(null);
 const hint = ref('');
 
@@ -25,20 +26,31 @@ const finishDisabled = computed(
   () =>
     !acknowledged.value ||
     !downloadAttempted.value ||
-    busy.value ||
+    finishingSetup.value ||
+    downloadingAccountKit.value ||
     preparingAccountKit.value ||
     !accountKit.value,
 );
 
-const downloadLabel = computed(() => {
-  if (preparingAccountKit.value) {
-    return 'Preparing Account Kit...';
-  }
-  if (!accountKit.value) {
-    return 'Prepare Account Kit';
-  }
-  return downloadAttempted.value ? 'Download again' : 'Download signed Account Kit';
-});
+const accountKitStage = computed<'preparing_kit' | 'kit_ready' | 'error'>(
+  () => {
+    if (preparingAccountKit.value) {
+      return 'preparing_kit';
+    }
+    if (!accountKit.value) {
+      return errorMessage.value ? 'error' : 'preparing_kit';
+    }
+    return 'kit_ready';
+  },
+);
+
+const downloadLabel = computed(() =>
+  downloadingAccountKit.value
+    ? 'Downloading...'
+    : downloadAttempted.value
+      ? 'Download again'
+      : 'Download signed Account Kit',
+);
 
 async function loadAccountKit() {
   if (preparingAccountKit.value || accountKit.value || sessionStore.state.phase !== 'ready') {
@@ -67,7 +79,7 @@ async function downloadAccountKit() {
   }
 
   errorMessage.value = null;
-  busy.value = true;
+  downloadingAccountKit.value = true;
   try {
     const response = await authClient.bootstrapCheckpointDownload({
       payload: accountKit.value.payload,
@@ -85,7 +97,7 @@ async function downloadAccountKit() {
   } catch (error) {
     errorMessage.value = toHumanErrorMessage(error);
   } finally {
-    busy.value = false;
+    downloadingAccountKit.value = false;
   }
 }
 
@@ -95,7 +107,7 @@ async function finishInitialization() {
   }
 
   errorMessage.value = null;
-  busy.value = true;
+  finishingSetup.value = true;
   try {
     await authClient.bootstrapCheckpointComplete({
       confirmSavedOutsideBrowser: true,
@@ -105,7 +117,7 @@ async function finishInitialization() {
   } catch (error) {
     errorMessage.value = toHumanErrorMessage(error);
   } finally {
-    busy.value = false;
+    finishingSetup.value = false;
   }
 }
 
@@ -159,13 +171,35 @@ onMounted(async () => {
         </p>
       </article>
 
-      <div class="form-actions onboarding-step__actions onboarding-step__download-action">
+      <div
+        v-if="accountKitStage === 'preparing_kit'"
+        class="account-kit-loading"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="account-kit-loading__spinner" aria-hidden="true"></span>
+        <span>Preparing account kit...</span>
+      </div>
+
+      <div
+        v-else-if="accountKitStage === 'kit_ready'"
+        class="form-actions onboarding-step__actions onboarding-step__download-action"
+      >
         <PrimaryButton
           type="button"
-          :disabled="busy || preparingAccountKit"
+          :disabled="downloadingAccountKit || finishingSetup"
           @click="downloadAccountKit"
         >
           {{ downloadLabel }}
+        </PrimaryButton>
+      </div>
+      <div v-else class="form-actions onboarding-step__actions onboarding-step__download-action">
+        <PrimaryButton
+          type="button"
+          :disabled="preparingAccountKit || downloadingAccountKit || finishingSetup"
+          @click="loadAccountKit"
+        >
+          Retry preparing Account Kit
         </PrimaryButton>
       </div>
       <p v-if="hint" class="onboarding-step__hint">{{ hint }}</p>
@@ -175,9 +209,34 @@ onMounted(async () => {
       </label>
       <div class="form-actions onboarding-step__actions onboarding-step__final-actions">
         <PrimaryButton type="button" :disabled="finishDisabled" @click="finishInitialization">
-          {{ busy ? 'Finishing…' : 'Finish setup' }}
+          {{ finishingSetup ? 'Finishing…' : 'Finish setup' }}
         </PrimaryButton>
       </div>
     </div>
   </section>
 </template>
+
+<style scoped>
+.account-kit-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--vl-text-muted);
+  min-height: 48px;
+}
+
+.account-kit-loading__spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--vl-border) 70%, transparent);
+  border-top-color: var(--vl-primary);
+  animation: account-kit-spinner 0.8s linear infinite;
+}
+
+@keyframes account-kit-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+</style>

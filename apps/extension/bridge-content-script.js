@@ -29,7 +29,8 @@ function parseBridgeRequest(value) {
   if (
     value.action !== 'bridge.ping' &&
     value.action !== 'link.poll' &&
-    value.action !== 'popup.open'
+    value.action !== 'popup.open' &&
+    value.action !== 'unlock-grant.nudge'
   ) {
     return null;
   }
@@ -54,6 +55,17 @@ function parseBridgeRequest(value) {
     return {
       requestId: value.requestId,
       action: 'popup.open',
+    };
+  }
+  if (value.action === 'unlock-grant.nudge') {
+    const payload = value.payload;
+    if (!isRecord(payload) || !isSafeRequestId(payload.requestId)) {
+      return null;
+    }
+    return {
+      requestId: value.requestId,
+      action: 'unlock-grant.nudge',
+      unlockGrantRequestId: payload.requestId,
     };
   }
   return null;
@@ -96,8 +108,13 @@ if (!globalThis[BRIDGE_READY_FLAG]) {
               type: 'vaultlite.bridge_poll_link_pairing',
               requestId: parsed.linkRequestId,
             }
-          : {
+          : parsed.action === 'popup.open'
+            ? {
               type: 'vaultlite.bridge_open_popup',
+            }
+            : {
+              type: 'vaultlite.bridge_nudge_unlock_grant',
+              requestId: parsed.unlockGrantRequestId,
             };
     void chrome.runtime
       .sendMessage(command)

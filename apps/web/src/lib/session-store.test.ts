@@ -194,6 +194,41 @@ describe('createSessionStore', () => {
     expect(store.state.phase).toBe('local_unlock_required');
   });
 
+  test('restoreSession sends unlock-grant nudge after requesting unlock grant on /unlock', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.requestUnlockGrant.mockResolvedValue({
+      ok: true,
+      requestId: 'unlock_req_12345678',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      interval: 1,
+      serverOrigin: 'https://vaultlite.example.com',
+      targetSurface: 'extension',
+    });
+    dependencies.authClient.getUnlockGrantStatus.mockResolvedValue({
+      ok: true,
+      status: 'denied',
+    });
+    const postMessageSpy = vi.spyOn(window, 'postMessage');
+    window.history.replaceState({}, '', '/unlock');
+    const store = createSessionStore(dependencies as never);
+
+    await store.restoreSession();
+    await vi.waitFor(() => {
+      expect(postMessageSpy).toHaveBeenCalled();
+    });
+
+    expect(postMessageSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'vaultlite.bridge.request',
+        action: 'unlock-grant.nudge',
+        payload: {
+          requestId: 'unlock_req_12345678',
+        },
+      }),
+      window.location.origin,
+    );
+  });
+
   test('locks after auto-lock threshold when ready', () => {
     const dependencies = createMockDependencies();
     const store = createSessionStore(dependencies as never);
@@ -512,12 +547,8 @@ describe('createSessionStore', () => {
     expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
   });
 
-  test('approveExtensionLink requires recent reauth and sends trusted package with approval nonce', async () => {
+  test('approveExtensionLink sends trusted package with approval nonce without forcing local reauth', async () => {
     const dependencies = createMockDependencies();
-    dependencies.authClient.recentReauth = vi.fn().mockResolvedValue({
-      ok: true,
-      validUntil: '2026-03-19T12:30:00.000Z',
-    });
     const store = createSessionStore(dependencies as never);
 
     await store.localUnlock({
@@ -527,10 +558,9 @@ describe('createSessionStore', () => {
 
     await store.approveExtensionLink({
       requestId: 'request_1234567890123456',
-      password: 'CurrentPassword!1',
     });
 
-    expect(dependencies.authClient.recentReauth).toHaveBeenCalledTimes(1);
+    expect(dependencies.authClient.recentReauth).not.toHaveBeenCalled();
     expect(dependencies.authClient.approveExtensionLink).toHaveBeenCalledWith({
       requestId: 'request_1234567890123456',
       approvalNonce: 'R'.repeat(16),
@@ -547,22 +577,17 @@ describe('createSessionStore', () => {
     });
   });
 
-  test('rejectExtensionLink enforces recent reauth before rejecting pending request', async () => {
+  test('rejectExtensionLink delegates reauth policy to backend and rejects request', async () => {
     const dependencies = createMockDependencies();
-    dependencies.authClient.recentReauth = vi.fn().mockResolvedValue({
-      ok: true,
-      validUntil: '2026-03-19T12:30:00.000Z',
-    });
     const store = createSessionStore(dependencies as never);
 
     await store.restoreSession();
     await store.rejectExtensionLink({
       requestId: 'request_abcdefghijklmn',
-      password: 'CurrentPassword!1',
       rejectionReasonCode: 'user_rejected',
     });
 
-    expect(dependencies.authClient.recentReauth).toHaveBeenCalledTimes(1);
+    expect(dependencies.authClient.recentReauth).not.toHaveBeenCalled();
     expect(dependencies.authClient.rejectExtensionLink).toHaveBeenCalledWith({
       requestId: 'request_abcdefghijklmn',
       rejectionReasonCode: 'user_rejected',

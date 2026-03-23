@@ -3346,6 +3346,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (!sessionContext) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
     }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
     const parsedBody = await parseJsonBodyWithLimit<unknown>({
       request: c.req.raw,
       maxBytes: 24 * 1024,

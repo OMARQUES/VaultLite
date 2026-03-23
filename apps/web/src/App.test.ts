@@ -19,7 +19,7 @@ function createSessionStore(
   return {
     state: reactive({
       phase,
-      bootstrapState: 'INITIALIZED' as const,
+      bootstrapState: 'INITIALIZED' as 'INITIALIZED' | null,
       username: phase === 'ready' || phase === 'local_unlock_required' ? 'alice' : null,
       userId: phase === 'ready' || phase === 'local_unlock_required' ? 'user_1' : null,
       role: (phase === 'ready' || phase === 'local_unlock_required' ? 'user' : null) as
@@ -290,5 +290,28 @@ describe('App shell', () => {
     await flushPromises();
 
     expect(window.location.pathname).toBe('/unlock');
+  });
+
+  test('falls back to /auth when restore fails on authenticated route with unknown bootstrap state', async () => {
+    window.history.pushState({}, '', '/vault?scope=all');
+    const sessionStore = createSessionStore('anonymous');
+    sessionStore.state.bootstrapState = null;
+    sessionStore.restoreSession.mockRejectedValueOnce(new Error('restore_failed'));
+    const router = createVaultLiteRouter(sessionStore);
+
+    mount(App, {
+      global: {
+        plugins: [router],
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await router.isReady();
+    await flushPromises();
+
+    expect(window.location.pathname).toBe('/auth');
+    expect(window.location.search).toContain('next=');
   });
 });

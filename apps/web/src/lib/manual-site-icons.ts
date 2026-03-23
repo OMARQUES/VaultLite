@@ -5,6 +5,7 @@ const ALLOWED_ICON_MIME_TYPES = new Set([
   'image/webp',
   'image/x-icon',
   'image/vnd.microsoft.icon',
+  'image/svg+xml',
 ]);
 
 export const MAX_MANUAL_ICON_BYTES = 1_000_000;
@@ -21,6 +22,110 @@ export type ManualSiteIconMap = Record<string, ManualSiteIconRecord>;
 
 function normalizedMimeType(value: string): string {
   return value.split(';')[0]?.trim().toLowerCase() ?? '';
+}
+
+const ICON_EXTENSION_MIME_MAP: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  ico: 'image/x-icon',
+  svg: 'image/svg+xml',
+};
+
+function extensionFromName(name: string | undefined): string | null {
+  if (!name) {
+    return null;
+  }
+  const normalized = name.trim().toLowerCase();
+  const index = normalized.lastIndexOf('.');
+  if (index < 0 || index === normalized.length - 1) {
+    return null;
+  }
+  return normalized.slice(index + 1);
+}
+
+function detectMimeTypeFromSignature(bytes: Uint8Array): string | null {
+  if (bytes.length >= 8) {
+    if (
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47 &&
+      bytes[4] === 0x0d &&
+      bytes[5] === 0x0a &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0x0a
+    ) {
+      return 'image/png';
+    }
+  }
+  if (bytes.length >= 3) {
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return 'image/jpeg';
+    }
+  }
+  if (bytes.length >= 12) {
+    if (
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) {
+      return 'image/webp';
+    }
+  }
+  if (bytes.length >= 4) {
+    if (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && bytes[3] === 0x00) {
+      return 'image/x-icon';
+    }
+  }
+  if (bytes.length > 0) {
+    const ascii = new TextDecoder('utf-8', { fatal: false }).decode(bytes).trimStart();
+    if (ascii.startsWith('<svg') || ascii.startsWith('<?xml')) {
+      return 'image/svg+xml';
+    }
+  }
+  return null;
+}
+
+async function resolveIconMimeType(blob: Blob, options?: { fileName?: string }): Promise<string | null> {
+  const explicitMime = normalizedMimeType(blob.type);
+  if (isAllowedManualIconMimeType(explicitMime)) {
+    return explicitMime;
+  }
+
+  const signatureBytes = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
+  const sniffedMime = detectMimeTypeFromSignature(signatureBytes);
+  if (sniffedMime && isAllowedManualIconMimeType(sniffedMime)) {
+    return sniffedMime;
+  }
+
+  const extension = extensionFromName(options?.fileName);
+  if (!extension) {
+    return null;
+  }
+  const byExtension = ICON_EXTENSION_MIME_MAP[extension] ?? null;
+  return byExtension && isAllowedManualIconMimeType(byExtension) ? byExtension : null;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, Math.min(index + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function toDataUrl(blob: Blob, mimeType: string): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return `data:${mimeType};base64,${bytesToBase64(bytes)}`;
 }
 
 export function isAllowedManualIconMimeType(value: string): boolean {
@@ -174,18 +279,28 @@ async function decodeBlobToImageBlob(blob: Blob): Promise<HTMLImageElement> {
 }
 
 export async function normalizeImageBlobTo64DataUrl(blob: Blob): Promise<string> {
-  const mimeType = normalizedMimeType(blob.type);
-  if (!isAllowedManualIconMimeType(mimeType)) {
-    throw new Error('icon_mime_not_allowed');
-  }
   if (blob.size <= 0 || blob.size > MAX_MANUAL_ICON_BYTES) {
     throw new Error('icon_size_limit_exceeded');
   }
   if (typeof document === 'undefined') {
     throw new Error('icon_runtime_unavailable');
   }
-
-  const image = await decodeBlobToImageBlob(blob);
+  const mimeType = await resolveIconMimeType(blob);
+  if (!mimeType) {
+    throw new Error('icon_mime_not_allowed');
+  }
+  const imageBlob =
+    normalizedMimeType(blob.type) === mimeType ? blob : new Blob([await blob.arrayBuffer()], { type: mimeType });
+  let image: HTMLImageElement;
+  try {
+    image = await decodeBlobToImageBlob(imageBlob);
+  } catch {
+    const fallbackDataUrl = await toDataUrl(imageBlob, mimeType);
+    if (!validateManualIconDataUrl(fallbackDataUrl)) {
+      throw new Error('icon_image_decode_failed');
+    }
+    return fallbackDataUrl;
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 64;
@@ -203,7 +318,18 @@ export async function normalizeImageBlobTo64DataUrl(blob: Blob): Promise<string>
 }
 
 export async function importManualSiteIconFromFile(file: File): Promise<string> {
-  return normalizeImageBlobTo64DataUrl(file);
+  if (file.size <= 0 || file.size > MAX_MANUAL_ICON_BYTES) {
+    throw new Error('icon_size_limit_exceeded');
+  }
+  const mimeType = await resolveIconMimeType(file, { fileName: file.name });
+  if (!mimeType) {
+    throw new Error('icon_mime_not_allowed');
+  }
+  const normalizedBlob =
+    normalizedMimeType(file.type) === mimeType
+      ? file
+      : new Blob([await file.arrayBuffer()], { type: mimeType });
+  return normalizeImageBlobTo64DataUrl(normalizedBlob);
 }
 
 export async function importManualSiteIconFromUrl(rawUrl: string): Promise<string> {
@@ -220,10 +346,6 @@ export async function importManualSiteIconFromUrl(rawUrl: string): Promise<strin
   if (!response.ok) {
     throw new Error('icon_fetch_failed');
   }
-  const contentType = normalizedMimeType(response.headers.get('content-type') ?? '');
-  if (contentType && !isAllowedManualIconMimeType(contentType)) {
-    throw new Error('icon_mime_not_allowed');
-  }
   const contentLengthRaw = response.headers.get('content-length');
   if (contentLengthRaw) {
     const contentLength = Number.parseInt(contentLengthRaw, 10);
@@ -232,6 +354,13 @@ export async function importManualSiteIconFromUrl(rawUrl: string): Promise<strin
     }
   }
   const blob = await response.blob();
-  return normalizeImageBlobTo64DataUrl(blob);
+  const mimeType = await resolveIconMimeType(blob, { fileName: parsed.pathname });
+  if (!mimeType) {
+    throw new Error('icon_mime_not_allowed');
+  }
+  const normalizedBlob =
+    normalizedMimeType(blob.type) === mimeType
+      ? blob
+      : new Blob([await blob.arrayBuffer()], { type: mimeType });
+  return normalizeImageBlobTo64DataUrl(normalizedBlob);
 }
-

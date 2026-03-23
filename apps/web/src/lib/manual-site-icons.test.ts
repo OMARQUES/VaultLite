@@ -15,7 +15,7 @@ describe('manual-site-icons', () => {
     expect(isAllowedManualIconMimeType('image/webp')).toBe(true);
     expect(isAllowedManualIconMimeType('image/x-icon')).toBe(true);
     expect(isAllowedManualIconMimeType('image/vnd.microsoft.icon')).toBe(true);
-    expect(isAllowedManualIconMimeType('image/svg+xml')).toBe(false);
+    expect(isAllowedManualIconMimeType('image/svg+xml')).toBe(true);
     expect(isAllowedManualIconMimeType('text/plain')).toBe(false);
   });
 
@@ -39,4 +39,3 @@ describe('manual-site-icons', () => {
     expect(MAX_MANUAL_ICON_BYTES).toBeGreaterThan(0);
   });
 });
-

@@ -1,4 +1,4 @@
-const ALWAYS_ENABLED_WHILE_BUSY = new Set(['searchInput']);
+const ALWAYS_ENABLED_WHILE_BUSY = new Set(['searchInput', 'searchClearBtn']);
 
 export function shouldDisableControlWhileBusy(controlId, isBusy) {
   if (!isBusy) {

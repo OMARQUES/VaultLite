@@ -350,4 +350,29 @@ describe('extension LTS pairing and extension bearer session', () => {
       code: 'unauthorized',
     });
   });
+
+  test('unlock grant request rejects cookie auth without csrf token', async () => {
+    const { app } = await createFixture();
+    const requester = await createLinkRequester();
+
+    const response = await app.request('/api/auth/unlock-grant/request', {
+      method: 'POST',
+      headers: {
+        cookie: 'vl_session=session_web_1; vl_csrf=csrf_web_1',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        deploymentFingerprint: 'deployment_fp_v1',
+        targetSurface: 'extension',
+        requestPublicKey: requester.requestPublicKey,
+        clientNonce: 'Q2xpZW50Tm9uY2VfMTIzNDU2Nzg5MA',
+      }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: 'csrf_invalid',
+    });
+  });
 });

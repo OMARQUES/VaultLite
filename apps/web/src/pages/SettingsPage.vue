@@ -59,10 +59,23 @@ const extensionLinkRequests = ref<
     approvedAt: string | null;
   }>
 >([]);
-const extensionLinkPassword = ref('');
 const extensionLinkErrorMessage = ref<string | null>(null);
 const extensionLinkBusyRequestId = ref<string | null>(null);
 const extensionLinkBusyAction = ref<'approve' | 'reject' | 'refresh' | null>(null);
+const extensionLinkModalOpen = ref(false);
+const extensionLinkModalRequest = ref<{
+  requestId: string;
+  shortCode: string;
+  fingerprintPhrase: string;
+  deviceNameHint: string | null;
+  createdAt: string;
+  expiresAt: string;
+} | null>(null);
+const extensionLinkModalAction = ref<'approve' | 'reject'>('approve');
+const extensionLinkModalPassword = ref('');
+const extensionLinkModalRequiresPassword = ref(false);
+const extensionLinkModalErrorMessage = ref<string | null>(null);
+const extensionLinkAutoOpenedRequestCode = ref<string | null>(null);
 let extensionLinkAutoRefreshTimer: number | null = null;
 const EXTENSION_LINK_AUTO_REFRESH_MS = 3_000;
 const runtimeMetadata = ref<{
@@ -129,12 +142,21 @@ const devicesBusy = computed(() => busyStep.value === 'devices');
 const revokeBusy = computed(() => busyStep.value === 'revoke');
 const rotateBusy = computed(() => busyStep.value === 'rotate');
 const extensionLinkBusy = computed(() => extensionLinkBusyAction.value !== null);
+const extensionLinkModalBusy = computed(
+  () =>
+    extensionLinkBusyAction.value === 'approve' || extensionLinkBusyAction.value === 'reject',
+);
 const targetRequestCode = computed(() => {
   const raw = typeof route.query.requestCode === 'string' ? route.query.requestCode.trim().toUpperCase() : '';
   if (!/^[A-Z2-7]{8}$/u.test(raw)) {
     return null;
   }
   return raw;
+});
+const manualIconHostFromQuery = computed(() => {
+  const raw =
+    typeof route.query.manualIconHost === 'string' ? route.query.manualIconHost.trim() : '';
+  return raw ? sanitizeIconHost(raw) : null;
 });
 const pendingExtensionLinkRequests = computed(() => {
   const pending = extensionLinkRequests.value.filter((entry) => entry.status === 'pending');
@@ -226,6 +248,9 @@ onMounted(() => {
   if (showExtensionSection.value) {
     startExtensionLinkAutoRefresh();
   }
+  if (showAdvancedSection.value && manualIconHostFromQuery.value) {
+    iconHostInput.value = manualIconHostFromQuery.value;
+  }
 });
 
 onUnmounted(() => {
@@ -237,8 +262,21 @@ onUnmounted(() => {
 watch(
   () => route.query.requestCode,
   () => {
+    extensionLinkAutoOpenedRequestCode.value = null;
     if (showExtensionSection.value) {
       void refreshExtensionLinkRequests();
+    }
+  },
+);
+
+watch(
+  () => route.query.manualIconHost,
+  () => {
+    if (!showAdvancedSection.value) {
+      return;
+    }
+    if (manualIconHostFromQuery.value) {
+      iconHostInput.value = manualIconHostFromQuery.value;
     }
   },
 );
@@ -250,6 +288,9 @@ watch(
       if (nextSection === 'extension') {
         startExtensionLinkAutoRefresh();
         return;
+      }
+      if (nextSection === 'advanced' && manualIconHostFromQuery.value) {
+        iconHostInput.value = manualIconHostFromQuery.value;
       }
       clearExtensionLinkAutoRefreshTimer();
       return;
@@ -283,6 +324,11 @@ function showToast(message: string) {
       toastMessage.value = '';
     }
   }, 1800);
+}
+
+function isRecentReauthRequiredError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes('recent_reauth_required');
 }
 
 function nextBridgeRequestId(): string {
@@ -481,6 +527,25 @@ async function refreshExtensionLinkRequests() {
   try {
     const response = await sessionStore.listExtensionLinkPending();
     extensionLinkRequests.value = response.requests;
+    const targetCode = targetRequestCode.value;
+    if (targetCode && !extensionLinkModalOpen.value && extensionLinkAutoOpenedRequestCode.value !== targetCode) {
+      const targetRequest =
+        response.requests.find((entry) => entry.status === 'pending' && entry.shortCode === targetCode) ?? null;
+      if (targetRequest) {
+        openExtensionLinkDecisionModal(targetRequest.requestId, 'approve');
+        extensionLinkAutoOpenedRequestCode.value = targetCode;
+      }
+    }
+    if (
+      extensionLinkModalOpen.value &&
+      extensionLinkModalRequest.value &&
+      !response.requests.some(
+        (entry) =>
+          entry.requestId === extensionLinkModalRequest.value?.requestId && entry.status === 'pending',
+      )
+    ) {
+      closeExtensionLinkDecisionModal();
+    }
   } catch (error) {
     extensionLinkErrorMessage.value = toHumanErrorMessage(error);
   } finally {
@@ -489,18 +554,36 @@ async function refreshExtensionLinkRequests() {
   }
 }
 
-async function approveExtensionLinkRequest(requestId: string) {
-  if (!extensionLinkPassword.value) {
-    extensionLinkErrorMessage.value = 'Enter your current password to approve connection requests.';
+function openExtensionLinkDecisionModal(requestId: string, action: 'approve' | 'reject') {
+  const request = pendingExtensionLinkRequests.value.find((entry) => entry.requestId === requestId) ?? null;
+  if (!request) {
+    extensionLinkErrorMessage.value = 'The selected request is no longer pending. Refresh and try again.';
     return;
   }
-  extensionLinkErrorMessage.value = null;
-  extensionLinkBusyAction.value = 'approve';
-  extensionLinkBusyRequestId.value = requestId;
-  try {
+  extensionLinkModalRequest.value = request;
+  extensionLinkModalAction.value = action;
+  extensionLinkModalOpen.value = true;
+  extensionLinkModalPassword.value = '';
+  extensionLinkModalRequiresPassword.value = false;
+  extensionLinkModalErrorMessage.value = null;
+}
+
+function closeExtensionLinkDecisionModal() {
+  extensionLinkModalOpen.value = false;
+  extensionLinkModalRequest.value = null;
+  extensionLinkModalAction.value = 'approve';
+  extensionLinkModalPassword.value = '';
+  extensionLinkModalRequiresPassword.value = false;
+  extensionLinkModalErrorMessage.value = null;
+}
+
+async function executeExtensionLinkAction(
+  action: 'approve' | 'reject',
+  requestId: string,
+): Promise<void> {
+  if (action === 'approve') {
     await sessionStore.approveExtensionLink({
       requestId,
-      password: extensionLinkPassword.value,
     });
     try {
       await postBridgeLinkPollRequest({ requestId });
@@ -508,36 +591,53 @@ async function approveExtensionLinkRequest(requestId: string) {
     } catch {
       // Best-effort acceleration: extension popup/manual polling remains fallback.
     }
-    extensionLinkPassword.value = '';
     showToast('Connection request approved');
     await Promise.all([refreshExtensionLinkRequests(), refreshDevices()]);
-  } catch (error) {
-    extensionLinkErrorMessage.value = toHumanErrorMessage(error);
-  } finally {
-    extensionLinkBusyAction.value = null;
-    extensionLinkBusyRequestId.value = null;
-  }
-}
-
-async function rejectExtensionLinkRequest(requestId: string) {
-  if (!extensionLinkPassword.value) {
-    extensionLinkErrorMessage.value = 'Enter your current password to reject connection requests.';
     return;
   }
+
+  await sessionStore.rejectExtensionLink({
+    requestId,
+    rejectionReasonCode: 'user_rejected',
+  });
+  showToast('Connection request rejected');
+  await refreshExtensionLinkRequests();
+}
+
+async function confirmExtensionLinkDecision() {
+  const request = extensionLinkModalRequest.value;
+  if (!request) {
+    return;
+  }
+
   extensionLinkErrorMessage.value = null;
-  extensionLinkBusyAction.value = 'reject';
-  extensionLinkBusyRequestId.value = requestId;
+  extensionLinkModalErrorMessage.value = null;
+  extensionLinkBusyAction.value = extensionLinkModalAction.value;
+  extensionLinkBusyRequestId.value = request.requestId;
   try {
-    await sessionStore.rejectExtensionLink({
-      requestId,
-      password: extensionLinkPassword.value,
-      rejectionReasonCode: 'user_rejected',
-    });
-    extensionLinkPassword.value = '';
-    showToast('Connection request rejected');
-    await refreshExtensionLinkRequests();
+    if (extensionLinkModalRequiresPassword.value) {
+      if (!extensionLinkModalPassword.value) {
+        extensionLinkModalErrorMessage.value = 'Enter your current password to continue.';
+        return;
+      }
+      await sessionStore.confirmRecentReauth({
+        password: extensionLinkModalPassword.value,
+      });
+      extensionLinkModalPassword.value = '';
+      extensionLinkModalRequiresPassword.value = false;
+    }
+
+    await executeExtensionLinkAction(extensionLinkModalAction.value, request.requestId);
+    closeExtensionLinkDecisionModal();
   } catch (error) {
-    extensionLinkErrorMessage.value = toHumanErrorMessage(error);
+    if (isRecentReauthRequiredError(error)) {
+      extensionLinkModalRequiresPassword.value = true;
+      extensionLinkModalErrorMessage.value = 'Confirm your current password to continue.';
+      return;
+    }
+    const message = toHumanErrorMessage(error);
+    extensionLinkModalErrorMessage.value = message;
+    extensionLinkErrorMessage.value = message;
   } finally {
     extensionLinkBusyAction.value = null;
     extensionLinkBusyRequestId.value = null;
@@ -1062,7 +1162,7 @@ async function rotatePassword() {
         <h2>Connect extension</h2>
         <p class="module-empty-hint">
           Open the extension popup and click <strong>Connect with trusted device</strong> to create a pending
-          request. Approve it below using your current password.
+          request. Review and approve it in the modal below.
         </p>
       </section>
 
@@ -1071,11 +1171,6 @@ async function rotatePassword() {
         <p class="module-empty-hint">
           Approve or reject new extension link requests created from untrusted browsers.
         </p>
-        <SecretField
-          v-model="extensionLinkPassword"
-          label="Current password"
-          autocomplete="current-password"
-        />
         <InlineAlert v-if="extensionLinkErrorMessage" tone="danger">
           {{ extensionLinkErrorMessage }}
         </InlineAlert>
@@ -1113,7 +1208,7 @@ async function rotatePassword() {
               <PrimaryButton
                 type="button"
                 :disabled="extensionLinkBusy"
-                @click="approveExtensionLinkRequest(request.requestId)"
+                @click="openExtensionLinkDecisionModal(request.requestId, 'approve')"
               >
                 {{
                   extensionLinkBusyAction === 'approve' && extensionLinkBusyRequestId === request.requestId
@@ -1124,7 +1219,7 @@ async function rotatePassword() {
               <DangerButton
                 type="button"
                 :disabled="extensionLinkBusy"
-                @click="rejectExtensionLinkRequest(request.requestId)"
+                @click="openExtensionLinkDecisionModal(request.requestId, 'reject')"
               >
                 {{
                   extensionLinkBusyAction === 'reject' && extensionLinkBusyRequestId === request.requestId
@@ -1208,6 +1303,9 @@ async function rotatePassword() {
         <p class="module-empty-hint">
           Import icon by URL or file with MIME/size validation, normalize to 64x64, and store locally.
         </p>
+        <p v-if="manualIconHostFromQuery" class="module-empty-hint">
+          Editing icon for host <strong>{{ manualIconHostFromQuery }}</strong>.
+        </p>
         <div class="form-stack">
           <label class="field">
             <span class="field__label">Host</span>
@@ -1287,6 +1385,67 @@ async function rotatePassword() {
         </SecondaryButton>
         <DangerButton type="button" :disabled="revokeBusy" @click="confirmRevokeDevice">
           {{ revokeBusy ? 'Revoking...' : 'Revoke device' }}
+        </DangerButton>
+      </template>
+    </DialogModal>
+
+    <DialogModal
+      :open="extensionLinkModalOpen"
+      :title="extensionLinkModalAction === 'approve' ? 'Approve extension request' : 'Reject extension request'"
+    >
+      <p v-if="extensionLinkModalRequest" class="module-empty-hint">
+        Review the request details and confirm your decision.
+      </p>
+      <dl v-if="extensionLinkModalRequest" class="settings-meta">
+        <div>
+          <dt>Device</dt>
+          <dd>{{ extensionLinkModalRequest.deviceNameHint ?? 'VaultLite Extension' }}</dd>
+        </div>
+        <div>
+          <dt>Code</dt>
+          <dd>{{ extensionLinkModalRequest.shortCode }}</dd>
+        </div>
+        <div>
+          <dt>Phrase</dt>
+          <dd>{{ extensionLinkModalRequest.fingerprintPhrase }}</dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd>{{ formatDateTime(extensionLinkModalRequest.createdAt) }}</dd>
+        </div>
+        <div>
+          <dt>Expires</dt>
+          <dd>{{ formatDateTime(extensionLinkModalRequest.expiresAt) }}</dd>
+        </div>
+      </dl>
+      <SecretField
+        v-if="extensionLinkModalRequiresPassword"
+        v-model="extensionLinkModalPassword"
+        label="Current password"
+        autocomplete="current-password"
+      />
+      <InlineAlert v-if="extensionLinkModalErrorMessage" tone="danger">
+        {{ extensionLinkModalErrorMessage }}
+      </InlineAlert>
+      <template #actions>
+        <SecondaryButton type="button" :disabled="extensionLinkModalBusy" @click="closeExtensionLinkDecisionModal">
+          Cancel
+        </SecondaryButton>
+        <PrimaryButton
+          v-if="extensionLinkModalAction === 'approve'"
+          type="button"
+          :disabled="extensionLinkModalBusy"
+          @click="confirmExtensionLinkDecision"
+        >
+          {{ extensionLinkModalBusy ? 'Approving…' : 'Approve request' }}
+        </PrimaryButton>
+        <DangerButton
+          v-else
+          type="button"
+          :disabled="extensionLinkModalBusy"
+          @click="confirmExtensionLinkDecision"
+        >
+          {{ extensionLinkModalBusy ? 'Rejecting…' : 'Reject request' }}
         </DangerButton>
       </template>
     </DialogModal>

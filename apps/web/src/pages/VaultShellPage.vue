@@ -30,7 +30,12 @@ import {
   saveVaultUiState,
   type VaultUiState,
 } from '../lib/vault-ui-state';
-import { listManualSiteIcons, type ManualSiteIconMap } from '../lib/manual-site-icons';
+import {
+  importManualSiteIconFromFile,
+  listManualSiteIcons,
+  sanitizeIconHost,
+  type ManualSiteIconMap,
+} from '../lib/manual-site-icons';
 import { encryptAttachmentBlobPayload } from '../lib/browser-crypto';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
 import {
@@ -90,6 +95,7 @@ const workspace = createVaultWorkspace({
 });
 
 const searchInputRef = ref<InstanceType<typeof SearchField> | null>(null);
+const detailIconFileInput = ref<HTMLInputElement | null>(null);
 const searchQuery = ref('');
 const errorMessage = ref<string | null>(null);
 const toastMessage = ref('');
@@ -117,7 +123,11 @@ const canonicalSiteIconsByHost = ref<
   Record<string, { dataUrl: string; source: 'manual' | 'automatic'; sourceUrl: string | null; updatedAt: string }>
 >({});
 const iconDiscoveryCooldownByHost = ref<Record<string, number>>({});
+const detailIconUploadBusy = ref(false);
 let iconHydrationNonce = 0;
+let manualIconRemoteRefreshInFlight: Promise<void> | null = null;
+let lastManualIconRemoteRefreshAt = 0;
+const MANUAL_ICON_REMOTE_REFRESH_COOLDOWN_MS = 12_000;
 const attachmentObjectUrls = new Set<string>();
 
 const loginDraft = reactive<LoginVaultItemPayload>({
@@ -243,6 +253,71 @@ function refreshManualSiteIcons() {
   manualSiteIconsByHost.value = listManualSiteIcons(sessionStore.state.username);
 }
 
+function mergeManualIconsIntoCanonicalCache(manualIcons: ManualSiteIconMap) {
+  const nextCanonical = { ...canonicalSiteIconsByHost.value };
+  for (const [host, entry] of Object.entries(manualIcons)) {
+    nextCanonical[host] = {
+      dataUrl: entry.dataUrl,
+      source: 'manual',
+      sourceUrl: null,
+      updatedAt: entry.updatedAt,
+    };
+  }
+  canonicalSiteIconsByHost.value = nextCanonical;
+}
+
+async function refreshManualSiteIconsFromServer(options: { force?: boolean } = {}) {
+  const now = Date.now();
+  if (!options.force && now - lastManualIconRemoteRefreshAt < MANUAL_ICON_REMOTE_REFRESH_COOLDOWN_MS) {
+    return;
+  }
+  if (manualIconRemoteRefreshInFlight) {
+    return manualIconRemoteRefreshInFlight;
+  }
+
+  manualIconRemoteRefreshInFlight = (async () => {
+    try {
+      const response = await sessionStore.listManualSiteIcons();
+      const nextManualMap: ManualSiteIconMap = {};
+      for (const entry of response.icons ?? []) {
+        const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
+        const dataUrl = typeof entry.dataUrl === 'string' ? entry.dataUrl : '';
+        if (!safeHost || !dataUrl) {
+          continue;
+        }
+        nextManualMap[safeHost] = {
+          dataUrl,
+          source: entry.source === 'url' ? 'url' : 'file',
+          updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : new Date().toISOString(),
+        };
+      }
+      manualSiteIconsByHost.value = nextManualMap;
+      mergeManualIconsIntoCanonicalCache(nextManualMap);
+      faviconSourceIndexByItemAndHost.value = {};
+      lastManualIconRemoteRefreshAt = Date.now();
+    } catch {
+      // Best effort to avoid UX regressions when network/session is unstable.
+    } finally {
+      manualIconRemoteRefreshInFlight = null;
+    }
+  })();
+
+  return manualIconRemoteRefreshInFlight;
+}
+
+function handleManualIconRefreshOnFocus() {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    return;
+  }
+  void refreshManualSiteIconsFromServer({ force: true });
+}
+
+function handleManualIconRefreshOnVisibilityChange() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+    void refreshManualSiteIconsFromServer({ force: true });
+  }
+}
+
 function commitUiState(updater: (draft: VaultUiState) => void) {
   const next = cloneUiState(uiState.value);
   updater(next);
@@ -353,6 +428,16 @@ const selectedItemInContext = computed(() => {
 
   return itemMatchesCurrentContext(current) ? current : null;
 });
+const detailIconEditableHost = computed(() => {
+  const item = selectedItemInContext.value;
+  if (!item || item.itemType !== 'login') {
+    return null;
+  }
+  return sanitizeIconHost(item.payload.urls[0] ?? '');
+});
+const canEditDetailIcon = computed(
+  () => Boolean(detailIconEditableHost.value) && !isTrashContext.value,
+);
 const selectedAttachmentItem = computed(() => selectedItemInContext.value);
 const selectedItemUploads = computed(
   () => (selectedAttachmentItem.value ? attachmentsByItemId.value[selectedAttachmentItem.value.itemId] : []) ?? [],
@@ -1271,6 +1356,88 @@ function openUrl(url: string | undefined) {
   window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
 }
 
+function manualIconErrorMessage(error: unknown): string {
+  const code = error instanceof Error ? error.message : '';
+  switch (code) {
+    case 'icon_host_invalid':
+      return 'Host is invalid. Use a valid domain URL.';
+    case 'icon_mime_not_allowed':
+      return 'Icon format is not allowed. Use PNG, JPG, WEBP, or ICO.';
+    case 'icon_size_limit_exceeded':
+      return 'Icon is too large. Maximum is 1MB.';
+    case 'icon_image_decode_failed':
+      return 'Could not read this image file.';
+    case 'icon_data_invalid':
+      return 'Icon data is invalid after normalization.';
+    default:
+      return toHumanErrorMessage(error);
+  }
+}
+
+function openDetailIconPicker() {
+  if (!canEditDetailIcon.value || detailIconUploadBusy.value) {
+    return;
+  }
+  detailIconFileInput.value?.click();
+}
+
+function clearDetailIconPickerInput() {
+  if (detailIconFileInput.value) {
+    detailIconFileInput.value.value = '';
+  }
+}
+
+async function onDetailIconFileSelected(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  const file = target?.files?.[0] ?? null;
+  if (!file) {
+    return;
+  }
+  const host = detailIconEditableHost.value;
+  if (!host) {
+    clearDetailIconPickerInput();
+    showToast('Icon editing is only available for login items with URL.');
+    return;
+  }
+
+  detailIconUploadBusy.value = true;
+  errorMessage.value = null;
+  try {
+    const dataUrl = await importManualSiteIconFromFile(file);
+    const updatedAt = new Date().toISOString();
+    await sessionStore.upsertManualSiteIcon({
+      domain: host,
+      dataUrl,
+      source: 'file',
+    });
+
+    manualSiteIconsByHost.value = {
+      ...manualSiteIconsByHost.value,
+      [host]: {
+        dataUrl,
+        source: 'file',
+        updatedAt,
+      },
+    };
+    canonicalSiteIconsByHost.value = {
+      ...canonicalSiteIconsByHost.value,
+      [host]: {
+        dataUrl,
+        source: 'manual',
+        sourceUrl: null,
+        updatedAt,
+      },
+    };
+    faviconSourceIndexByItemAndHost.value = {};
+    showToast(`Icon updated for ${host}`);
+  } catch (error) {
+    errorMessage.value = manualIconErrorMessage(error);
+  } finally {
+    detailIconUploadBusy.value = false;
+    clearDetailIconPickerInput();
+  }
+}
+
 function pendingEditorExitTarget(): RouteLocationRaw {
   if (isEditing.value && selectedItemId.value) {
     return vaultRoute(`/vault/item/${selectedItemId.value}`);
@@ -2016,7 +2183,10 @@ onMounted(async () => {
   }
 
   window.addEventListener('keydown', handleGlobalKeydown);
+  window.addEventListener('focus', handleManualIconRefreshOnFocus);
+  document.addEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   refreshManualSiteIcons();
+  await refreshManualSiteIconsFromServer({ force: true });
   await loadVault();
   workspace.startSync();
 });
@@ -2030,6 +2200,8 @@ onBeforeUnmount(() => {
   mobileQuery = null;
   compactDesktopQuery = null;
   window.removeEventListener('keydown', handleGlobalKeydown);
+  window.removeEventListener('focus', handleManualIconRefreshOnFocus);
+  document.removeEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   for (const objectUrl of attachmentObjectUrls) {
     URL.revokeObjectURL(objectUrl);
   }
@@ -2732,15 +2904,27 @@ onBeforeUnmount(() => {
       <article v-else-if="selectedItemInContext" class="detail-card">
         <div class="detail-card__header detail-card__header--split">
           <div class="detail-card__identity">
-            <span class="detail-card__avatar" aria-hidden="true">
-              <img
-                v-if="itemFaviconUrl(selectedItemInContext)"
-                :src="itemFaviconUrl(selectedItemInContext) ?? ''"
-                :alt="`${selectedItemInContext.payload.title} favicon`"
-                loading="lazy"
-                @error="markFaviconError(selectedItemInContext)"
-              />
-              <template v-else>{{ itemMonogram(selectedItemInContext) }}</template>
+            <span class="detail-card__avatar-shell" :class="{ 'is-editable': canEditDetailIcon }">
+              <span class="detail-card__avatar" aria-hidden="true">
+                <img
+                  v-if="itemFaviconUrl(selectedItemInContext)"
+                  :src="itemFaviconUrl(selectedItemInContext) ?? ''"
+                  :alt="`${selectedItemInContext.payload.title} favicon`"
+                  loading="lazy"
+                  @error="markFaviconError(selectedItemInContext)"
+                />
+                <template v-else>{{ itemMonogram(selectedItemInContext) }}</template>
+              </span>
+              <button
+                v-if="canEditDetailIcon"
+                type="button"
+                class="detail-card__avatar-edit"
+                :disabled="detailIconUploadBusy"
+                :aria-label="`Edit icon for ${detailIconEditableHost}`"
+                @click="openDetailIconPicker"
+              >
+                <AppIcon name="edit" :size="16" />
+              </button>
             </span>
             <div>
               <p class="eyebrow">{{ detailMetaType }}</p>
@@ -3334,6 +3518,14 @@ onBeforeUnmount(() => {
         <DangerButton type="button" @click="discardChanges">Discard changes</DangerButton>
       </template>
     </DialogModal>
+
+    <input
+      ref="detailIconFileInput"
+      class="sr-only"
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon"
+      @change="onDetailIconFileSelected"
+    />
 
     <ToastMessage v-if="toastMessage" :message="toastMessage" />
   </section>

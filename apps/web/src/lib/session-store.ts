@@ -111,11 +111,9 @@ export interface SessionStore {
   listExtensionLinkPending(): Promise<ExtensionLinkPendingListOutput>;
   approveExtensionLink(input: {
     requestId: string;
-    password: string;
   }): Promise<ExtensionLinkActionOutput>;
   rejectExtensionLink(input: {
     requestId: string;
-    password: string;
     rejectionReasonCode?: string;
   }): Promise<ExtensionLinkActionOutput>;
   listDevices(): Promise<DeviceListOutput>;
@@ -151,12 +149,31 @@ const AUTO_LOCK_AFTER_MS_STORAGE_KEY = 'vaultlite:auto-lock-after-ms';
 const WEB_UNLOCK_CACHE_STORAGE_KEY = 'vaultlite:web-unlock-cache.v1';
 const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
 const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
+const BRIDGE_REQUEST_TYPE = 'vaultlite.bridge.request';
+const BRIDGE_RESPONSE_TYPE = 'vaultlite.bridge.response';
+const BRIDGE_PROTOCOL_VERSION = 1;
+const BRIDGE_WEB_SOURCE = 'vaultlite-webapp';
+const BRIDGE_EXTENSION_SOURCE = 'vaultlite-extension-bridge';
+const UNLOCK_GRANT_NUDGE_DEBOUNCE_MS = 1_500;
+const UNLOCK_GRANT_NUDGE_TIMEOUT_MS = 1_200;
 
 interface WebUnlockCacheRecord {
   username: string;
   deviceId: string;
   accountKey: string;
   expiresAt: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isUnlockRoute(pathname: string): boolean {
+  return pathname === '/unlock' || pathname === '/unlock/';
+}
+
+function isSafeBridgeRequestId(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 8 && value.length <= 128;
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -330,6 +347,7 @@ export function createSessionStore(input: {
   let unlockGrantConsumeInFlight: Promise<boolean> | null = null;
   let lastUnlockGrantAttemptAt = 0;
   let unlockGrantPollTimer: number | null = null;
+  let lastUnlockGrantNudgeAt = 0;
 
   function transition(patch: Partial<SessionState>) {
     const previousPhase = state.phase;
@@ -365,7 +383,7 @@ export function createSessionStore(input: {
     return runtimeMetadata;
   }
 
-  async function requireTrustedLocalStateForExtensionTrust(password: string): Promise<{
+  async function requireTrustedLocalStateForExtensionTrust(): Promise<{
     authSalt: string;
     encryptedAccountBundle: string;
     accountKeyWrapped: string;
@@ -383,22 +401,15 @@ export function createSessionStore(input: {
     if (!trustedLocalState || (state.deviceId && trustedLocalState.deviceId !== state.deviceId)) {
       throw new Error('This device is no longer trusted for this account. Add the device again.');
     }
-
-    const pairingLocalUnlockEnvelope = await createLocalUnlockEnvelope({
-      password,
-      authSalt: trustedLocalState.authSalt,
-      payload: {
-        accountKey: readyState.accountKey,
-        encryptedAccountBundle: trustedLocalState.encryptedAccountBundle,
-        accountKeyWrapped: trustedLocalState.accountKeyWrapped,
-      },
-    });
+    if (!trustedLocalState.localUnlockEnvelope) {
+      throw new Error('trusted_local_state_missing');
+    }
 
     return {
       authSalt: trustedLocalState.authSalt,
       encryptedAccountBundle: trustedLocalState.encryptedAccountBundle,
       accountKeyWrapped: trustedLocalState.accountKeyWrapped,
-      localUnlockEnvelope: pairingLocalUnlockEnvelope,
+      localUnlockEnvelope: trustedLocalState.localUnlockEnvelope,
     };
   }
 
@@ -413,6 +424,89 @@ export function createSessionStore(input: {
   function delay(ms: number): Promise<void> {
     return new Promise((resolve) => {
       window.setTimeout(resolve, Math.max(0, ms));
+    });
+  }
+
+  async function sendUnlockGrantNudgeBestEffort(
+    requestId: string,
+    options?: {
+      debounce?: boolean;
+    },
+  ): Promise<boolean> {
+    if (!isSafeBridgeRequestId(requestId)) {
+      return false;
+    }
+    if (!isUnlockRoute(window.location.pathname)) {
+      return false;
+    }
+    const now = Date.now();
+    if (options?.debounce && now - lastUnlockGrantNudgeAt < UNLOCK_GRANT_NUDGE_DEBOUNCE_MS) {
+      return false;
+    }
+    lastUnlockGrantNudgeAt = now;
+    const bridgeRequestId =
+      typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : createRandomBase64Url(16);
+    const targetOrigin = window.location.origin;
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (result: boolean) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.removeEventListener('message', onMessage);
+        window.clearTimeout(timeoutHandle);
+        resolve(result);
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        if (event.source !== window) {
+          return;
+        }
+        if (event.origin !== targetOrigin) {
+          return;
+        }
+        if (!isRecord(event.data)) {
+          return;
+        }
+        if (event.data.type !== BRIDGE_RESPONSE_TYPE) {
+          return;
+        }
+        if (event.data.version !== BRIDGE_PROTOCOL_VERSION) {
+          return;
+        }
+        if (event.data.source !== BRIDGE_EXTENSION_SOURCE) {
+          return;
+        }
+        if (event.data.requestId !== bridgeRequestId) {
+          return;
+        }
+        finish(event.data.ok === true);
+      };
+
+      const timeoutHandle = window.setTimeout(() => {
+        finish(false);
+      }, UNLOCK_GRANT_NUDGE_TIMEOUT_MS);
+
+      window.addEventListener('message', onMessage);
+      try {
+        window.postMessage(
+          {
+            type: BRIDGE_REQUEST_TYPE,
+            version: BRIDGE_PROTOCOL_VERSION,
+            source: BRIDGE_WEB_SOURCE,
+            requestId: bridgeRequestId,
+            action: 'unlock-grant.nudge',
+            payload: {
+              requestId,
+            },
+          },
+          targetOrigin,
+        );
+      } catch {
+        finish(false);
+      }
     });
   }
 
@@ -498,6 +592,7 @@ export function createSessionStore(input: {
           : 2;
         const requestId = requested.requestId;
         const serverOrigin = requested.serverOrigin;
+        void sendUnlockGrantNudgeBestEffort(requestId);
         const deadlineMs = Date.parse(requested.expiresAt);
         const effectiveDeadlineMs = Number.isFinite(deadlineMs) ? deadlineMs : Date.now() + 120_000;
 
@@ -528,6 +623,9 @@ export function createSessionStore(input: {
               typeof statusResponse.interval === 'number' && statusResponse.interval > 0
                 ? statusResponse.interval
                 : intervalSeconds + UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS;
+            if (statusResponse.status === 'slow_down') {
+              void sendUnlockGrantNudgeBestEffort(requestId, { debounce: true });
+            }
             await delay(intervalSeconds * 1_000);
             continue;
           }
@@ -1187,10 +1285,7 @@ export function createSessionStore(input: {
       return input.authClient.listExtensionLinkPending();
     },
     async approveExtensionLink(inputData) {
-      const extensionTrustPackage = await requireTrustedLocalStateForExtensionTrust(inputData.password);
-      await this.confirmRecentReauth({
-        password: inputData.password,
-      });
+      const extensionTrustPackage = await requireTrustedLocalStateForExtensionTrust();
       return input.authClient.approveExtensionLink({
         requestId: inputData.requestId,
         approvalNonce: createRandomBase64Url(16),
@@ -1201,9 +1296,6 @@ export function createSessionStore(input: {
       if (!state.username || !state.userId) {
         throw new Error('Extension link requests require an authenticated user');
       }
-      await this.confirmRecentReauth({
-        password: inputData.password,
-      });
       return input.authClient.rejectExtensionLink({
         requestId: inputData.requestId,
         rejectionReasonCode: inputData.rejectionReasonCode,

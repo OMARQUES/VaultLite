@@ -5,6 +5,7 @@ import { describeFillResult, shouldDisableControlWhileBusy } from '../popup-beha
 describe('popup busy-state behavior', () => {
   test('keeps search input enabled while busy so typing does not lose focus', () => {
     expect(shouldDisableControlWhileBusy('searchInput', true)).toBe(false);
+    expect(shouldDisableControlWhileBusy('searchClearBtn', true)).toBe(false);
   });
 
   test('disables action buttons while busy', () => {

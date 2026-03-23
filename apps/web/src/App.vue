@@ -7,6 +7,7 @@ import PublicTopbar from './components/layout/PublicTopbar.vue';
 import SidebarNav from './components/layout/SidebarNav.vue';
 import { useSessionStore } from './composables/useSessionStore';
 import { VAULT_UNAUTHORIZED_EVENT, type VaultUnauthorizedEventDetail } from './lib/http-events';
+import { toHumanErrorMessage } from './lib/human-error';
 import { resolveNavigationTarget } from './router';
 
 const sessionStore = useSessionStore();
@@ -38,6 +39,20 @@ async function maybeRedirectForSessionPhase() {
   });
 
   if (!redirect || redirect === route.fullPath || redirect === route.path) {
+    if (isAuthenticatedRoute.value && sessionStore.state.phase !== 'ready') {
+      const fallback =
+        sessionStore.state.phase === 'local_unlock_required'
+          ? `/unlock?next=${encodeURIComponent(route.fullPath)}`
+          : `/auth?next=${encodeURIComponent(route.fullPath)}`;
+      if (fallback !== route.fullPath && fallback !== route.path) {
+        phaseRedirectInFlight.value = true;
+        try {
+          await router.replace(fallback);
+        } finally {
+          phaseRedirectInFlight.value = false;
+        }
+      }
+    }
     return;
   }
 
@@ -104,6 +119,11 @@ onMounted(() => {
     try {
       await router.isReady();
       await sessionStore.restoreSession();
+    } catch (error) {
+      sessionStore.handleUnauthorized({
+        reasonCode: 'session_restore_failed',
+        message: toHumanErrorMessage(error),
+      });
     } finally {
       sessionRestoreResolved.value = true;
       await maybeRedirectForSessionPhase();

@@ -35,6 +35,7 @@ import {
 import { createFilterDropdown } from './popup-filter-dropdown.js';
 import { buildDetailViewModel, pulseCopyIcon } from './popup-detail-actions.js';
 import { createPopupAutosizer } from './popup-autosize.js';
+import { importManualIconFromFile, sanitizeIconHost } from './manual-icons.js';
 
 const elements = {
   siteContext: byId('siteContext'),
@@ -60,6 +61,7 @@ const elements = {
   cancelLinkPairBtn: byId('cancelLinkPairBtn'),
   newItemBtn: byId('newItemBtn'),
   searchInput: byId('searchInput'),
+  searchClearBtn: byId('searchClearBtn'),
   headerReadySearch: byId('headerReadySearch'),
   filterDropdownButton: byId('filterDropdownButton'),
   filterDropdownLabel: byId('filterDropdownLabel'),
@@ -70,7 +72,10 @@ const elements = {
   credentialDetailsLoading: byId('credentialDetailsLoading'),
   credentialDetailsContent: byId('credentialDetailsContent'),
   detailMonogram: byId('detailMonogram'),
+  detailIconShell: byId('detailIconShell'),
   detailFavicon: byId('detailFavicon'),
+  detailIconEditBtn: byId('detailIconEditBtn'),
+  detailIconFileInput: byId('detailIconFileInput'),
   detailType: byId('detailType'),
   detailTitle: byId('detailTitle'),
   detailPrimaryLabel: byId('detailPrimaryLabel'),
@@ -82,6 +87,7 @@ const elements = {
   detailActionPrimary: byId('detailActionPrimary'),
   detailActionMenu: byId('detailActionMenu'),
   detailMenuPopover: byId('detailMenuPopover'),
+  detailActionIconWeb: byId('detailActionIconWeb'),
   detailPrimaryRow: byId('detailPrimaryRow'),
   detailPrimaryActionA: byId('detailPrimaryActionA'),
   detailPrimaryActionB: byId('detailPrimaryActionB'),
@@ -233,6 +239,7 @@ function applyLayoutState(phase) {
   document.body.dataset.detail = expanded ? 'open' : 'closed';
   elements.lockBtn.hidden = !shouldShowLockIcon(currentLayoutMode);
   elements.headerReadySearch.hidden = currentLayoutMode !== 'ready';
+  updateSearchClearVisibility();
   popupAutosizer?.schedule();
 }
 
@@ -244,8 +251,10 @@ function setBusy(nextBusy) {
     ['openApprovalBtn', elements.openApprovalBtn],
     ['cancelLinkPairBtn', elements.cancelLinkPairBtn],
     ['searchInput', elements.searchInput],
+    ['searchClearBtn', elements.searchClearBtn],
     ['detailActionPrimary', elements.detailActionPrimary],
     ['detailActionMenu', elements.detailActionMenu],
+    ['detailActionIconWeb', elements.detailActionIconWeb],
     ['lockBtn', elements.lockBtn],
   ];
   controls.forEach((control) => {
@@ -321,6 +330,7 @@ async function loadPersistedPopupUiState() {
     const parsed = parsePersistedPopupUiState(stored?.[POPUP_UI_STATE_STORAGE_KEY]);
     selectedItemId = parsed.selectedItemId;
     elements.searchInput.value = parsed.searchQuery;
+    updateSearchClearVisibility();
     activeTypeFilter = parsed.typeFilter;
     suggestedOnly = parsed.suggestedOnly;
   } catch {
@@ -344,6 +354,40 @@ function persistPopupUiState() {
   });
 }
 
+function updateSearchClearVisibility() {
+  const hasQuery = elements.searchInput.value.trim().length > 0;
+  const readyLayout = currentLayoutMode === 'ready';
+  elements.searchClearBtn.hidden = !(readyLayout && hasQuery);
+}
+
+async function refreshCredentialListForCurrentQuery() {
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.list_credentials',
+    query: elements.searchInput.value,
+    typeFilter: activeTypeFilter,
+    suggestedOnly,
+    pageUrl: activePageUrl,
+  });
+  if (!response.ok) {
+    setAlert('warning', response.message || 'Could not refresh search results.');
+    return;
+  }
+  renderState({
+    state: currentState,
+    page: response.page,
+    items: response.items,
+  });
+}
+
+function scheduleSearchRefresh(delayMs = 120) {
+  if (searchDebounceTimer !== null) {
+    window.clearTimeout(searchDebounceTimer);
+  }
+  searchDebounceTimer = window.setTimeout(() => {
+    void refreshCredentialListForCurrentQuery();
+  }, delayMs);
+}
+
 function getSelectedCredential() {
   if (!selectedItemId) {
     return null;
@@ -353,6 +397,14 @@ function getSelectedCredential() {
 
 function getCredentialByItemId(itemId) {
   return currentItems.find((item) => item.itemId === itemId) ?? null;
+}
+
+function selectedManualIconHost() {
+  const selected = getSelectedCredential();
+  if (!selected || selected.itemType !== 'login') {
+    return null;
+  }
+  return sanitizeIconHost(selected.firstUrl ?? '');
 }
 
 function toggleSelectedItemInState(itemId) {
@@ -547,6 +599,10 @@ function renderCredentialDetails() {
   if (!selectedItem) {
     elements.credentialDetailsLoading.hidden = true;
     elements.credentialDetailsContent.hidden = true;
+    elements.detailIconShell.classList.remove('is-editable');
+    elements.detailIconEditBtn.hidden = true;
+    elements.detailIconEditBtn.disabled = true;
+    elements.detailActionIconWeb.disabled = true;
     elements.detailActionPrimary.disabled = true;
     elements.detailActionMenu.disabled = true;
     detailRows.forEach((nodes) => {
@@ -566,6 +622,12 @@ function renderCredentialDetails() {
   }
 
   const detailModel = buildDetailViewModel(selectedItem);
+  const iconHost = selectedManualIconHost();
+  const iconEditable = Boolean(iconHost);
+  elements.detailIconShell.classList.toggle('is-editable', iconEditable);
+  elements.detailIconEditBtn.hidden = !iconEditable;
+  elements.detailIconEditBtn.disabled = disableActions || !iconEditable;
+  elements.detailActionIconWeb.disabled = disableActions || !iconEditable;
   elements.detailMonogram.textContent = buildCredentialMonogram(selectedItem.title);
   const detailFaviconUrl = activeFaviconUrl(selectedItem);
   if (detailFaviconUrl) {
@@ -1235,6 +1297,43 @@ async function openWebSettings(options = {}) {
   }
 }
 
+async function openManualIconInWebSettings(host) {
+  const safeHost = sanitizeIconHost(host ?? '');
+  if (!safeHost) {
+    setAlert('warning', 'This login has no valid URL host for manual icon.');
+    return { ok: false, reason: 'invalid_icon_host' };
+  }
+  const candidate = elements.serverUrlInput.value?.trim();
+  let serverOrigin = currentState?.serverOrigin ?? null;
+  if (!serverOrigin && candidate) {
+    try {
+      serverOrigin = canonicalizeServerUrl(candidate);
+    } catch {
+      setAlert('warning', 'Set a valid server URL first.');
+      return { ok: false, reason: 'invalid_server_url' };
+    }
+  }
+  if (!serverOrigin) {
+    setAlert('warning', 'Configure server URL first.');
+    return { ok: false, reason: 'missing_server_url' };
+  }
+  const webSettingsUrl = buildWebSettingsUrl(serverOrigin);
+  if (!webSettingsUrl) {
+    setAlert('warning', 'Could not resolve web app URL from server URL.');
+    return { ok: false, reason: 'invalid_web_settings_url' };
+  }
+  try {
+    const parsed = new URL(webSettingsUrl);
+    parsed.pathname = '/settings/advanced';
+    parsed.searchParams.set('manualIconHost', safeHost);
+    await chrome.tabs.create({ url: parsed.toString() });
+    return { ok: true };
+  } catch {
+    setAlert('warning', 'Could not open web settings for icon editing.');
+    return { ok: false, reason: 'open_settings_failed' };
+  }
+}
+
 function openWebApp() {
   const candidate = elements.serverUrlInput.value?.trim();
   let serverOrigin = currentState?.serverOrigin ?? null;
@@ -1375,6 +1474,36 @@ async function openItemInWeb(itemId) {
   await chrome.tabs.create({ url });
 }
 
+function clearDetailIconFileInput() {
+  elements.detailIconFileInput.value = '';
+}
+
+async function updateManualIconFromFile(file) {
+  const host = selectedManualIconHost();
+  if (!host) {
+    throw new Error('This login has no valid URL host for icon editing.');
+  }
+  const dataUrl = await importManualIconFromFile(file);
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.set_manual_icon',
+    host,
+    dataUrl,
+    source: 'file',
+  });
+  if (!response.ok) {
+    throw new Error(response.message || 'Could not save manual icon.');
+  }
+  const syncStatus = response.syncStatus === 'queued' ? 'queued' : 'synced';
+  if (syncStatus === 'queued') {
+    setAlert('warning', `Icon updated locally for ${host}. Syncing to server in background...`);
+  } else {
+    setAlert('success', `Icon updated for ${host}.`);
+  }
+  await refreshStateAndMaybeList({
+    showLoading: false,
+  });
+}
+
 async function handleDetailAction(action, sourceButton = null) {
   const selected = getSelectedCredential();
   if (!selected) {
@@ -1489,29 +1618,19 @@ function wireEvents() {
 
   elements.searchInput.addEventListener('input', () => {
     persistPopupUiState();
-    if (searchDebounceTimer !== null) {
-      window.clearTimeout(searchDebounceTimer);
+    updateSearchClearVisibility();
+    scheduleSearchRefresh(120);
+  });
+
+  elements.searchClearBtn.addEventListener('click', () => {
+    if (elements.searchInput.value.length === 0) {
+      return;
     }
-    searchDebounceTimer = window.setTimeout(() => {
-      void (async () => {
-        const response = await sendBackgroundCommand({
-          type: 'vaultlite.list_credentials',
-          query: elements.searchInput.value,
-          typeFilter: activeTypeFilter,
-          suggestedOnly,
-          pageUrl: activePageUrl,
-        });
-        if (!response.ok) {
-          setAlert('warning', response.message || 'Could not refresh search results.');
-          return;
-        }
-        renderState({
-          state: currentState,
-          page: response.page,
-          items: response.items,
-        });
-      })();
-    }, 120);
+    elements.searchInput.value = '';
+    elements.searchInput.focus();
+    persistPopupUiState();
+    updateSearchClearVisibility();
+    scheduleSearchRefresh(0);
   });
 
   elements.credentialsList.addEventListener('click', (event) => {
@@ -1600,6 +1719,7 @@ function wireEvents() {
     if (action === 'clear-search') {
       elements.searchInput.value = '';
       persistPopupUiState();
+      updateSearchClearVisibility();
       void refreshStateAndMaybeList();
       return;
     }
@@ -1678,6 +1798,65 @@ function wireEvents() {
     event.preventDefault();
     event.stopPropagation();
     toggleDetailMenu();
+  });
+
+  elements.detailActionIconWeb.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const host = selectedManualIconHost();
+    if (!host) {
+      setAlert('warning', 'This login has no valid URL host for icon editing.');
+      closeDetailMenu();
+      return;
+    }
+    closeDetailMenu();
+    void runAction(async () => {
+      await openManualIconInWebSettings(host);
+    });
+  });
+
+  elements.detailIconEditBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (inFlight) {
+      return;
+    }
+    elements.detailIconEditBtn.blur();
+    elements.detailIconFileInput.click();
+    window.setTimeout(() => {
+      elements.detailIconEditBtn.blur();
+    }, 0);
+  });
+
+  elements.detailIconFileInput.addEventListener('change', () => {
+    const file = elements.detailIconFileInput.files?.[0] ?? null;
+    if (!file) {
+      return;
+    }
+    void runAction(async () => {
+      try {
+        await updateManualIconFromFile(file);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Could not import icon file.';
+        setAlert('warning', message);
+        const lowered = message.toLowerCase();
+        const shouldOfferSettingsFallback =
+          lowered.includes('background') ||
+          lowered.includes('timeout') ||
+          lowered.includes('could not save manual icon');
+        const host = selectedManualIconHost();
+        if (host && shouldOfferSettingsFallback) {
+          const shouldOpenSettings = window.confirm(
+            `Could not update icon in the popup.\nOpen web settings to edit icon for ${host}?`,
+          );
+          if (shouldOpenSettings) {
+            await openManualIconInWebSettings(host);
+          }
+        }
+      } finally {
+        clearDetailIconFileInput();
+      }
+    });
   });
 
   document.addEventListener('mousedown', (event) => {

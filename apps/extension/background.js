@@ -5,6 +5,7 @@ import {
   canonicalizeServerUrl,
   deriveWebOriginFromServerOrigin,
   isAllowedSettingsPath,
+  isAllowedUnlockPath,
   isCredentialAllowedForSite,
   isPageUrlEligibleForFill,
   matchesQuery,
@@ -27,7 +28,7 @@ import {
   normalizeVaultItemPayload,
 } from './runtime-crypto.js';
 import { diagnoseCredentialCache } from './credential-cache-diagnostics.js';
-import { buildFaviconCandidates, registrableDomain } from './favicon-candidates.js';
+import { buildFaviconCandidates } from './favicon-candidates.js';
 
 const CREDENTIAL_CACHE_TTL_MS = 60_000;
 const RESTORE_THROTTLE_MS = 15_000;
@@ -46,6 +47,13 @@ const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_WAIT_BUDGET_MS = 900;
 const STORAGE_UNLOCK_CONTEXT_KEY = 'vaultlite.unlocked_context.v1';
 const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
+const UNLOCK_GRANT_APPROVAL_COOLDOWN_MS = 2_000;
+const UNLOCK_GRANT_APPROVAL_ALARM_NAME = 'vaultlite.unlock_grant_approval.v1';
+const UNLOCK_GRANT_APPROVAL_ALARM_PERIOD_MINUTES = 0.5;
+const UNLOCK_GRANT_DEFAULT_INTERVAL_SECONDS = 5;
+const UNLOCK_GRANT_TTL_SECONDS = 120;
+const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
+const MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY = 'vaultlite.manual_icon_sync_queue.v1';
 
 const state = {
   phase: 'anonymous',
@@ -64,6 +72,7 @@ let trustedState = null;
 let sessionToken = null;
 let unlockedContext = null;
 let manualIconMap = {};
+let manualIconSyncQueue = {};
 let credentialsCache = {
   loadedAt: 0,
   credentials: [],
@@ -78,8 +87,10 @@ let restoreInFlightPromise = null;
 let unlockGrantApproveInFlight = null;
 let unlockGrantConsumeInFlight = null;
 let lastUnlockGrantAttemptAt = 0;
+let lastUnlockGrantApproveAttemptAt = 0;
 let lastEmptyCacheRetryAt = 0;
 let linkPairingSession = null;
+let manualIconSyncQueueProcessInFlight = null;
 
 function sessionStorageArea() {
   if (!chrome.storage || !chrome.storage.session) {
@@ -311,8 +322,50 @@ function delay(ms) {
 }
 
 function setPhase(phase, errorMessage = null) {
+  const previousPhase = state.phase;
   state.phase = phase;
   state.lastError = errorMessage;
+  if (previousPhase !== phase) {
+    if (phase === 'ready') {
+      lastUnlockGrantApproveAttemptAt = 0;
+      void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
+    }
+    void reconcileUnlockGrantApprovalAlarm();
+  }
+}
+
+function hasValidUnlockedContext() {
+  return Boolean(
+    unlockedContext &&
+      typeof unlockedContext.accountKey === 'string' &&
+      Number.isFinite(unlockedContext.unlockedUntil) &&
+      unlockedContext.unlockedUntil > Date.now(),
+  );
+}
+
+function shouldRunUnlockGrantApprovalScheduler() {
+  return state.phase === 'ready' && Boolean(sessionToken) && hasValidUnlockedContext();
+}
+
+async function reconcileUnlockGrantApprovalAlarm() {
+  if (!chrome.alarms?.get || !chrome.alarms?.create || !chrome.alarms?.clear) {
+    return;
+  }
+  try {
+    if (!shouldRunUnlockGrantApprovalScheduler()) {
+      await chrome.alarms.clear(UNLOCK_GRANT_APPROVAL_ALARM_NAME);
+      return;
+    }
+    const existing = await chrome.alarms.get(UNLOCK_GRANT_APPROVAL_ALARM_NAME);
+    if (!existing) {
+      chrome.alarms.create(UNLOCK_GRANT_APPROVAL_ALARM_NAME, {
+        periodInMinutes: UNLOCK_GRANT_APPROVAL_ALARM_PERIOD_MINUTES,
+        delayInMinutes: UNLOCK_GRANT_APPROVAL_ALARM_PERIOD_MINUTES,
+      });
+    }
+  } catch {
+    // Best effort only.
+  }
 }
 
 function clearSensitiveMemory() {
@@ -433,6 +486,7 @@ async function clearExtensionSessionToken() {
   sessionToken = null;
   state.sessionExpiresAt = null;
   await persistSessionToken();
+  await reconcileUnlockGrantApprovalAlarm();
 }
 
 async function clearTrustedStateForReconnect(reasonMessage) {
@@ -566,6 +620,7 @@ async function loadPersistedState() {
     STORAGE_LOCAL_CONFIG_KEY,
     STORAGE_LOCAL_TRUSTED_KEY,
     MANUAL_ICON_STORAGE_KEY,
+    MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY,
   ]);
   const sessionStorage = sessionStorageArea();
   let sessionState = {};
@@ -584,6 +639,7 @@ async function loadPersistedState() {
   const config = localState?.[STORAGE_LOCAL_CONFIG_KEY] ?? null;
   const trusted = localState?.[STORAGE_LOCAL_TRUSTED_KEY] ?? null;
   const rawManualIcons = localState?.[MANUAL_ICON_STORAGE_KEY] ?? {};
+  const rawManualIconSyncQueue = localState?.[MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY] ?? {};
   const sessionEntry = sessionState?.[STORAGE_SESSION_KEY] ?? null;
   const linkPairingEntry = sessionState?.[STORAGE_LINK_PAIRING_SESSION_KEY] ?? null;
   const unlockContextEntry = sessionState?.[STORAGE_UNLOCK_CONTEXT_KEY] ?? null;
@@ -664,6 +720,29 @@ async function loadPersistedState() {
         continue;
       }
       manualIconMap[safeHost] = record.dataUrl;
+    }
+  }
+
+  manualIconSyncQueue = {};
+  if (rawManualIconSyncQueue && typeof rawManualIconSyncQueue === 'object') {
+    for (const [host, entry] of Object.entries(rawManualIconSyncQueue)) {
+      const normalized = normalizeManualIconQueueEntry(host, entry);
+      if (!normalized) {
+        continue;
+      }
+      if (normalized.action === 'remove') {
+        manualIconSyncQueue[normalized.host] = {
+          action: 'remove',
+          queuedAt: normalized.queuedAt,
+        };
+        continue;
+      }
+      manualIconSyncQueue[normalized.host] = {
+        action: 'upsert',
+        dataUrl: normalized.dataUrl,
+        source: normalized.source,
+        queuedAt: normalized.queuedAt,
+      };
     }
   }
 }
@@ -832,7 +911,26 @@ function isAllowedSettingsSenderUrl(rawUrl, expectedOrigin) {
   });
 }
 
-function validateBridgeSenderForPing(sender) {
+function isAllowedUnlockSenderUrl(rawUrl, expectedOrigin) {
+  if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
+    return false;
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.origin !== expectedOrigin) {
+    return false;
+  }
+  return isAllowedUnlockPath({
+    pathname: parsed.pathname,
+    search: parsed.search,
+  });
+}
+
+function validateBridgeSender(sender, routeScope) {
   if (!sender || sender.id !== chrome.runtime.id) {
     return fail('permission_denied', 'Bridge sender is not trusted.');
   }
@@ -846,8 +944,12 @@ function validateBridgeSenderForPing(sender) {
   if (sender.frameId !== 0) {
     return fail('permission_denied', 'Bridge requests are allowed only from the top-level frame.');
   }
-  if (!isAllowedSettingsSenderUrl(sender.url, expectedWebOrigin)) {
-    return fail('permission_denied', 'Bridge URL is not allowed.');
+  const isAllowed =
+    routeScope === 'unlock'
+      ? isAllowedUnlockSenderUrl(sender.url, expectedWebOrigin)
+      : isAllowedSettingsSenderUrl(sender.url, expectedWebOrigin);
+  if (!isAllowed) {
+    return fail('permission_denied', `Bridge URL is not allowed for ${routeScope}.`);
   }
   if (
     typeof sender.documentLifecycle === 'string' &&
@@ -863,7 +965,7 @@ async function pingBridgeInternal(sender) {
     return fail('server_origin_not_allowed', 'Configure server URL first in extension settings.');
   }
 
-  const senderValidation = validateBridgeSenderForPing(sender);
+  const senderValidation = validateBridgeSender(sender, 'settings');
   if (senderValidation) {
     return senderValidation;
   }
@@ -958,14 +1060,6 @@ async function restoreSessionInternal(force = false) {
     await restoreInFlightPromise;
     return;
   }
-
-  const hasValidUnlockedContext = () =>
-    Boolean(
-      unlockedContext &&
-        typeof unlockedContext.accountKey === 'string' &&
-        Number.isFinite(unlockedContext.unlockedUntil) &&
-        unlockedContext.unlockedUntil > Date.now(),
-    );
 
   const recoverExtensionSessionInternal = async (apiClient) => {
     if (!trustedState?.deviceId || !trustedState?.sessionRecoverKey) {
@@ -1069,7 +1163,7 @@ async function restoreSessionInternal(force = false) {
       if (hasValidUnlockedContext()) {
         setPhase('ready', null);
         touchUnlockedContext();
-        void maybeAutoApproveUnlockGrants();
+        void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
       } else {
         unlockedContext = null;
         void clearPersistedUnlockedContext();
@@ -1085,7 +1179,7 @@ async function restoreSessionInternal(force = false) {
           if (hasValidUnlockedContext()) {
             setPhase('ready', null);
             touchUnlockedContext();
-            void maybeAutoApproveUnlockGrants();
+            void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
           } else {
             setPhase('local_unlock_required', null);
             void tryAutoUnlockViaGrantInternal();
@@ -1106,6 +1200,7 @@ async function restoreSessionInternal(force = false) {
   try {
     await restoreInFlightPromise;
   } finally {
+    await reconcileUnlockGrantApprovalAlarm();
     restoreInFlightPromise = null;
   }
 }
@@ -1122,13 +1217,19 @@ async function ensureReadyState() {
   return null;
 }
 
-async function maybeAutoApproveUnlockGrants() {
+async function maybeAutoApproveUnlockGrants(input = {}) {
   if (unlockGrantApproveInFlight) {
     return unlockGrantApproveInFlight;
   }
-  if (state.phase !== 'ready' || !sessionToken) {
+  if (!shouldRunUnlockGrantApprovalScheduler() || !sessionToken) {
     return null;
   }
+  const requestId = isSafeUnlockGrantRequestId(input?.requestId) ? input.requestId : null;
+  const now = Date.now();
+  if (now - lastUnlockGrantApproveAttemptAt < UNLOCK_GRANT_APPROVAL_COOLDOWN_MS) {
+    return null;
+  }
+  lastUnlockGrantApproveAttemptAt = now;
   const apiClient = currentApiClient();
   if (!apiClient) {
     return null;
@@ -1138,21 +1239,40 @@ async function maybeAutoApproveUnlockGrants() {
       const pending = await apiClient.listPendingUnlockGrants({
         bearerToken: sessionToken,
       });
-      const requests = Array.isArray(pending?.requests) ? pending.requests : [];
-      for (const request of requests) {
-        if (request?.status !== 'pending' || typeof request?.requestId !== 'string') {
-          continue;
-        }
-        try {
-          await apiClient.approveUnlockGrant({
-            bearerToken: sessionToken,
-            requestId: request.requestId,
-            approvalNonce: randomBase64Url(16),
-            unlockAccountKey: unlockedContext?.accountKey ?? undefined,
-          });
-        } catch {
-          // Keep best-effort approval behavior to avoid blocking extension flow.
-        }
+      const requests = (Array.isArray(pending?.requests) ? pending.requests : [])
+        .filter(
+          (entry) =>
+            entry?.status === 'pending' &&
+            isSafeUnlockGrantRequestId(entry?.requestId) &&
+            entry?.requesterSurface === 'web',
+        )
+        .sort((left, right) => {
+          const leftCreated = Number.isFinite(Date.parse(left.createdAt)) ? Date.parse(left.createdAt) : 0;
+          const rightCreated = Number.isFinite(Date.parse(right.createdAt))
+            ? Date.parse(right.createdAt)
+            : 0;
+          if (rightCreated !== leftCreated) {
+            return rightCreated - leftCreated;
+          }
+          return right.requestId.localeCompare(left.requestId);
+        });
+
+      const targetRequest = requestId
+        ? requests.find((entry) => entry.requestId === requestId) ?? null
+        : requests[0] ?? null;
+
+      if (!targetRequest) {
+        return;
+      }
+      try {
+        await apiClient.approveUnlockGrant({
+          bearerToken: sessionToken,
+          requestId: targetRequest.requestId,
+          approvalNonce: randomBase64Url(16),
+          unlockAccountKey: unlockedContext?.accountKey ?? undefined,
+        });
+      } catch {
+        // Keep best-effort approval behavior to avoid blocking extension flow.
       }
     } catch {
       // Best effort only.
@@ -1524,12 +1644,22 @@ function iconDomainAliases(domain) {
   if (!safeDomain) {
     return [];
   }
-  const aliases = [safeDomain];
-  const rootDomain = sanitizeIconHost(registrableDomain(safeDomain) ?? '');
-  if (rootDomain && rootDomain !== safeDomain) {
-    aliases.push(rootDomain);
+  return [safeDomain];
+}
+
+function validateAutomaticIconDataUrl(value) {
+  if (typeof value !== 'string' || value.length < 24 || value.length > 2_000_000) {
+    return false;
   }
-  return aliases;
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/u.exec(value);
+  if (!match) {
+    return false;
+  }
+  const mimeType = String(match[1] ?? '')
+    .split(';')[0]
+    ?.trim()
+    .toLowerCase();
+  return Boolean(mimeType) && mimeType.startsWith('image/');
 }
 
 function iconCacheEntryForDomain(domain) {
@@ -1558,24 +1688,19 @@ function cacheResolvedIcons(icons) {
       continue;
     }
     const safeDomain = sanitizeIconHost(String(icon.domain ?? ''));
-    if (!safeDomain || !validateManualIconDataUrl(String(icon.dataUrl ?? ''))) {
+    const dataUrl = String(icon.dataUrl ?? '');
+    if (!safeDomain || !validateAutomaticIconDataUrl(dataUrl)) {
       continue;
     }
     const cacheEntry = {
       domain: safeDomain,
-      dataUrl: icon.dataUrl,
+      dataUrl,
       sourceUrl: typeof icon.sourceUrl === 'string' ? icon.sourceUrl : null,
       updatedAt: typeof icon.updatedAt === 'string' ? icon.updatedAt : nowIso(),
       cachedAt: now,
     };
-    const aliases = iconDomainAliases(safeDomain);
-    for (const alias of aliases) {
-      canonicalIconCacheByDomain.set(alias, {
-        ...cacheEntry,
-        domain: alias,
-      });
-      iconResolveMissByDomain.delete(alias);
-    }
+    canonicalIconCacheByDomain.set(safeDomain, cacheEntry);
+    iconResolveMissByDomain.delete(safeDomain);
   }
 }
 
@@ -1737,35 +1862,143 @@ function listManualIconsView() {
     .sort((left, right) => left.host.localeCompare(right.host));
 }
 
-async function syncManualIconUpsertToServerBestEffort(input) {
-  const apiClient = currentApiClient();
-  if (!apiClient || !sessionToken) {
-    return;
-  }
-  try {
-    await apiClient.upsertManualSiteIcon({
-      bearerToken: sessionToken,
-      domain: input.host,
-      dataUrl: input.dataUrl,
-      source: input.source === 'url' ? 'url' : 'file',
-    });
-  } catch {
-    // Best-effort sync.
-  }
+function isUnauthorizedApiError(error) {
+  const code = String(error?.code ?? '');
+  const status = Number(error?.status ?? 0);
+  return code === 'unauthorized' || code === 'request_failed_401' || status === 401;
 }
 
-async function syncManualIconRemoveToServerBestEffort(host) {
-  const apiClient = currentApiClient();
-  if (!apiClient || !sessionToken) {
+function isNonRetriableApiError(error) {
+  const status = Number(error?.status ?? 0);
+  if (!Number.isFinite(status)) {
+    return false;
+  }
+  if (status === 429) {
+    return false;
+  }
+  return status >= 400 && status < 500;
+}
+
+function normalizeManualIconQueueEntry(host, rawEntry) {
+  const safeHost = sanitizeIconHost(host);
+  if (!safeHost || !rawEntry || typeof rawEntry !== 'object') {
+    return null;
+  }
+  const action = rawEntry.action === 'remove' ? 'remove' : rawEntry.action === 'upsert' ? 'upsert' : null;
+  if (!action) {
+    return null;
+  }
+  const queuedAt =
+    typeof rawEntry.queuedAt === 'string' && rawEntry.queuedAt.trim().length > 0
+      ? rawEntry.queuedAt
+      : nowIso();
+  if (action === 'remove') {
+    return {
+      host: safeHost,
+      action,
+      queuedAt,
+    };
+  }
+  const dataUrl = typeof rawEntry.dataUrl === 'string' ? rawEntry.dataUrl : '';
+  if (!validateManualIconDataUrl(dataUrl)) {
+    return null;
+  }
+  return {
+    host: safeHost,
+    action,
+    dataUrl,
+    source: rawEntry.source === 'url' ? 'url' : 'file',
+    queuedAt,
+  };
+}
+
+async function persistManualIconSyncQueue() {
+  await chrome.storage.local.set({
+    [MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY]: manualIconSyncQueue,
+  });
+}
+
+async function enqueueManualIconSyncUpsert(input) {
+  manualIconSyncQueue[input.host] = {
+    action: 'upsert',
+    dataUrl: input.dataUrl,
+    source: input.source === 'url' ? 'url' : 'file',
+    queuedAt: nowIso(),
+  };
+  await persistManualIconSyncQueue();
+}
+
+async function enqueueManualIconSyncRemove(host) {
+  manualIconSyncQueue[host] = {
+    action: 'remove',
+    queuedAt: nowIso(),
+  };
+  await persistManualIconSyncQueue();
+}
+
+async function dropManualIconSyncQueueHost(host) {
+  if (!(host in manualIconSyncQueue)) {
     return;
   }
+  delete manualIconSyncQueue[host];
+  await persistManualIconSyncQueue();
+}
+
+async function processManualIconSyncQueueBestEffort() {
+  if (manualIconSyncQueueProcessInFlight) {
+    return manualIconSyncQueueProcessInFlight;
+  }
+
+  manualIconSyncQueueProcessInFlight = (async () => {
+    const apiClient = currentApiClient();
+    if (!apiClient || !sessionToken) {
+      return;
+    }
+    const hosts = Object.keys(manualIconSyncQueue).sort((left, right) => left.localeCompare(right));
+    for (const host of hosts) {
+      const normalized = normalizeManualIconQueueEntry(host, manualIconSyncQueue[host]);
+      if (!normalized) {
+        await dropManualIconSyncQueueHost(host);
+        continue;
+      }
+
+      const executeOnce = async () => {
+        if (normalized.action === 'remove') {
+          await apiClient.removeManualSiteIcon({
+            bearerToken: sessionToken,
+            domain: normalized.host,
+          });
+          return;
+        }
+        await apiClient.upsertManualSiteIcon({
+          bearerToken: sessionToken,
+          domain: normalized.host,
+          dataUrl: normalized.dataUrl,
+          source: normalized.source,
+        });
+      };
+
+      try {
+        await executeOnce();
+        await dropManualIconSyncQueueHost(host);
+      } catch (error) {
+        if (isUnauthorizedApiError(error)) {
+          await clearExtensionSessionToken();
+          break;
+        }
+        if (isNonRetriableApiError(error)) {
+          await dropManualIconSyncQueueHost(host);
+          continue;
+        }
+        // Keep in queue to retry later.
+      }
+    }
+  })();
+
   try {
-    await apiClient.removeManualSiteIcon({
-      bearerToken: sessionToken,
-      domain: host,
-    });
-  } catch {
-    // Best-effort sync.
+    await manualIconSyncQueueProcessInFlight;
+  } finally {
+    manualIconSyncQueueProcessInFlight = null;
   }
 }
 
@@ -1791,6 +2024,7 @@ async function hydrateManualIconsFromServerBestEffort() {
       nextManualIconMap[safeHost] = dataUrl;
     }
     manualIconMap = nextManualIconMap;
+    await processManualIconSyncQueueBestEffort();
   } catch {
     // Best-effort hydration.
   }
@@ -1817,13 +2051,16 @@ async function setManualIconInternal(input) {
     source: input?.source === 'url' ? 'url' : 'file',
   });
   manualIconMap[safeHost] = dataUrl;
-  await syncManualIconUpsertToServerBestEffort({
+  await enqueueManualIconSyncUpsert({
     host: safeHost,
     dataUrl,
     source: input?.source === 'url' ? 'url' : 'file',
   });
+  await processManualIconSyncQueueBestEffort();
+  const syncStatus = safeHost in manualIconSyncQueue ? 'queued' : 'synced';
   return ok({
     icons: listManualIconsView(),
+    syncStatus,
   });
 }
 
@@ -1842,9 +2079,12 @@ async function removeManualIconInternal(input) {
     }
     manualIconMap[host] = record.dataUrl;
   }
-  await syncManualIconRemoveToServerBestEffort(safeHost);
+  await enqueueManualIconSyncRemove(safeHost);
+  await processManualIconSyncQueueBestEffort();
+  const syncStatus = safeHost in manualIconSyncQueue ? 'queued' : 'synced';
   return ok({
     icons: listManualIconsView(),
+    syncStatus,
   });
 }
 
@@ -2112,7 +2352,7 @@ async function applyTrustedPairingResult(pairingResult) {
 }
 
 async function pollLinkPairingFromBridgeInternal(input, sender) {
-  const senderValidation = validateBridgeSenderForPing(sender);
+  const senderValidation = validateBridgeSender(sender, 'settings');
   if (senderValidation) {
     return senderValidation;
   }
@@ -2138,7 +2378,7 @@ async function pollLinkPairingFromBridgeInternal(input, sender) {
 }
 
 async function openPopupFromBridgeInternal(sender) {
-  const senderValidation = validateBridgeSenderForPing(sender);
+  const senderValidation = validateBridgeSender(sender, 'settings');
   if (senderValidation) {
     return senderValidation;
   }
@@ -2151,6 +2391,26 @@ async function openPopupFromBridgeInternal(sender) {
   } catch {
     return fail('popup_open_not_supported', 'Open the extension popup from the toolbar to continue.');
   }
+}
+
+function isSafeUnlockGrantRequestId(value) {
+  return typeof value === 'string' && value.length >= 8 && value.length <= 128;
+}
+
+async function nudgeUnlockGrantFromBridgeInternal(input, sender) {
+  const senderValidation = validateBridgeSender(sender, 'unlock');
+  if (senderValidation) {
+    return senderValidation;
+  }
+  if (!isSafeUnlockGrantRequestId(input?.requestId)) {
+    return fail('invalid_input', 'Unlock grant request id is invalid.');
+  }
+
+  await maybeAutoApproveUnlockGrants({
+    source: 'nudge',
+    requestId: input.requestId,
+  });
+  return ok();
 }
 
 async function resolveDeploymentFingerprint(apiClient) {
@@ -2390,7 +2650,7 @@ async function unlockLocalInternal(input) {
     setPhase('ready', null);
     await persistUnlockedContext();
     armIdleLockTimer();
-    void maybeAutoApproveUnlockGrants();
+    void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
 
     const warmupResult = await refreshCredentialCache();
     if (!warmupResult.ok) {
@@ -2436,6 +2696,8 @@ async function initializeBackgroundRuntime() {
   }
 
   await loadPersistedState();
+  await processManualIconSyncQueueBestEffort();
+  await reconcileUnlockGrantApprovalAlarm();
   try {
     await reconcileAutoPairBridgeScript();
   } catch {
@@ -2552,6 +2814,13 @@ async function handleCommand(command, senderContext, sender) {
       }
       return openPopupFromBridgeInternal(sender);
     }
+    case 'vaultlite.bridge_nudge_unlock_grant': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'bridge:auto_pair');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return nudgeUnlockGrantFromBridgeInternal(command, sender);
+    }
     case 'vaultlite.unlock_local': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'unlock:local');
       if (capabilityError) {
@@ -2643,6 +2912,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return true;
 });
+
+if (chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm?.name !== UNLOCK_GRANT_APPROVAL_ALARM_NAME) {
+      return;
+    }
+    void maybeAutoApproveUnlockGrants({
+      source: 'alarm',
+    });
+  });
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   void initializeBackgroundRuntime();

@@ -62,4 +62,16 @@ describe('popup ui style regressions', () => {
     expect(source).toContain('Enter your master password to unlock this trusted device.');
     expect(source).toContain('<span>Master password</span>');
   });
+
+  test('keeps detail icon edit affordance transient and aligned', () => {
+    const source = readFileSync(popupHtmlPath, 'utf8');
+    expect(source).not.toContain('.detail-icon-shell.is-editable:focus-within .detail-icon-edit');
+    expect(source).not.toContain('.detail-icon-edit:focus-visible');
+    const editBlock = source.match(/\.detail-icon-edit\s*\{[\s\S]*?\}/)?.[0] ?? '';
+    expect(editBlock).toContain('pointer-events: none;');
+    expect(editBlock).toContain('inset: 0;');
+    expect(editBlock).toContain('line-height: 0;');
+    expect(editBlock).toContain('display: grid;');
+    expect(editBlock).toContain('place-items: center;');
+  });
 });
