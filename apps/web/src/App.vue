@@ -17,6 +17,8 @@ const handlingUnauthorized = ref(false);
 const sessionRestoreResolved = ref(false);
 const phaseRedirectInFlight = ref(false);
 const sessionSyncInFlight = ref(false);
+const fastRestoreInFlight = ref(false);
+const lastFastRestoreKey = ref<string | null>(null);
 const isAuthenticatedRoute = computed(
   () => route.path.startsWith('/vault') || route.path.startsWith('/settings') || route.path.startsWith('/admin'),
 );
@@ -49,6 +51,11 @@ async function maybeRedirectForSessionPhase() {
         phaseRedirectInFlight.value = true;
         try {
           await router.replace(fallback);
+        } catch (error) {
+          sessionStore.handleUnauthorized({
+            reasonCode: 'session_restore_failed',
+            message: toHumanErrorMessage(error),
+          });
         } finally {
           phaseRedirectInFlight.value = false;
         }
@@ -60,6 +67,11 @@ async function maybeRedirectForSessionPhase() {
   phaseRedirectInFlight.value = true;
   try {
     await router.replace(redirect);
+  } catch (error) {
+    sessionStore.handleUnauthorized({
+      reasonCode: 'session_restore_failed',
+      message: toHumanErrorMessage(error),
+    });
   } finally {
     phaseRedirectInFlight.value = false;
   }
@@ -73,6 +85,50 @@ function shouldRunSessionSync() {
     return false;
   }
   return sessionStore.state.phase !== 'anonymous' && sessionStore.state.phase !== 'onboarding_in_progress';
+}
+
+function fastRestoreKeyForCurrentRoute() {
+  if (!sessionRestoreResolved.value || handlingUnauthorized.value || fastRestoreInFlight.value) {
+    return null;
+  }
+  if (route.path !== '/auth') {
+    return null;
+  }
+  const phase = sessionStore.state.phase;
+  if (phase !== 'remote_authentication_required') {
+    return null;
+  }
+  if (!sessionStore.state.username || !sessionStore.state.deviceId) {
+    return null;
+  }
+  return [
+    route.fullPath,
+    phase,
+    sessionStore.state.username,
+    sessionStore.state.deviceId,
+    sessionStore.state.lockRevision,
+    sessionStore.state.lastUnlockedLockRevision,
+  ].join('|');
+}
+
+async function maybeFastRestoreOnAuthSurface() {
+  const key = fastRestoreKeyForCurrentRoute();
+  if (!key || key === lastFastRestoreKey.value) {
+    return;
+  }
+  lastFastRestoreKey.value = key;
+  fastRestoreInFlight.value = true;
+  try {
+    await sessionStore.restoreSession();
+  } catch (error) {
+    sessionStore.handleUnauthorized({
+      reasonCode: 'session_restore_failed',
+      message: toHumanErrorMessage(error),
+    });
+  } finally {
+    fastRestoreInFlight.value = false;
+    await maybeRedirectForSessionPhase();
+  }
 }
 
 async function refreshSessionBestEffort() {
@@ -163,6 +219,7 @@ onMounted(() => {
     } finally {
       sessionRestoreResolved.value = true;
       await maybeRedirectForSessionPhase();
+      await maybeFastRestoreOnAuthSurface();
     }
   })();
   window.addEventListener('pointerdown', handleActivity);
@@ -186,7 +243,10 @@ watch(
     route.fullPath,
   ],
   () => {
-    void maybeRedirectForSessionPhase();
+    void (async () => {
+      await maybeRedirectForSessionPhase();
+      await maybeFastRestoreOnAuthSurface();
+    })();
   },
   { flush: 'post' },
 );

@@ -316,4 +316,35 @@ describe('App shell', () => {
     expect(window.location.pathname).toBe('/auth');
     expect(window.location.search).toContain('next=');
   });
+
+  test('retries session restore immediately after redirecting to auth for trusted remote-auth state', async () => {
+    window.history.pushState({}, '', '/vault');
+    const sessionStore = createSessionStore('remote_authentication_required');
+    sessionStore.state.username = 'alice';
+    sessionStore.state.userId = 'user_1';
+    sessionStore.state.role = 'user';
+    sessionStore.state.deviceId = 'device_1';
+    sessionStore.state.deviceName = 'Primary Browser';
+    sessionStore.restoreSession
+      .mockResolvedValueOnce(undefined)
+      .mockImplementation(async () => {
+        sessionStore.state.phase = 'ready';
+      });
+    const router = createVaultLiteRouter(sessionStore);
+
+    mount(App, {
+      global: {
+        plugins: [router],
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await router.isReady();
+    await flushPromises();
+
+    expect(window.location.pathname).toBe('/auth');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(2);
+  });
 });

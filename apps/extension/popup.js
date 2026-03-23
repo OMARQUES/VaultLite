@@ -149,6 +149,7 @@ let fillBlockedState = null;
 let popupAutosizer = null;
 let pendingListScrollRestoreFramePrimary = null;
 let pendingListScrollRestoreFrameSecondary = null;
+let refreshIntervalMs = 20_000;
 const POPUP_UI_STATE_STORAGE_KEY = 'vaultlite.popup.ui.v1';
 const FALLBACK_PAIRING_STATE = {
   phase: 'pairing_required',
@@ -879,6 +880,7 @@ function renderState(payload) {
   activePageEligible = nextPageEligible;
   const resolvedPhase = resolvePopupPhase(currentState);
   applyLayoutState(resolvedPhase);
+  scheduleRefresh();
   elements.deviceNameInput.value = currentState?.deviceName ?? 'VaultLite Extension';
   elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';
   elements.unlockDeviceValue.textContent = currentState?.deviceName ?? 'This device';
@@ -1942,15 +1944,32 @@ function wireEvents() {
 }
 
 function scheduleRefresh() {
+  const nextIntervalMs = (() => {
+    const phase = resolvePopupPhase(currentState);
+    if (phase === 'local_unlock_required') {
+      return 1_500;
+    }
+    if (phase === 'remote_authentication_required' && currentState?.hasTrustedState) {
+      return 1_500;
+    }
+    if (phase === 'ready') {
+      return 12_000;
+    }
+    return 20_000;
+  })();
+  if (refreshTimer !== null && refreshIntervalMs === nextIntervalMs) {
+    return;
+  }
   if (refreshTimer !== null) {
     window.clearInterval(refreshTimer);
   }
+  refreshIntervalMs = nextIntervalMs;
   refreshTimer = window.setInterval(() => {
     void refreshStateAndMaybeList({
       fetchList: false,
       showLoading: false,
     });
-  }, 20_000);
+  }, refreshIntervalMs);
 }
 
 wireEvents();
