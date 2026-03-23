@@ -166,6 +166,7 @@ const FALLBACK_PAIRING_STATE = {
 function shouldForceStateRefreshAfterError(code) {
   return (
     code === 'remote_authentication_required' ||
+    code === 'local_unlock_required' ||
     code === 'pairing_required' ||
     code === 'trusted_state_reset_required'
   );
@@ -291,6 +292,11 @@ function toggleSections(state) {
   elements.pairingSection.hidden = true;
   elements.unlockSection.hidden = true;
   elements.readySection.hidden = true;
+
+  if (phase === 'remote_authentication_required' && state?.hasTrustedState) {
+    elements.unlockSection.hidden = false;
+    return;
+  }
 
   if (phase === 'pairing_required' || phase === 'remote_authentication_required') {
     elements.pairingSection.hidden = false;
@@ -989,7 +995,12 @@ async function refreshStateAndMaybeList(options = {}) {
   let localPage = { url: '', eligible: false };
   try {
     stateResponse = await sendBackgroundCommand({ type: 'vaultlite.get_state', passive: true });
-    if (stateResponse.ok && stateResponse.state?.phase === 'anonymous') {
+    const shouldForceActiveRefresh =
+      stateResponse.ok &&
+      (stateResponse.state?.phase === 'anonymous' ||
+        stateResponse.state?.hasTrustedState === true ||
+        resolvePopupPhase(stateResponse.state) !== 'pairing_required');
+    if (shouldForceActiveRefresh) {
       stateResponse = await sendBackgroundCommand({ type: 'vaultlite.get_state', passive: false });
     }
   } catch (error) {
@@ -1037,6 +1048,26 @@ async function refreshStateAndMaybeList(options = {}) {
     });
 
     if (!listResponse.ok) {
+      if (shouldForceStateRefreshAfterError(listResponse.code)) {
+        const refreshedStateResponse = await sendBackgroundCommand({
+          type: 'vaultlite.get_state',
+          passive: false,
+        });
+        vaultLoading = false;
+        detailLoading = false;
+        listErrorMessage = '';
+        if (refreshedStateResponse.ok) {
+          renderState({
+            state: refreshedStateResponse.state,
+            page: localPage,
+            items: [],
+          });
+        } else {
+          renderState({ state: stateResponse.state, page: {}, items: [] });
+          setAlert('danger', refreshedStateResponse.message || 'Failed to refresh extension state.');
+        }
+        return;
+      }
       vaultLoading = false;
       detailLoading = false;
       listErrorMessage = 'Could not load vault.';

@@ -30,7 +30,8 @@ function parseBridgeRequest(value) {
     value.action !== 'bridge.ping' &&
     value.action !== 'link.poll' &&
     value.action !== 'popup.open' &&
-    value.action !== 'unlock-grant.nudge'
+    value.action !== 'unlock-grant.nudge' &&
+    value.action !== 'web-bootstrap.request'
   ) {
     return null;
   }
@@ -68,6 +69,27 @@ function parseBridgeRequest(value) {
       unlockGrantRequestId: payload.requestId,
     };
   }
+  if (value.action === 'web-bootstrap.request') {
+    const payload = value.payload;
+    if (
+      !isRecord(payload) ||
+      typeof payload.requestPublicKey !== 'string' ||
+      payload.requestPublicKey.length < 40 ||
+      typeof payload.clientNonce !== 'string' ||
+      payload.clientNonce.length < 16 ||
+      typeof payload.webChallenge !== 'string' ||
+      payload.webChallenge.length < 16
+    ) {
+      return null;
+    }
+    return {
+      requestId: value.requestId,
+      action: 'web-bootstrap.request',
+      requestPublicKey: payload.requestPublicKey,
+      clientNonce: payload.clientNonce,
+      webChallenge: payload.webChallenge,
+    };
+  }
   return null;
 }
 
@@ -80,6 +102,7 @@ function sendBridgeResponse(input) {
     ok: input.ok === true,
     ...(typeof input.code === 'string' ? { code: input.code } : {}),
     ...(typeof input.message === 'string' ? { message: input.message } : {}),
+    ...(isRecord(input.payload) ? { payload: input.payload } : {}),
   };
   window.postMessage(response, window.location.origin);
 }
@@ -108,14 +131,21 @@ if (!globalThis[BRIDGE_READY_FLAG]) {
               type: 'vaultlite.bridge_poll_link_pairing',
               requestId: parsed.linkRequestId,
             }
-          : parsed.action === 'popup.open'
+        : parsed.action === 'popup.open'
             ? {
               type: 'vaultlite.bridge_open_popup',
             }
-            : {
+            : parsed.action === 'unlock-grant.nudge'
+              ? {
               type: 'vaultlite.bridge_nudge_unlock_grant',
               requestId: parsed.unlockGrantRequestId,
-            };
+              }
+              : {
+                type: 'vaultlite.bridge_request_web_bootstrap_grant',
+                requestPublicKey: parsed.requestPublicKey,
+                clientNonce: parsed.clientNonce,
+                webChallenge: parsed.webChallenge,
+              };
     void chrome.runtime
       .sendMessage(command)
       .then((response) => {
@@ -133,6 +163,7 @@ if (!globalThis[BRIDGE_READY_FLAG]) {
           ok: response.ok,
           code: typeof response.code === 'string' ? response.code : undefined,
           message: typeof response.message === 'string' ? response.message : undefined,
+          payload: isRecord(response.payload) ? response.payload : undefined,
         });
       })
       .catch(() => {

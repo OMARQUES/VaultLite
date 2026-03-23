@@ -23,6 +23,8 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
       deviceName: 'Primary Browser',
       lifecycleState: 'active',
       bundleVersion: 0,
+      lockRevision: 0,
+      lastUnlockedLockRevision: 0,
       lastError: null,
       lastActivityAt: null,
       autoLockAfterMs: 300000,

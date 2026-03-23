@@ -275,6 +275,8 @@ describe('createVaultLiteApi', () => {
       sessionState: 'local_unlock_required',
       unlockGrantEnabled: true,
       unlockIdleTimeoutMs: 300000,
+      lockRevision: 0,
+      lockScope: 'linked_surface_pair',
       user: {
         userId: 'user_2',
         username: 'bob',

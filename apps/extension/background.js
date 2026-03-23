@@ -5,6 +5,7 @@ import {
   canonicalizeServerUrl,
   deriveWebOriginFromServerOrigin,
   isAllowedSettingsPath,
+  isAllowedAuthPath,
   isAllowedUnlockPath,
   isCredentialAllowedForSite,
   isPageUrlEligibleForFill,
@@ -46,6 +47,7 @@ const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_WAIT_BUDGET_MS = 900;
 const STORAGE_UNLOCK_CONTEXT_KEY = 'vaultlite.unlocked_context.v1';
+const STORAGE_RUNTIME_STATE_KEY = 'vaultlite.runtime_state.v1';
 const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
 const UNLOCK_GRANT_APPROVAL_COOLDOWN_MS = 2_000;
 const UNLOCK_GRANT_APPROVAL_ALARM_NAME = 'vaultlite.unlock_grant_approval.v1';
@@ -64,6 +66,7 @@ const state = {
   deviceName: null,
   sessionExpiresAt: null,
   unlockIdleTimeoutMs: MEMORY_IDLE_LOCK_DEFAULT_MS,
+  lockRevision: 0,
   hasTrustedState: false,
   lastError: null,
 };
@@ -88,6 +91,12 @@ let unlockGrantApproveInFlight = null;
 let unlockGrantConsumeInFlight = null;
 let lastUnlockGrantAttemptAt = 0;
 let lastUnlockGrantApproveAttemptAt = 0;
+let recoverRetryState = {
+  attempts: 0,
+  nextAttemptAt: 0,
+  lastCode: null,
+};
+let lastUnlockedLockRevision = 0;
 let lastEmptyCacheRetryAt = 0;
 let linkPairingSession = null;
 let manualIconSyncQueueProcessInFlight = null;
@@ -143,6 +152,76 @@ function normalizeUnlockIdleTimeoutMs(value) {
     return MEMORY_IDLE_LOCK_MAX_MS;
   }
   return parsed;
+}
+
+function normalizeLockRevision(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const parsed = Math.trunc(value);
+  return parsed < 0 ? 0 : parsed;
+}
+
+function normalizeRecoverRetryState(value) {
+  if (!isRecord(value)) {
+    return {
+      attempts: 0,
+      nextAttemptAt: 0,
+      lastCode: null,
+    };
+  }
+  const attempts = Number.isFinite(value.attempts) ? Math.max(0, Math.trunc(value.attempts)) : 0;
+  const nextAttemptAt = Number.isFinite(value.nextAttemptAt) ? Math.max(0, Math.trunc(value.nextAttemptAt)) : 0;
+  const lastCode = typeof value.lastCode === 'string' ? value.lastCode : null;
+  return {
+    attempts,
+    nextAttemptAt,
+    lastCode,
+  };
+}
+
+function nextRecoverRetryDelayMs(attempt) {
+  const safeAttempt = Math.max(1, attempt);
+  const capped = Math.min(6, safeAttempt);
+  return Math.min(5 * 60 * 1000, 1_500 * 2 ** (capped - 1));
+}
+
+function classifyRecoverFailure(error) {
+  const described = describeError(error, 'recover_failed');
+  const status = Number.isFinite(error?.status) ? error.status : null;
+  const transientCodes = new Set([
+    'request_timeout',
+    'rate_limited',
+    'request_failed_429',
+    'request_failed_500',
+    'request_failed_502',
+    'request_failed_503',
+    'request_failed_504',
+    'server_connection_failed',
+  ]);
+  const terminalCodes = new Set([
+    'no_linked_surface',
+    'device_revoked',
+    'recover_key_invalid',
+    'context_mismatch',
+  ]);
+
+  if (terminalCodes.has(described.code)) {
+    return { kind: 'terminal', ...described };
+  }
+  if (transientCodes.has(described.code)) {
+    return { kind: 'transient', ...described };
+  }
+  if (status !== null && status >= 500) {
+    return { kind: 'transient', ...described };
+  }
+  if (status === 429) {
+    return { kind: 'transient', ...described };
+  }
+  if (described.code === 'unauthorized' || described.code === 'request_failed_401') {
+    return { kind: 'terminal', ...described };
+  }
+  return { kind: 'transient', ...described };
 }
 
 function clearLinkPairingSession() {
@@ -435,6 +514,31 @@ async function clearPersistedUnlockedContext() {
   await sessionStorage.remove(STORAGE_UNLOCK_CONTEXT_KEY);
 }
 
+async function persistRuntimeState() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  await sessionStorage.set({
+    [STORAGE_RUNTIME_STATE_KEY]: {
+      lockRevision: normalizeLockRevision(state.lockRevision),
+      lastUnlockedLockRevision: normalizeLockRevision(lastUnlockedLockRevision),
+      recoverRetryState: normalizeRecoverRetryState(recoverRetryState),
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+function setRecoverRetryState(nextState) {
+  recoverRetryState = normalizeRecoverRetryState(nextState);
+  void persistRuntimeState();
+}
+
+function setLastUnlockedLockRevision(nextValue) {
+  lastUnlockedLockRevision = normalizeLockRevision(nextValue);
+  void persistRuntimeState();
+}
+
 function touchUnlockedContext() {
   if (state.phase !== 'ready' || !unlockedContext) {
     return;
@@ -496,8 +600,15 @@ async function clearTrustedStateForReconnect(reasonMessage) {
   state.deviceId = null;
   state.deviceName = null;
   state.deploymentFingerprint = null;
+  state.lockRevision = 0;
+  lastUnlockedLockRevision = 0;
   await clearTrusted();
   await clearExtensionSessionToken();
+  setRecoverRetryState({
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastCode: null,
+  });
   clearSensitiveMemory();
   setPhase('pairing_required', reasonMessage);
 }
@@ -535,6 +646,12 @@ function mapKnownErrorToMessage(errorCode) {
       return 'Trusted local state is invalid. Reconnect this extension from web settings.';
     case 'request_timeout':
       return 'VaultLite server timed out. Check server URL and API availability.';
+    case 'no_linked_surface':
+      return 'Trusted link not found on server. Reconnect this extension from web settings.';
+    case 'device_revoked':
+      return 'This trusted device was revoked. Reconnect extension from web settings.';
+    case 'recover_key_invalid':
+      return 'Trusted recovery key is no longer valid. Reconnect this extension.';
     case 'server_connection_failed':
       return 'Could not connect to VaultLite server. Verify URL and local API status.';
     case 'server_origin_mismatch':
@@ -571,6 +688,10 @@ function withSessionIdentity(input) {
   state.deviceId = input.device?.deviceId ?? state.deviceId;
   state.deviceName = input.device?.deviceName ?? state.deviceName;
   state.sessionExpiresAt = input.sessionExpiresAt ?? state.sessionExpiresAt;
+  if (Number.isFinite(input.lockRevision)) {
+    state.lockRevision = normalizeLockRevision(input.lockRevision);
+    void persistRuntimeState();
+  }
   if (Number.isFinite(input.unlockIdleTimeoutMs)) {
     state.unlockIdleTimeoutMs = normalizeUnlockIdleTimeoutMs(input.unlockIdleTimeoutMs);
   }
@@ -597,6 +718,8 @@ function snapshotForUi() {
     deviceName: state.deviceName,
     sessionExpiresAt: state.sessionExpiresAt,
     unlockIdleTimeoutMs: state.unlockIdleTimeoutMs,
+    lockRevision: normalizeLockRevision(state.lockRevision),
+    lastUnlockedLockRevision: normalizeLockRevision(lastUnlockedLockRevision),
     hasTrustedState: state.hasTrustedState,
     hasTokenInMemory: Boolean(sessionToken),
     lastError: state.lastError,
@@ -630,6 +753,7 @@ async function loadPersistedState() {
         STORAGE_SESSION_KEY,
         STORAGE_LINK_PAIRING_SESSION_KEY,
         STORAGE_UNLOCK_CONTEXT_KEY,
+        STORAGE_RUNTIME_STATE_KEY,
       ]);
     } catch {
       sessionState = {};
@@ -643,6 +767,7 @@ async function loadPersistedState() {
   const sessionEntry = sessionState?.[STORAGE_SESSION_KEY] ?? null;
   const linkPairingEntry = sessionState?.[STORAGE_LINK_PAIRING_SESSION_KEY] ?? null;
   const unlockContextEntry = sessionState?.[STORAGE_UNLOCK_CONTEXT_KEY] ?? null;
+  const runtimeStateEntry = sessionState?.[STORAGE_RUNTIME_STATE_KEY] ?? null;
 
   state.serverOrigin = config?.serverOrigin ?? null;
   state.deploymentFingerprint = trusted?.deploymentFingerprint ?? config?.deploymentFingerprint ?? null;
@@ -664,6 +789,9 @@ async function loadPersistedState() {
       unlockedUntil: unlockContextEntry.unlockedUntil,
     };
   }
+  state.lockRevision = normalizeLockRevision(runtimeStateEntry?.lockRevision);
+  lastUnlockedLockRevision = normalizeLockRevision(runtimeStateEntry?.lastUnlockedLockRevision);
+  recoverRetryState = normalizeRecoverRetryState(runtimeStateEntry?.recoverRetryState);
 
   linkPairingSession = null;
   if (isValidLinkPairingSessionStorageShape(linkPairingEntry)) {
@@ -745,6 +873,7 @@ async function loadPersistedState() {
       };
     }
   }
+  await persistRuntimeState();
 }
 
 async function resetTrustedStateInternal() {
@@ -755,6 +884,13 @@ async function resetTrustedStateInternal() {
   state.deviceId = null;
   state.deviceName = null;
   state.deploymentFingerprint = null;
+  state.lockRevision = 0;
+  lastUnlockedLockRevision = 0;
+  setRecoverRetryState({
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastCode: null,
+  });
   clearSensitiveMemory();
   await clearTrusted();
   try {
@@ -930,6 +1066,25 @@ function isAllowedUnlockSenderUrl(rawUrl, expectedOrigin) {
   });
 }
 
+function isAllowedAuthSenderUrl(rawUrl, expectedOrigin) {
+  if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
+    return false;
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.origin !== expectedOrigin) {
+    return false;
+  }
+  return isAllowedAuthPath({
+    pathname: parsed.pathname,
+    search: parsed.search,
+  });
+}
+
 function validateBridgeSender(sender, routeScope) {
   if (!sender || sender.id !== chrome.runtime.id) {
     return fail('permission_denied', 'Bridge sender is not trusted.');
@@ -944,10 +1099,18 @@ function validateBridgeSender(sender, routeScope) {
   if (sender.frameId !== 0) {
     return fail('permission_denied', 'Bridge requests are allowed only from the top-level frame.');
   }
-  const isAllowed =
-    routeScope === 'unlock'
-      ? isAllowedUnlockSenderUrl(sender.url, expectedWebOrigin)
-      : isAllowedSettingsSenderUrl(sender.url, expectedWebOrigin);
+  const isAllowed = (() => {
+    if (routeScope === 'unlock') {
+      return isAllowedUnlockSenderUrl(sender.url, expectedWebOrigin);
+    }
+    if (routeScope === 'auth_or_unlock') {
+      return (
+        isAllowedUnlockSenderUrl(sender.url, expectedWebOrigin) ||
+        isAllowedAuthSenderUrl(sender.url, expectedWebOrigin)
+      );
+    }
+    return isAllowedSettingsSenderUrl(sender.url, expectedWebOrigin);
+  })();
   if (!isAllowed) {
     return fail('permission_denied', `Bridge URL is not allowed for ${routeScope}.`);
   }
@@ -1063,7 +1226,12 @@ async function restoreSessionInternal(force = false) {
 
   const recoverExtensionSessionInternal = async (apiClient) => {
     if (!trustedState?.deviceId || !trustedState?.sessionRecoverKey) {
-      return false;
+      return {
+        recovered: false,
+        kind: 'terminal',
+        code: 'recover_key_invalid',
+        message: 'Trusted recover key is unavailable.',
+      };
     }
     try {
       const recovered = await apiClient.recoverExtensionSession({
@@ -1071,14 +1239,31 @@ async function restoreSessionInternal(force = false) {
         sessionRecoverKey: trustedState.sessionRecoverKey,
       });
       if (!recovered?.extensionSessionToken) {
-        return false;
+        return {
+          recovered: false,
+          kind: 'transient',
+          code: 'recover_failed',
+          message: 'Recover endpoint did not return a session token.',
+        };
       }
       sessionToken = recovered.extensionSessionToken;
       withSessionIdentity(recovered);
       await persistSessionToken();
-      return true;
-    } catch {
-      return false;
+      setRecoverRetryState({
+        attempts: 0,
+        nextAttemptAt: 0,
+        lastCode: null,
+      });
+      return {
+        recovered: true,
+        kind: 'success',
+      };
+    } catch (error) {
+      const classified = classifyRecoverFailure(error);
+      return {
+        recovered: false,
+        ...classified,
+      };
     }
   };
 
@@ -1099,14 +1284,39 @@ async function restoreSessionInternal(force = false) {
     }
 
     if (!sessionToken && trustedState) {
-      const recovered = await recoverExtensionSessionInternal(apiClient);
-      if (!recovered) {
+      if (!force && Date.now() < recoverRetryState.nextAttemptAt) {
         setPhase(
           'remote_authentication_required',
-          'Session expired. Start a new trusted-device request from the extension popup.',
+          'Session temporarily unavailable. Retrying automatically.',
         );
         return;
       }
+      const recoverResult = await recoverExtensionSessionInternal(apiClient);
+      if (!recoverResult.recovered) {
+        if (recoverResult.kind === 'terminal') {
+          await clearTrustedStateForReconnect(
+            'Trusted link is no longer valid. Reconnect this extension from web settings.',
+          );
+          return;
+        }
+        const nextAttempts = Math.max(1, recoverRetryState.attempts + 1);
+        const delayMs = nextRecoverRetryDelayMs(nextAttempts);
+        setRecoverRetryState({
+          attempts: nextAttempts,
+          nextAttemptAt: Date.now() + delayMs,
+          lastCode: recoverResult.code ?? 'recover_failed',
+        });
+        setPhase(
+          'remote_authentication_required',
+          'Session temporarily unavailable. Retrying automatically.',
+        );
+        return;
+      }
+      setRecoverRetryState({
+        attempts: 0,
+        nextAttemptAt: 0,
+        lastCode: null,
+      });
     } else if (!sessionToken) {
       if (linkPairingSession) {
         setPhase(
@@ -1120,25 +1330,77 @@ async function restoreSessionInternal(force = false) {
     }
 
     try {
-      const restoreOutput = await apiClient.restoreSession(sessionToken);
+      let restoreOutput = await apiClient.restoreSession(sessionToken);
       if (restoreOutput.extensionSessionToken) {
         sessionToken = restoreOutput.extensionSessionToken;
         await persistSessionToken();
       }
 
       withSessionIdentity(restoreOutput);
+
+      if (
+        (restoreOutput.sessionState !== 'local_unlock_required' ||
+          !restoreOutput.user ||
+          !restoreOutput.device) &&
+        trustedState
+      ) {
+        await clearExtensionSessionToken();
+        const recovered = await recoverExtensionSessionInternal(apiClient);
+        if (recovered.recovered) {
+          setRecoverRetryState({
+            attempts: 0,
+            nextAttemptAt: 0,
+            lastCode: null,
+          });
+          restoreOutput = await apiClient.restoreSession(sessionToken);
+          if (restoreOutput.extensionSessionToken) {
+            sessionToken = restoreOutput.extensionSessionToken;
+            await persistSessionToken();
+          }
+          withSessionIdentity(restoreOutput);
+        } else if (recovered.kind === 'terminal') {
+          await clearTrustedStateForReconnect(
+            'Trusted link is no longer valid. Reconnect this extension from web settings.',
+          );
+          return;
+        } else {
+          const nextAttempts = Math.max(1, recoverRetryState.attempts + 1);
+          const delayMs = nextRecoverRetryDelayMs(nextAttempts);
+          setRecoverRetryState({
+            attempts: nextAttempts,
+            nextAttemptAt: Date.now() + delayMs,
+            lastCode: recovered.code ?? 'recover_failed',
+          });
+          setPhase(
+            'remote_authentication_required',
+            'Session temporarily unavailable. Retrying automatically.',
+          );
+          return;
+        }
+      }
+
       await hydrateManualIconsFromServerBestEffort();
+
+      const lockRevisionMismatch =
+        Number.isFinite(state.lockRevision) && state.lockRevision > lastUnlockedLockRevision;
+      if (lockRevisionMismatch) {
+        clearSensitiveMemory();
+        setPhase('local_unlock_required', null);
+      }
 
       if (
         restoreOutput.sessionState !== 'local_unlock_required' ||
         !restoreOutput.user ||
         !restoreOutput.device
       ) {
+        if (trustedState) {
+          await clearTrustedStateForReconnect(
+            'Trusted link is no longer valid. Reconnect this extension from web settings.',
+          );
+          return;
+        }
         clearSensitiveMemory();
-        setPhase(
-          'remote_authentication_required',
-          'Session expired. Start a new trusted-device request from the extension popup.',
-        );
+        setPhase('pairing_required', 'Connect this extension from web settings.');
         return;
       }
 
@@ -1175,7 +1437,12 @@ async function restoreSessionInternal(force = false) {
       if (described.code === 'unauthorized' || described.code === 'request_failed_401') {
         await clearExtensionSessionToken();
         const recovered = await recoverExtensionSessionInternal(apiClient);
-        if (recovered) {
+        if (recovered.recovered) {
+          setRecoverRetryState({
+            attempts: 0,
+            nextAttemptAt: 0,
+            lastCode: null,
+          });
           if (hasValidUnlockedContext()) {
             setPhase('ready', null);
             touchUnlockedContext();
@@ -1186,9 +1453,22 @@ async function restoreSessionInternal(force = false) {
           }
           return;
         }
+        if (recovered.kind === 'terminal') {
+          await clearTrustedStateForReconnect(
+            'Trusted link is no longer valid. Reconnect this extension from web settings.',
+          );
+          return;
+        }
+        const nextAttempts = Math.max(1, recoverRetryState.attempts + 1);
+        const delayMs = nextRecoverRetryDelayMs(nextAttempts);
+        setRecoverRetryState({
+          attempts: nextAttempts,
+          nextAttemptAt: Date.now() + delayMs,
+          lastCode: recovered.code ?? 'recover_failed',
+        });
         setPhase(
           'remote_authentication_required',
-          'Session no longer valid. Start a new trusted-device request from the extension popup.',
+          'Session temporarily unavailable. Retrying automatically.',
         );
         return;
       }
@@ -1209,7 +1489,7 @@ async function ensureReadyState() {
   if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
     return fail('local_unlock_required', 'Unlock this extension first.');
   }
-  await restoreSessionInternal(false);
+  await restoreSessionInternal(true);
   if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
     return fail('remote_authentication_required', state.lastError ?? 'Session expired.');
   }
@@ -1392,6 +1672,7 @@ async function tryAutoUnlockViaGrantInternal() {
               };
               await persistUnlockedContext();
               setPhase('ready', null);
+              setLastUnlockedLockRevision(state.lockRevision);
               armIdleLockTimer();
               await refreshCredentialCache({ force: true });
               return true;
@@ -1544,11 +1825,17 @@ async function refreshCredentialCache(options = {}) {
     ) {
       await clearExtensionSessionToken();
       clearSensitiveMemory();
-      setPhase(
-        'remote_authentication_required',
-        'Session expired. Start a new trusted-device request from the extension popup.',
-      );
-      return fail('remote_authentication_required', state.lastError);
+      await restoreSessionInternal(true);
+      if (!trustedState || state.phase === 'pairing_required') {
+        return fail('pairing_required', state.lastError ?? 'Connect extension through trusted surface settings.');
+      }
+      if (state.phase === 'local_unlock_required') {
+        return fail('local_unlock_required', state.lastError ?? 'Unlock this extension first.');
+      }
+      if (state.phase === 'remote_authentication_required') {
+        return fail('remote_authentication_required', state.lastError ?? 'Session expired.');
+      }
+      return fail('remote_authentication_required', described.message);
     }
     return fail(described.code, described.message);
   }
@@ -2397,6 +2684,14 @@ function isSafeUnlockGrantRequestId(value) {
   return typeof value === 'string' && value.length >= 8 && value.length <= 128;
 }
 
+function isSafeBase64Url(value, minimumLength = 16) {
+  return (
+    typeof value === 'string' &&
+    value.length >= minimumLength &&
+    /^[A-Za-z0-9_-]+$/u.test(value)
+  );
+}
+
 async function nudgeUnlockGrantFromBridgeInternal(input, sender) {
   const senderValidation = validateBridgeSender(sender, 'unlock');
   if (senderValidation) {
@@ -2411,6 +2706,52 @@ async function nudgeUnlockGrantFromBridgeInternal(input, sender) {
     requestId: input.requestId,
   });
   return ok();
+}
+
+async function requestWebBootstrapGrantFromBridgeInternal(input, sender) {
+  const senderValidation = validateBridgeSender(sender, 'auth_or_unlock');
+  if (senderValidation) {
+    return senderValidation;
+  }
+  if (!isSafeBase64Url(input?.requestPublicKey, 40)) {
+    return fail('invalid_input', 'Bootstrap request public key is invalid.');
+  }
+  if (!isSafeBase64Url(input?.clientNonce, 16)) {
+    return fail('invalid_input', 'Bootstrap client nonce is invalid.');
+  }
+  if (!isSafeBase64Url(input?.webChallenge, 16)) {
+    return fail('invalid_input', 'Bootstrap challenge is invalid.');
+  }
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Unlock this extension before continuing.');
+  }
+  try {
+    const deploymentFingerprint = await resolveDeploymentFingerprint(apiClient);
+    const requested = await apiClient.requestWebBootstrapGrant({
+      bearerToken: sessionToken,
+      deploymentFingerprint,
+      requestPublicKey: input.requestPublicKey,
+      clientNonce: input.clientNonce,
+      webChallenge: input.webChallenge,
+      unlockAccountKey: unlockedContext.accountKey,
+    });
+    return ok({
+      payload: {
+        grantId: requested.grantId,
+        expiresAt: requested.expiresAt,
+        interval: requested.interval,
+        serverOrigin: requested.serverOrigin,
+      },
+    });
+  } catch (error) {
+    const described = describeError(error, 'web_bootstrap_request_failed');
+    return fail(described.code, described.message);
+  }
 }
 
 async function resolveDeploymentFingerprint(apiClient) {
@@ -2625,8 +2966,18 @@ async function unlockLocalInternal(input) {
   }
 
   await restoreSessionInternal(true);
+  if (!trustedState || state.phase === 'pairing_required') {
+    return fail('pairing_required', state.lastError ?? 'Connect extension through trusted surface settings.');
+  }
   if (state.phase === 'remote_authentication_required') {
     return fail('remote_authentication_required', state.lastError ?? 'Session expired.');
+  }
+  if (state.phase === 'ready' && unlockedContext?.accountKey) {
+    armIdleLockTimer();
+    return ok({ state: snapshotForUi() });
+  }
+  if (state.phase !== 'local_unlock_required') {
+    return fail('remote_authentication_required', state.lastError ?? 'Session state changed. Try again.');
   }
 
   try {
@@ -2648,6 +2999,7 @@ async function unlockLocalInternal(input) {
       unlockedUntil: unlockedAt + state.unlockIdleTimeoutMs,
     };
     setPhase('ready', null);
+    setLastUnlockedLockRevision(state.lockRevision);
     await persistUnlockedContext();
     armIdleLockTimer();
     void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
@@ -2673,11 +3025,28 @@ async function unlockLocalInternal(input) {
 }
 
 async function lockInternal() {
+  if (sessionToken) {
+    const apiClient = currentApiClient();
+    if (apiClient) {
+      try {
+        const lockResponse = await apiClient.lockSession({
+          bearerToken: sessionToken,
+          reasonCode: 'user_lock',
+        });
+        if (Number.isFinite(lockResponse?.lockRevision)) {
+          state.lockRevision = normalizeLockRevision(lockResponse.lockRevision);
+          void persistRuntimeState();
+        }
+      } catch {
+        // Best effort: local lock must always continue.
+      }
+    }
+  }
   clearSensitiveMemory();
   if (trustedState && sessionToken) {
     setPhase('local_unlock_required', null);
   } else if (trustedState) {
-    setPhase('remote_authentication_required', 'Session expired. Start a new trusted-device request from the extension popup.');
+    setPhase('remote_authentication_required', 'Session expired. Authenticate again to continue.');
   } else if (state.serverOrigin) {
     setPhase('pairing_required', null);
   } else {
@@ -2821,6 +3190,13 @@ async function handleCommand(command, senderContext, sender) {
       }
       return nudgeUnlockGrantFromBridgeInternal(command, sender);
     }
+    case 'vaultlite.bridge_request_web_bootstrap_grant': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'bridge:auto_pair');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return requestWebBootstrapGrantFromBridgeInternal(command, sender);
+    }
     case 'vaultlite.unlock_local': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'unlock:local');
       if (capabilityError) {
@@ -2918,9 +3294,12 @@ if (chrome.alarms?.onAlarm) {
     if (alarm?.name !== UNLOCK_GRANT_APPROVAL_ALARM_NAME) {
       return;
     }
-    void maybeAutoApproveUnlockGrants({
-      source: 'alarm',
-    });
+    void (async () => {
+      await restoreSessionInternal(true);
+      await maybeAutoApproveUnlockGrants({
+        source: 'alarm',
+      });
+    })();
   });
 }
 

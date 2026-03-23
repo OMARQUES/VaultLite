@@ -588,6 +588,8 @@ export const SessionRestoreResponseSchema = z
     sessionExpiresAt: isoDatetimeSchema.optional(),
     unlockIdleTimeoutMs: z.number().int().positive().optional(),
     unlockGrantEnabled: z.boolean().optional(),
+    lockRevision: z.number().int().nonnegative().optional(),
+    lockScope: z.literal('linked_surface_pair').optional(),
     user: z
       .object({
         userId: z.string().min(1),
@@ -606,6 +608,20 @@ export const SessionRestoreResponseSchema = z
       })
       .strict()
       .optional(),
+  })
+  .strict();
+
+export const SessionLockInputSchema = z
+  .object({
+    reasonCode: z.string().min(1).max(64).optional(),
+  })
+  .strict();
+
+export const SessionLockOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    lockRevision: z.number().int().nonnegative(),
+    appliedScope: z.literal('linked_surface_pair'),
   })
   .strict();
 
@@ -778,6 +794,62 @@ export const ExtensionSessionRecoverOutputSchema = z
     result: CanonicalResultSchema,
     extensionSessionToken: z.string().min(1),
     sessionExpiresAt: isoDatetimeSchema,
+    user: z
+      .object({
+        userId: z.string().min(1),
+        username: usernameSchema,
+        role: UserRoleSchema,
+        bundleVersion: z.number().int().nonnegative(),
+        lifecycleState: UserLifecycleStateSchema,
+      })
+      .strict(),
+    device: z
+      .object({
+        deviceId: z.string().min(1),
+        deviceName: z.string().min(1),
+        platform: DevicePlatformSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+export const WebBootstrapGrantRequestPublicKeySchema = base64UrlSchema.min(40);
+
+export const WebBootstrapGrantRequestInputSchema = z
+  .object({
+    deploymentFingerprint: z.string().min(1),
+    requestPublicKey: WebBootstrapGrantRequestPublicKeySchema,
+    clientNonce: base64UrlSchema.min(16),
+    webChallenge: base64UrlSchema.min(16),
+    unlockAccountKey: z.string().min(20),
+  })
+  .strict();
+
+export const WebBootstrapGrantRequestOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    grantId: z.string().min(16),
+    expiresAt: isoDatetimeSchema,
+    interval: z.number().int().positive(),
+    serverOrigin: z.string().url(),
+  })
+  .strict();
+
+export const WebBootstrapGrantConsumeInputSchema = z
+  .object({
+    grantId: z.string().min(16),
+    requestProof: UnlockGrantProofSchema,
+    consumeNonce: base64UrlSchema.min(16),
+  })
+  .strict();
+
+export const WebBootstrapGrantConsumeOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    sessionState: SessionStateSchema,
+    unlockAccountKey: z.string().min(20).optional(),
+    lockRevision: z.number().int().nonnegative().optional(),
     user: z
       .object({
         userId: z.string().min(1),
@@ -1140,6 +1212,8 @@ export type AttachmentUploadFinalizeOutput = z.infer<typeof AttachmentUploadFina
 export type AttachmentUploadEnvelopeOutput = z.infer<typeof AttachmentUploadEnvelopeOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
+export type SessionLockInput = z.infer<typeof SessionLockInputSchema>;
+export type SessionLockOutput = z.infer<typeof SessionLockOutputSchema>;
 export type SessionPolicy = z.infer<typeof SessionPolicySchema>;
 export type SessionPolicyOutput = z.infer<typeof SessionPolicyOutputSchema>;
 export type SessionPolicyUpdateInput = z.infer<typeof SessionPolicyUpdateInputSchema>;
@@ -1161,6 +1235,10 @@ export type UnlockGrantConsumeInput = z.infer<typeof UnlockGrantConsumeInputSche
 export type UnlockGrantConsumeOutput = z.infer<typeof UnlockGrantConsumeOutputSchema>;
 export type ExtensionSessionRecoverInput = z.infer<typeof ExtensionSessionRecoverInputSchema>;
 export type ExtensionSessionRecoverOutput = z.infer<typeof ExtensionSessionRecoverOutputSchema>;
+export type WebBootstrapGrantRequestInput = z.infer<typeof WebBootstrapGrantRequestInputSchema>;
+export type WebBootstrapGrantRequestOutput = z.infer<typeof WebBootstrapGrantRequestOutputSchema>;
+export type WebBootstrapGrantConsumeInput = z.infer<typeof WebBootstrapGrantConsumeInputSchema>;
+export type WebBootstrapGrantConsumeOutput = z.infer<typeof WebBootstrapGrantConsumeOutputSchema>;
 export type ExtensionLinkRequestInput = z.infer<typeof ExtensionLinkRequestInputSchema>;
 export type ExtensionLinkRequestOutput = z.infer<typeof ExtensionLinkRequestOutputSchema>;
 export type ExtensionLinkApproveInput = z.infer<typeof ExtensionLinkApproveInputSchema>;

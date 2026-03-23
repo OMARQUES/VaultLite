@@ -61,6 +61,8 @@ import {
   RecentReauthOutputSchema,
   SessionPolicyOutputSchema,
   SessionPolicyUpdateInputSchema,
+  SessionLockInputSchema,
+  SessionLockOutputSchema,
   RemoteAuthenticationChallengeInputSchema,
   RemoteAuthenticationChallengeOutputSchema,
   RuntimeMetadataSchema,
@@ -78,6 +80,10 @@ import {
   UnlockGrantRequestOutputSchema,
   UnlockGrantStatusInputSchema,
   UnlockGrantStatusOutputSchema,
+  WebBootstrapGrantConsumeInputSchema,
+  WebBootstrapGrantConsumeOutputSchema,
+  WebBootstrapGrantRequestInputSchema,
+  WebBootstrapGrantRequestOutputSchema,
   DeviceListOutputSchema,
   DeviceRevokeOutputSchema,
   VaultItemCreateInputSchema,
@@ -163,6 +169,8 @@ const UNLOCK_GRANT_MAX_INTERVAL_SECONDS = 30;
 const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
 const UNLOCK_GRANT_STATUS_ATTEMPT_LIMIT = 1;
 const UNLOCK_GRANT_STATUS_WINDOW_SECONDS = UNLOCK_GRANT_DEFAULT_INTERVAL_SECONDS;
+const WEB_BOOTSTRAP_GRANT_TTL_SECONDS = 60;
+const WEB_BOOTSTRAP_GRANT_DEFAULT_INTERVAL_SECONDS = 2;
 const EXTENSION_SESSION_RECOVER_ATTEMPT_LIMIT = 10;
 const EXTENSION_SESSION_RECOVER_WINDOW_SECONDS = 5 * 60;
 const BOOTSTRAP_VERIFY_ATTEMPT_LIMIT = 20;
@@ -452,6 +460,10 @@ function issueUnlockGrantRequestId(): string {
   return toBase64Url(randomBytes(24));
 }
 
+function issueWebBootstrapGrantId(): string {
+  return toBase64Url(randomBytes(24));
+}
+
 function issueExtensionSessionRecoverKey(): string {
   return toBase64Url(randomBytes(32));
 }
@@ -562,6 +574,28 @@ function unlockGrantSignaturePayload(input: {
   return new TextEncoder().encode(payload);
 }
 
+function webBootstrapGrantSignaturePayload(input: {
+  action: 'consume';
+  grantId: string;
+  nonce: string;
+  clientNonce: string;
+  webChallenge: string;
+  serverOrigin: string;
+  deploymentFingerprint: string;
+}): Uint8Array {
+  const payload = [
+    'vaultlite-web-bootstrap-grant-v1',
+    input.action,
+    input.grantId,
+    input.nonce,
+    input.clientNonce,
+    input.webChallenge,
+    input.serverOrigin,
+    input.deploymentFingerprint,
+  ].join('|');
+  return new TextEncoder().encode(payload);
+}
+
 function toFixedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const normalized = new Uint8Array(bytes.byteLength);
   normalized.set(bytes);
@@ -641,6 +675,53 @@ async function verifyUnlockGrantProof(input: {
       requestId: input.requestId,
       nonce: input.nonce,
       clientNonce: input.clientNonce,
+      serverOrigin: input.serverOrigin,
+      deploymentFingerprint: input.deploymentFingerprint,
+    });
+    return await crypto.subtle.verify(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256',
+      },
+      publicKey,
+      toFixedArrayBuffer(signature),
+      toFixedArrayBuffer(payload),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function verifyWebBootstrapGrantProof(input: {
+  requesterPublicKey: string;
+  signature: string;
+  action: 'consume';
+  grantId: string;
+  nonce: string;
+  clientNonce: string;
+  webChallenge: string;
+  serverOrigin: string;
+  deploymentFingerprint: string;
+}): Promise<boolean> {
+  try {
+    const keyData = Uint8Array.from(fromBase64Url(input.requesterPublicKey));
+    const signature = Uint8Array.from(fromBase64Url(input.signature));
+    const publicKey = await crypto.subtle.importKey(
+      'spki',
+      toFixedArrayBuffer(keyData),
+      {
+        name: 'ECDSA',
+        namedCurve: 'P-256',
+      },
+      false,
+      ['verify'],
+    );
+    const payload = webBootstrapGrantSignaturePayload({
+      action: input.action,
+      grantId: input.grantId,
+      nonce: input.nonce,
+      clientNonce: input.clientNonce,
+      webChallenge: input.webChallenge,
       serverOrigin: input.serverOrigin,
       deploymentFingerprint: input.deploymentFingerprint,
     });
@@ -1185,6 +1266,7 @@ async function issueTrustedSession(input: {
   idGenerator: IdGenerator;
   user: UserAccountRecord;
   device: DeviceRecord;
+  recentReauthAt?: string | null;
 }): Promise<SessionRecord> {
   const session = buildTrustedSessionRecord(input);
   return input.storage.sessions.create(session);
@@ -1228,6 +1310,7 @@ function buildTrustedSessionRecord(input: {
   idGenerator: IdGenerator;
   user: UserAccountRecord;
   device: DeviceRecord;
+  recentReauthAt?: string | null;
 }): SessionRecord {
   const nowIso = isoNow(input.clock);
   const expiresAtIso = new Date(input.clock.now().getTime() + 1000 * 60 * 60 * 8).toISOString();
@@ -1241,7 +1324,7 @@ function buildTrustedSessionRecord(input: {
     csrfToken,
     createdAt: nowIso,
     expiresAt: expiresAtIso,
-    recentReauthAt: null,
+    recentReauthAt: input.recentReauthAt ?? null,
     revokedAt: null,
     rotatedFromSessionId: null,
   };
@@ -1391,6 +1474,78 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
   function hasValidCsrf(request: Request): boolean {
     const cookies = parseCookieHeader(request.headers.get('cookie'));
     return csrfValidator.ensureValid(request.headers.get('x-csrf-token'), cookies.vl_csrf ?? null);
+  }
+
+  async function resolvePrimarySurfaceLink(input: {
+    userId: string;
+    device: DeviceRecord;
+  }) {
+    if (input.device.platform === 'web') {
+      return options.storage.surfaceLinks.findByWebDeviceId(input.userId, input.device.deviceId);
+    }
+    if (input.device.platform === 'extension') {
+      return options.storage.surfaceLinks.findByExtensionDeviceId(input.userId, input.device.deviceId);
+    }
+    return null;
+  }
+
+  async function resolveEffectiveLockRevision(input: {
+    userId: string;
+    device: DeviceRecord;
+  }): Promise<number> {
+    const link = await resolvePrimarySurfaceLink(input);
+    if (!link || !Number.isFinite(link.lockRevision)) {
+      return 0;
+    }
+    return Math.max(0, Math.trunc(link.lockRevision));
+  }
+
+  async function bumpLinkedSurfaceLockRevision(input: {
+    userId: string;
+    deviceId: string;
+    nowIso: string;
+  }): Promise<number> {
+    const nextLockRevision = await options.storage.surfaceLinks.bumpLockRevisionByDevice({
+      userId: input.userId,
+      deviceId: input.deviceId,
+      updatedAtIso: input.nowIso,
+    });
+    if (nextLockRevision <= 0) {
+      return 0;
+    }
+    await options.storage.unlockGrants.revokePendingByDeviceWithLockRevision({
+      userId: input.userId,
+      deviceId: input.deviceId,
+      minLockRevisionExclusive: nextLockRevision,
+      revokedAt: input.nowIso,
+      reasonCode: 'locked_by_linked_surface',
+    });
+    await options.storage.webBootstrapGrants.revokePendingByDeviceWithLockRevision({
+      userId: input.userId,
+      deviceId: input.deviceId,
+      minLockRevisionExclusive: nextLockRevision,
+      revokedAt: input.nowIso,
+      reasonCode: 'locked_by_linked_surface',
+    });
+    return nextLockRevision;
+  }
+
+  async function hasMatchingLinkLockRevision(input: {
+    userId: string;
+    requesterSurface: 'web' | 'extension';
+    requesterDeviceId: string;
+    approverDeviceId: string;
+    expectedLockRevision: number;
+  }): Promise<boolean> {
+    const webDeviceId =
+      input.requesterSurface === 'web' ? input.requesterDeviceId : input.approverDeviceId;
+    const extensionDeviceId =
+      input.requesterSurface === 'extension' ? input.requesterDeviceId : input.approverDeviceId;
+    const link = await options.storage.surfaceLinks.findByPair(input.userId, webDeviceId, extensionDeviceId);
+    if (!link) {
+      return false;
+    }
+    return Math.max(0, Math.trunc(link.lockRevision ?? 0)) === Math.max(0, Math.trunc(input.expectedLockRevision));
   }
 
   async function requireOwnerMutationContext(request: Request): Promise<
@@ -2618,6 +2773,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       idGenerator: options.idGenerator,
       user,
       device,
+      recentReauthAt: nowIso,
     });
     let completion;
 
@@ -2783,6 +2939,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       idGenerator: options.idGenerator,
       user,
       device,
+      recentReauthAt: nowIso,
     });
 
     const response = jsonResponse(200, buildTrustedSessionResponse({ session, user, device }));
@@ -3131,7 +3288,6 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         }),
       );
     }
-
     const statusRate = await options.storage.authRateLimits.increment({
       key: `extension-link:status:${requestRecord.requestId}`,
       nowIso,
@@ -3285,6 +3441,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         userId: user.userId,
         webDeviceId: consumed.approvedByDeviceId,
         extensionDeviceId: device.deviceId,
+        lockRevision: 0,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -3396,6 +3553,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       requesterClientNonce: input.clientNonce,
       approverSurface: input.targetSurface,
       approverDeviceId,
+      lockRevision: Math.max(0, Math.trunc(link.lockRevision ?? 0)),
       status: 'pending',
       createdAt: nowIso,
       expiresAt,
@@ -3514,6 +3672,23 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
           ok: true,
           result: 'conflict',
           reasonCode: 'request_expired',
+        }),
+      );
+    }
+    const lockRevisionMatches = await hasMatchingLinkLockRevision({
+      userId: requestRecord.userId,
+      requesterSurface: requestRecord.requesterSurface,
+      requesterDeviceId: requestRecord.requesterDeviceId,
+      approverDeviceId: requestRecord.approverDeviceId,
+      expectedLockRevision: requestRecord.lockRevision,
+    });
+    if (!lockRevisionMatches) {
+      return jsonResponse(
+        200,
+        UnlockGrantActionOutputSchema.parse({
+          ok: true,
+          result: 'conflict',
+          reasonCode: 'lock_revision_mismatch',
         }),
       );
     }
@@ -3845,6 +4020,200 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     return response;
   });
 
+  app.post('/api/auth/web-bootstrap-grant/request', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext || sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 24 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = WebBootstrapGrantRequestInputSchema.parse(parsedBody.body);
+    if (input.deploymentFingerprint !== options.deploymentFingerprint) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    const link = await options.storage.surfaceLinks.findByExtensionDeviceId(
+      sessionContext.user.userId,
+      sessionContext.device.deviceId,
+    );
+    if (!link) {
+      return jsonResponse(409, { ok: false, code: 'no_linked_surface' });
+    }
+    const nowIso = isoNow(options.clock);
+    const grantId = issueWebBootstrapGrantId();
+    const expiresAt = addSeconds(nowIso, WEB_BOOTSTRAP_GRANT_TTL_SECONDS);
+    await options.storage.webBootstrapGrants.create({
+      grantId,
+      userId: sessionContext.user.userId,
+      deploymentFingerprint: options.deploymentFingerprint,
+      serverOrigin: configuredServerOrigin,
+      extensionDeviceId: sessionContext.device.deviceId,
+      webDeviceId: link.webDeviceId,
+      requesterPublicKey: input.requestPublicKey,
+      requesterClientNonce: input.clientNonce,
+      webChallenge: input.webChallenge,
+      unlockAccountKey: input.unlockAccountKey,
+      lockRevision: Math.max(0, Math.trunc(link.lockRevision ?? 0)),
+      status: 'pending',
+      createdAt: nowIso,
+      expiresAt,
+      consumedAt: null,
+      consumedByDeviceId: null,
+      revokedAt: null,
+      revocationReasonCode: null,
+    });
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_web_bootstrap_grant_request',
+      actorUserId: sessionContext.user.userId,
+      targetType: 'web_bootstrap_grant',
+      targetId: grantId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+    return jsonResponse(
+      200,
+      WebBootstrapGrantRequestOutputSchema.parse({
+        ok: true,
+        grantId,
+        expiresAt,
+        interval: WEB_BOOTSTRAP_GRANT_DEFAULT_INTERVAL_SECONDS,
+        serverOrigin: configuredServerOrigin,
+      }),
+    );
+  });
+
+  app.post('/api/auth/web-bootstrap-grant/consume', async (c) => {
+    const nowIso = isoNow(options.clock);
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 24 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = WebBootstrapGrantConsumeInputSchema.parse(parsedBody.body);
+    const record = await options.storage.webBootstrapGrants.findByGrantId(input.grantId);
+    if (!record) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (
+      record.serverOrigin !== configuredServerOrigin ||
+      record.deploymentFingerprint !== options.deploymentFingerprint
+    ) {
+      return jsonResponse(409, { ok: false, code: 'pairing_context_mismatch' });
+    }
+    if (record.expiresAt <= nowIso) {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_expired' });
+    }
+    const proofValid = await verifyWebBootstrapGrantProof({
+      requesterPublicKey: record.requesterPublicKey,
+      signature: input.requestProof.signature,
+      action: 'consume',
+      grantId: record.grantId,
+      nonce: input.requestProof.nonce,
+      clientNonce: record.requesterClientNonce,
+      webChallenge: record.webChallenge,
+      serverOrigin: record.serverOrigin,
+      deploymentFingerprint: record.deploymentFingerprint,
+    });
+    if (!proofValid) {
+      return jsonResponse(403, { ok: false, code: 'forbidden' });
+    }
+    if (record.status !== 'pending') {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
+    }
+    const user = await options.storage.users.findByUserId(record.userId);
+    const webDevice = await options.storage.devices.findById(record.webDeviceId);
+    if (
+      !user ||
+      user.lifecycleState !== 'active' ||
+      !webDevice ||
+      webDevice.userId !== user.userId ||
+      webDevice.platform !== 'web' ||
+      webDevice.deviceState !== 'active' ||
+      webDevice.revokedAt !== null
+    ) {
+      return jsonResponse(403, { ok: false, code: 'forbidden' });
+    }
+    const link = await options.storage.surfaceLinks.findByPair(
+      user.userId,
+      record.webDeviceId,
+      record.extensionDeviceId,
+    );
+    if (!link || Math.max(0, Math.trunc(link.lockRevision ?? 0)) !== record.lockRevision) {
+      return jsonResponse(409, { ok: false, code: 'lock_revision_mismatch' });
+    }
+    const consumed = await options.storage.webBootstrapGrants.consume({
+      grantId: record.grantId,
+      expectedStatus: 'pending',
+      consumedAt: nowIso,
+      consumedByDeviceId: webDevice.deviceId,
+    });
+    if (!consumed) {
+      return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
+    }
+
+    const webSession = await issueTrustedSession({
+      storage: options.storage,
+      clock: options.clock,
+      idGenerator: options.idGenerator,
+      user,
+      device: webDevice,
+    });
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_web_bootstrap_grant_consume',
+      actorUserId: user.userId,
+      targetType: 'web_bootstrap_grant',
+      targetId: consumed.grantId,
+      result: 'success_changed',
+      reasonCode: null,
+    });
+    const response = jsonResponse(
+      200,
+      WebBootstrapGrantConsumeOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+        sessionState: 'local_unlock_required',
+        unlockAccountKey: consumed.unlockAccountKey,
+        lockRevision: consumed.lockRevision,
+        user: {
+          userId: user.userId,
+          username: user.username,
+          role: user.role,
+          bundleVersion: user.bundleVersion,
+          lifecycleState: user.lifecycleState,
+        },
+        device: {
+          deviceId: webDevice.deviceId,
+          deviceName: webDevice.deviceName,
+          platform: webDevice.platform,
+        },
+      }),
+    );
+    addSessionCookies(response, {
+      sessionId: webSession.sessionId,
+      csrfToken: webSession.csrfToken,
+      secure: options.secureCookies,
+    });
+    return response;
+  });
+
   app.post('/api/auth/extension/session/recover', async (c) => {
     const nowIso = isoNow(options.clock);
     const requestIp = resolveRequestIp(c.req.raw);
@@ -3869,10 +4238,10 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
 
     const recoverSecret = await options.storage.extensionSessionRecoverSecrets.findByDeviceId(input.deviceId);
     if (!recoverSecret) {
-      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+      return jsonResponse(409, { ok: false, code: 'no_linked_surface' });
     }
     if (!timingSafeSecretEquals(recoverSecret.secretHash, sha256Base64Url(input.sessionRecoverKey))) {
-      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+      return jsonResponse(401, { ok: false, code: 'recover_key_invalid' });
     }
     const user = await options.storage.users.findByUserId(recoverSecret.userId);
     const device = await options.storage.devices.findById(input.deviceId);
@@ -3885,7 +4254,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       device.deviceState !== 'active' ||
       device.revokedAt !== null
     ) {
-      return jsonResponse(403, { ok: false, code: 'forbidden' });
+      return jsonResponse(409, { ok: false, code: 'device_revoked' });
     }
 
     const timeoutMs = await getEffectiveUnlockIdleTimeoutMs(user.userId);
@@ -4262,6 +4631,53 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
   });
 
+  app.post('/api/auth/session/lock', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 8 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = SessionLockInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const lockRevision = await bumpLinkedSurfaceLockRevision({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      nowIso,
+    });
+    await createAuditEvent({
+      storage: options.storage,
+      idGenerator: options.idGenerator,
+      clock: options.clock,
+      request: c.req.raw,
+      eventType: 'auth_session_lock',
+      actorUserId: sessionContext.user.userId,
+      targetType: 'session_lock',
+      targetId: sessionContext.device.deviceId,
+      result: 'success_changed',
+      reasonCode: input.reasonCode ?? null,
+    });
+    return jsonResponse(
+      200,
+      SessionLockOutputSchema.parse({
+        ok: true,
+        lockRevision,
+        appliedScope: 'linked_surface_pair',
+      }),
+    );
+  });
+
   app.get('/api/auth/session/restore', async (c) => {
     const deploymentState = await options.storage.deploymentState.get();
     const sessionContext = await requireAuthenticatedSession(c.req.raw, {
@@ -4297,6 +4713,10 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
 
     const unlockIdleTimeoutMs = await getEffectiveUnlockIdleTimeoutMs(sessionContext.user.userId);
+    const lockRevision = await resolveEffectiveLockRevision({
+      userId: sessionContext.user.userId,
+      device: sessionContext.device,
+    });
     let extensionToken: string | undefined;
     let extensionExpiresAt: string | undefined;
     if (sessionContext.authMode === 'extension_bearer') {
@@ -4330,6 +4750,8 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         sessionExpiresAt: extensionExpiresAt,
         unlockIdleTimeoutMs,
         unlockGrantEnabled: true,
+        lockRevision,
+        lockScope: 'linked_surface_pair',
         user: {
           userId: sessionContext.user.userId,
           username: sessionContext.user.username,
@@ -4984,6 +5406,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       idGenerator: options.idGenerator,
       user,
       device,
+      recentReauthAt: nowIso,
     });
     const response = jsonResponse(201, {
       ...buildTrustedSessionResponse({ session, user, device }),

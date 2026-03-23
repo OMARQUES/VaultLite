@@ -2,9 +2,9 @@
 
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
-Status card version: `2026-03-19-v2.2.1-r19`
-Last updated: `2026-03-19`
-Overall status: `phase11_in_progress`
+Status card version: `2026-03-23-v2.3.0-r20`
+Last updated: `2026-03-23`
+Overall status: `phase12_in_progress`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
 ## Legend
@@ -121,11 +121,11 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 
 ## Current Focus
 
-Active phase: `Phase 11 extension baseline`
-Active card: `P11-C01/P11-C02/P11-C03 - review and closure`
+Active phase: `Phase 12 - Final Hardening and Release Readiness`
+Active card: `P12-C01 - Threat-model review update`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P11` runtime bridge is implemented end-to-end (pairing, local unlock, listing, manual fill) with automated coverage green; final manual extension validation and evidence collation remain to close cards as `done`.
-Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03` manual evidence closure, then `P12-C01`.
+Reason: `P11` extension baseline has been stabilized in repo with LTS pairing, unlock/session continuity, bridge hardening, and manual-icon flows; execution focus is now release hardening and threat-model reconciliation.
+Suggested immediate sequence: `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -> `P12-C06` -> `P12-C07` -> `P12-C08` -> `P12-C03`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -229,9 +229,9 @@ Suggested immediate sequence: `P11-C01` -> `P11-C02` -> `P11-C03` manual evidenc
 - `P10-C04` Attachment-inclusive manifest — `done`
 - `P10-C05` Restore format docs — `done`
 - `P10-C06` Backup validation tests — `done`
-- `P11-C01` Extension unlock — `review_needed`
-- `P11-C02` Credential listing — `review_needed`
-- `P11-C03` Manual fill — `review_needed`
+- `P11-C01` Extension unlock — `done`
+- `P11-C02` Credential listing — `done`
+- `P11-C03` Manual fill — `done`
 - `P12-C01` Threat-model review update — `not_started`
 - `P12-C02` OPERATIONS.md — `not_started`
 - `P12-C03` RELEASE.md — `not_started`
@@ -2266,7 +2266,7 @@ Acceptance criteria: supported formats import deterministically into encrypted i
 Risks / cautions: malformed CSV handling must fail safely.
 Notes for Codex/dev: keep importer format-specific instead of overly generic and keep passphrase memory-only for backup import.
 Evidence required to mark done: `apps/web/src/lib/vault-import.test.ts` passing with coverage for VaultLite export/backup detection, passphrase requirement, and encrypted-envelope attachment replay.
-Suggested next action: start `P11-C01` extension unlock baseline.
+Suggested next action: start `P12-C01` threat-model review update.
 
 ### P10-C02 - JSON export
 Card ID: `P10-C02`
@@ -2350,7 +2350,7 @@ Acceptance criteria: restore behavior and limitations are explicit and aligned w
 Risks / cautions: undocumented restore constraints will create support incidents.
 Notes for Codex/dev: documentation must match implemented package versioning rules exactly.
 Evidence required to mark done: `docs/IMPORT_FORMATS.md`, `docs/EXPORT_JSON_FORMAT.md`, and `docs/BACKUP_FORMAT.md` updated with self-reimport semantics and backup passphrase/integrity constraints.
-Suggested next action: continue with extension readiness (`P11-C01`).
+Suggested next action: continue with `P12-C01`.
 
 ### P10-C06 - Backup validation tests
 Card ID: `P10-C06`
@@ -2371,14 +2371,14 @@ Acceptance criteria: backups are validated automatically against committed expec
 Risks / cautions: weak fixture coverage will miss incompatibility drift.
 Notes for Codex/dev: keep fixed test fixtures under version control.
 Evidence required to mark done: passing tests for `apps/web/src/lib/data-portability.test.ts`, `apps/web/src/lib/vault-import.test.ts`, full `@vaultlite/web` suite, plus contracts and crypto validation suites.
-Suggested next action: start `P11-C01` extension unlock baseline.
+Suggested next action: start `P12-C01`.
 ## Phase 11
 
 ### P11-C01 - Extension unlock
 Card ID: `P11-C01`
 Title: `Extension unlock`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `review_needed`
+Status: `done`
 Priority: `P2`
 Objective: Implement the browser extension unlock experience for the approved V1 feature set.
 Description: Build the extension-side unlock flow and trusted-device handling needed to access existing credentials.
@@ -2392,15 +2392,15 @@ Required tests: Add extension integration tests covering trusted-device unlock s
 Acceptance criteria: extension can unlock an existing account under the approved trusted-device model.
 Risks / cautions: extension storage and state handling are easy places to violate the local storage policy.
 Notes for Codex/dev: V1 extension scope is retrieval and fill-oriented, not capture-oriented.
-Evidence required to mark done: Passing extension unlock tests plus evidence that no forbidden auth or session secrets are persisted in extension storage.
-Implementation snapshot: API now exposes `POST /api/auth/extension/pairing/init` and `POST /api/auth/extension/pairing/complete` with one-time code, hashed challenge storage, rate limiting, and opaque extension bearer rotation support on `GET /api/auth/session/restore`. Web `/settings` includes a “Connect extension” ceremony with recent reauth and one-time code generation. Extension runtime now implements `background.js` authority, `popup.html/js`, `full-page-auth.html/js`, `options.html/js`, strict storage allowlist, and local unlock via `runtime-crypto.js` with `argon2id` profile (`m=65536`, `t=3`, `p=4`, `dkLen=32`).
-Suggested next action: run manual browser validation for pairing/unlock/revoke and record evidence, then mark `done`.
+Evidence required to mark done: Passing extension unlock tests and API auth tests (`apps/extension/src/*.test.js`, `apps/api/src/extension-auth.test.ts`) plus manual validation evidence for LTS link/unlock/recovery in a Chromium MV3 runtime.
+Implementation snapshot: Extension pairing is LTS-only (`POST /api/auth/extension/link/request|approve|status|consume`) with one-time request proofs, strict state transitions, and deployment binding. Unlock/session continuity now includes backend-mediated unlock grants (`/api/auth/unlock-grant/*`) with extension-side scheduler resilience (`chrome.alarms`) and request-scoped bridge nudge handling. Extension runtime authority remains in `background.js`, with strict sender/route validation, fail-closed behavior, storage allowlist, and local unlock via `runtime-crypto.js` (`argon2id` profile `m=65536`, `t=3`, `p=4`, `dkLen=32`).
+Suggested next action: start `P12-C01`.
 
 ### P11-C02 - Credential listing
 Card ID: `P11-C02`
 Title: `Credential listing`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `review_needed`
+Status: `done`
 Priority: `P2`
 Objective: Show available credentials in the extension for manual selection.
 Description: Implement the list surface that lets users browse and choose credentials after unlock.
@@ -2414,15 +2414,15 @@ Required tests: Add extension UI tests covering credential-list rendering after 
 Acceptance criteria: unlocked extension displays accessible credentials reliably.
 Risks / cautions: do not over-cache decrypted data in extension storage.
 Notes for Codex/dev: keep list behavior consistent with web search constraints.
-Evidence required to mark done: Passing extension listing tests plus UI evidence of credential rendering without forbidden long-lived decrypted caching.
-Implementation snapshot: extension runtime now consumes `/api/sync/snapshot` from background authority and projects a minimal popup view model (`itemId`, `title`, `usernamePreview`, `urlHostSummary`, `matchFlags`) without persisting decrypted payloads. Search/filter and domain-first ordering are active in `popup.js`, with policy helpers in `apps/extension/src/background-controller.ts` and unit coverage in `apps/extension/src/background-controller.test.ts`.
-Suggested next action: capture manual evidence for empty/match/fallback states and mark `done`.
+Evidence required to mark done: Passing listing/search/filter tests in `@vaultlite/extension` plus verified no long-lived decrypted payload persistence in extension storage.
+Implementation snapshot: Listing consumes `/api/sync/snapshot` through background authority and projects a minimal popup view model (`itemId`, `title`, previews, host summaries, `matchFlags`) with deterministic sorting and context-aware ranking. Popup uses incremental icon patching and robust scroll anchoring to avoid destructive rerenders and top-jump during icon hydration/resolve cycles.
+Suggested next action: start `P12-C01`.
 
 ### P11-C03 - Manual fill
 Card ID: `P11-C03`
 Title: `Manual fill`
 Phase/Epic: `Phase 11 - Browser Extension`
-Status: `review_needed`
+Status: `done`
 Priority: `P2`
 Objective: Support explicit user-triggered fill from the extension.
 Description: Build the minimal manual-fill action for selected credentials in supported pages.
@@ -2436,9 +2436,9 @@ Required tests: Add extension integration tests for explicit manual fill on appr
 Acceptance criteria: user-triggered fill works on approved test pages.
 Risks / cautions: content-script behavior must remain narrowly permissioned.
 Notes for Codex/dev: keep V1 extension scope intentionally narrow; do not smuggle `save login` into this phase.
-Evidence required to mark done: Passing manual-fill tests plus fixture-page evidence showing explicit user-triggered fill only.
-Implementation snapshot: popup→background→content-script bridge is now wired in runtime files (`apps/extension/popup.js`, `apps/extension/background.js`, `apps/extension/content-script.js`) with explicit user-triggered fill, exact-origin authorization, anti-race revalidation, top-level-only execution, and no autosubmit. Policy modules and unit coverage remain in `apps/extension/src/origin-policy.ts` + `apps/extension/src/fill-engine.ts`.
-Suggested next action: validate fixture pages manually (supported and blocked contexts) and record evidence to close card.
+Evidence required to mark done: Passing manual-fill tests and fixture validation for supported contexts with safe no-op behavior in blocked/unsupported contexts.
+Implementation snapshot: popup→background→content-script bridge enforces explicit user-triggered fill with exact-origin authorization, anti-race revalidation, top-level-only execution, and no autosubmit. Suggested-item UX now surfaces context-aware quick actions (`Fill` when current site matches, external-open otherwise), with disabled fill + tooltip for pages without supported fields.
+Suggested next action: start `P12-C01`.
 
 ## Phase 12
 
@@ -2637,6 +2637,8 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-23: Synced status-card with repository state and moved execution focus to Phase 12. `P11-C01`, `P11-C02`, and `P11-C03` are now `done` based on implemented LTS-only extension pairing, unlock/session continuity with backend-mediated unlock grants, strict bridge hardening, listing/fill stabilization, and green automated suites in `@vaultlite/extension` and `@vaultlite/api` extension auth coverage.
+- 2026-03-23: Extension and web manual-icon flows now operate on shared server-side overrides with popup detail-icon editing and robust sync behavior (queued retries, non-retriable 4xx drop, and cross-surface refresh triggers), reducing extension/web icon drift during normal use.
 - 2026-03-19: Closed the Phase 11 runtime implementation path and moved `P11-C01`/`P11-C02`/`P11-C03` to `review_needed`. Added operational MV3 runtime files (`apps/extension/background.js`, `apps/extension/popup.js`, `apps/extension/options.js`, `apps/extension/full-page-auth.js`, `apps/extension/content-script.js`, `apps/extension/runtime-*.js`) enforcing background-only secret authority, strict sender capability checks, exact-origin fill authorization, anti-race revalidation, and fail-closed lock behavior. Validation evidence: `@vaultlite/api`, `@vaultlite/web`, and `@vaultlite/extension` test suites green; workspace typecheck green; migration validation green; `npm audit --omit=dev` reports 0 vulnerabilities.
 - 2026-03-19: Started Phase 11 implementation (`P11-C01`/`P11-C02`/`P11-C03`) with closed security defaults: website-assisted extension pairing (one-time hashed code + rate limits), opaque extension bearer allowlist (`session/restore`, `sync/snapshot`) with rotation window, extension pairing persistence migration `0009_extension_pairings`, and MV3 isolation helpers in `apps/extension` (background authority, exact-origin fill policy, top-level-only fill engine). Evidence: `apps/api/src/extension-auth.test.ts`, `apps/extension/src/*.test.ts`, full workspace typecheck/test green.
 - 2026-03-18: Completed `P95-C04` through `P95-C06` with lifecycle-focused integration coverage and deterministic transition assertions. Evidence: `apps/api/src/admin-lifecycle.test.ts` now covers deprovision authorization and side effects, already-issued session rejection after lifecycle mutations, trusted-device invalidation effects, and matrix assertions for valid, invalid, and idempotent transitions; `apps/web/src/pages/AdminConsolePage.test.ts` includes deprovision confirmation flow coverage.
@@ -2673,9 +2675,9 @@ Suggested next action: compile the final checklist from implemented verification
 - `2026-03-14`: Browser extension V1 is retrieval and fill-oriented; `save login` is out of scope for the first delivery.
 
 ## Next Cards
-1. `P11-C01` - `Extension unlock`
-       Condition to finish: manual browser evidence for pairing/unlock/reset/revoke must be captured and attached to the card.
-2. `P11-C02` - `Credential listing`
-       Condition to finish: manual evidence must confirm domain-first ordering, empty state, and global fallback behavior without persistent decrypted cache.
-3. `P11-C03` - `Manual fill`
-       Condition to finish: manual fixture evidence must confirm safe no-op in blocked contexts and successful explicit fill in approved contexts.
+1. `P12-C01` - `Threat-model review update`
+       Condition to finish: threat model reflects implemented unlock-grant, LTS-only pairing, bridge hardening, and residual risks.
+2. `P12-C04` - `Secret scanning verification`
+       Condition to finish: repository-wide scan reviewed with no unaddressed secret findings.
+3. `P12-C05` - `Dependency audit verification`
+       Condition to finish: dependency audit triaged with no untriaged high-severity issues.

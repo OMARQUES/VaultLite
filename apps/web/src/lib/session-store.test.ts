@@ -91,6 +91,11 @@ function createMockDependencies() {
       getUnlockGrantStatus: vi.fn(),
       consumeUnlockGrant: vi.fn(),
       approveUnlockGrant: vi.fn(),
+      lockSession: vi.fn().mockResolvedValue({
+        ok: true,
+        lockRevision: 1,
+        appliedScope: 'linked_surface_pair',
+      }),
     },
     trustedLocalStateStore: {
       load: vi.fn().mockResolvedValue({
@@ -143,6 +148,7 @@ describe('createSessionStore', () => {
         deviceId: 'device_1',
         accountKey: 'A'.repeat(43),
         expiresAt: Date.now() + 60_000,
+        lockRevision: 0,
       }),
     );
     const store = createSessionStore(dependencies as never);
@@ -154,6 +160,42 @@ describe('createSessionStore', () => {
     expect(dependencies.authClient.requestUnlockGrant).not.toHaveBeenCalled();
   });
 
+  test('keeps ready unlock cache when backend lock revision is lower after link removal', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.restoreSession.mockResolvedValueOnce({
+      ok: true,
+      sessionState: 'local_unlock_required',
+      lockRevision: 0,
+      user: {
+        userId: 'user_1',
+        username: 'alice',
+        role: 'user',
+        lifecycleState: 'active',
+      },
+      device: {
+        deviceId: 'device_1',
+        deviceName: 'Alice Laptop',
+        platform: 'web',
+      },
+    });
+    globalThis.localStorage?.setItem(
+      'vaultlite:web-unlock-cache.v1',
+      JSON.stringify({
+        username: 'alice',
+        deviceId: 'device_1',
+        accountKey: 'A'.repeat(43),
+        expiresAt: Date.now() + 60_000,
+        lockRevision: 5,
+      }),
+    );
+    const store = createSessionStore(dependencies as never);
+
+    await store.restoreSession();
+
+    expect(store.state.phase).toBe('ready');
+    expect(store.state.lastUnlockedLockRevision).toBe(0);
+  });
+
   test('migrates legacy unlock cache from sessionStorage to localStorage', async () => {
     const dependencies = createMockDependencies();
     globalThis.sessionStorage?.setItem(
@@ -163,6 +205,7 @@ describe('createSessionStore', () => {
         deviceId: 'device_1',
         accountKey: 'A'.repeat(43),
         expiresAt: Date.now() + 60_000,
+        lockRevision: 0,
       }),
     );
     const store = createSessionStore(dependencies as never);
@@ -547,7 +590,7 @@ describe('createSessionStore', () => {
     expect(dependencies.trustedLocalStateStore.save).not.toHaveBeenCalled();
   });
 
-  test('approveExtensionLink sends trusted package with approval nonce without forcing local reauth', async () => {
+  test('approveExtensionLink sends trusted package with approval nonce without forcing extra local reauth', async () => {
     const dependencies = createMockDependencies();
     const store = createSessionStore(dependencies as never);
 
@@ -555,12 +598,13 @@ describe('createSessionStore', () => {
       username: 'alice',
       password: 'correct-password',
     });
+    const reauthCallsAfterUnlock = dependencies.authClient.recentReauth.mock.calls.length;
 
     await store.approveExtensionLink({
       requestId: 'request_1234567890123456',
     });
 
-    expect(dependencies.authClient.recentReauth).not.toHaveBeenCalled();
+    expect(dependencies.authClient.recentReauth.mock.calls.length).toBe(reauthCallsAfterUnlock);
     expect(dependencies.authClient.approveExtensionLink).toHaveBeenCalledWith({
       requestId: 'request_1234567890123456',
       approvalNonce: 'R'.repeat(16),

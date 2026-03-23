@@ -40,6 +40,8 @@ import type {
   RuntimeMetadata,
   SessionPolicyOutput,
   SessionPolicyUpdateInput,
+  SessionLockInput,
+  SessionLockOutput,
   SessionRestoreResponse,
   TrustedSessionResponse,
   UnlockGrantActionOutput,
@@ -50,6 +52,8 @@ import type {
   UnlockGrantRequestOutput,
   UnlockGrantStatusInput,
   UnlockGrantStatusOutput,
+  WebBootstrapGrantConsumeInput,
+  WebBootstrapGrantConsumeOutput,
 } from '@vaultlite/contracts';
 import { dispatchVaultUnauthorizedEvent } from './http-events';
 
@@ -129,6 +133,7 @@ export interface VaultLiteAuthClient {
   rejectExtensionLink(input: ExtensionLinkRejectInput): Promise<ExtensionLinkActionOutput>;
   getSessionPolicy(): Promise<SessionPolicyOutput>;
   updateSessionPolicy(input: SessionPolicyUpdateInput): Promise<SessionPolicyOutput>;
+  lockSession(input: SessionLockInput): Promise<SessionLockOutput>;
   requestUnlockGrant(input: UnlockGrantRequestInput): Promise<UnlockGrantRequestOutput>;
   listPendingUnlockGrants(): Promise<UnlockGrantPendingListOutput>;
   approveUnlockGrant(input: {
@@ -139,6 +144,7 @@ export interface VaultLiteAuthClient {
   rejectUnlockGrant(input: { requestId: string; rejectionReasonCode?: string }): Promise<UnlockGrantActionOutput>;
   getUnlockGrantStatus(input: UnlockGrantStatusInput): Promise<UnlockGrantStatusOutput>;
   consumeUnlockGrant(input: UnlockGrantConsumeInput): Promise<UnlockGrantConsumeOutput>;
+  consumeWebBootstrapGrant(input: WebBootstrapGrantConsumeInput): Promise<WebBootstrapGrantConsumeOutput>;
   resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
   discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
   listManualSiteIcons(): Promise<SiteIconManualListOutput>;
@@ -472,9 +478,29 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         { emitUnauthorizedEvent: true },
       );
     },
+    lockSession(input) {
+      return requestJson<SessionLockOutput>(
+        `${baseUrl}/api/auth/session/lock`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
     requestUnlockGrant(input) {
       return requestJson<UnlockGrantRequestOutput>(
         `${baseUrl}/api/auth/unlock-grant/request`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    consumeWebBootstrapGrant(input) {
+      return requestJson<WebBootstrapGrantConsumeOutput>(
+        `${baseUrl}/api/auth/web-bootstrap-grant/consume`,
         {
           method: 'POST',
           body: JSON.stringify(input),

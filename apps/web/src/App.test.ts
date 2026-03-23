@@ -30,6 +30,8 @@ function createSessionStore(
       deviceName: phase === 'ready' || phase === 'local_unlock_required' ? 'Primary Browser' : null,
       lifecycleState: phase === 'ready' ? ('active' as const) : null,
       bundleVersion: phase === 'ready' || phase === 'local_unlock_required' ? 0 : null,
+      lockRevision: 0,
+      lastUnlockedLockRevision: 0,
       lastError: null,
       lastActivityAt: null,
       autoLockAfterMs: 5 * 60 * 1000,

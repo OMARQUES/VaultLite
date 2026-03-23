@@ -114,6 +114,7 @@ export interface SurfaceLinkRecord {
   userId: string;
   webDeviceId: string;
   extensionDeviceId: string;
+  lockRevision: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -133,6 +134,7 @@ export interface UnlockGrantRecord {
   requesterClientNonce: string;
   approverSurface: UnlockGrantSurface;
   approverDeviceId: string;
+  lockRevision: number;
   status: UnlockGrantStatus;
   createdAt: string;
   expiresAt: string;
@@ -143,6 +145,29 @@ export interface UnlockGrantRecord {
   rejectionReasonCode: string | null;
   consumedAt: string | null;
   consumedByDeviceId: string | null;
+}
+
+export type WebBootstrapGrantStatus = 'pending' | 'consumed' | 'revoked';
+
+export interface WebBootstrapGrantRecord {
+  grantId: string;
+  userId: string;
+  deploymentFingerprint: string;
+  serverOrigin: string;
+  extensionDeviceId: string;
+  webDeviceId: string;
+  requesterPublicKey: string;
+  requesterClientNonce: string;
+  webChallenge: string;
+  unlockAccountKey: string;
+  lockRevision: number;
+  status: WebBootstrapGrantStatus;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  consumedByDeviceId: string | null;
+  revokedAt: string | null;
+  revocationReasonCode: string | null;
 }
 
 export interface ExtensionSessionRecoverSecretRecord {
@@ -351,6 +376,13 @@ export interface SurfaceLinkRepository {
   upsert(record: SurfaceLinkRecord): Promise<SurfaceLinkRecord>;
   findByWebDeviceId(userId: string, webDeviceId: string): Promise<SurfaceLinkRecord | null>;
   findByExtensionDeviceId(userId: string, extensionDeviceId: string): Promise<SurfaceLinkRecord | null>;
+  findByPair(userId: string, webDeviceId: string, extensionDeviceId: string): Promise<SurfaceLinkRecord | null>;
+  listByDeviceId(userId: string, deviceId: string): Promise<SurfaceLinkRecord[]>;
+  bumpLockRevisionByDevice(input: {
+    userId: string;
+    deviceId: string;
+    updatedAtIso: string;
+  }): Promise<number>;
   removeByDeviceId(userId: string, deviceId: string): Promise<void>;
 }
 
@@ -383,6 +415,31 @@ export interface UnlockGrantRepository {
     consumedAt: string;
     consumedByDeviceId: string;
   }): Promise<UnlockGrantRecord | null>;
+  revokePendingByDeviceWithLockRevision(input: {
+    userId: string;
+    deviceId: string;
+    minLockRevisionExclusive: number;
+    revokedAt: string;
+    reasonCode: string | null;
+  }): Promise<number>;
+}
+
+export interface WebBootstrapGrantRepository {
+  create(record: WebBootstrapGrantRecord): Promise<WebBootstrapGrantRecord>;
+  findByGrantId(grantId: string): Promise<WebBootstrapGrantRecord | null>;
+  consume(input: {
+    grantId: string;
+    expectedStatus: WebBootstrapGrantStatus;
+    consumedAt: string;
+    consumedByDeviceId: string;
+  }): Promise<WebBootstrapGrantRecord | null>;
+  revokePendingByDeviceWithLockRevision(input: {
+    userId: string;
+    deviceId: string;
+    minLockRevisionExclusive: number;
+    revokedAt: string;
+    reasonCode: string | null;
+  }): Promise<number>;
 }
 
 export interface ExtensionSessionRecoverSecretRepository {
@@ -545,6 +602,7 @@ export interface VaultLiteStorage {
   extensionLinkRequests: ExtensionLinkRequestRepository;
   surfaceLinks: SurfaceLinkRepository;
   unlockGrants: UnlockGrantRepository;
+  webBootstrapGrants: WebBootstrapGrantRepository;
   extensionSessionRecoverSecrets: ExtensionSessionRecoverSecretRepository;
   siteIconCache: SiteIconCacheRepository;
   manualSiteIconOverrides: ManualSiteIconOverrideRepository;
@@ -575,6 +633,7 @@ export function createInMemoryVaultLiteStorage(input: {
   const extensionLinkRequests = new Map<string, ExtensionLinkRequestRecord>();
   const surfaceLinksByPair = new Map<string, SurfaceLinkRecord>();
   const unlockGrants = new Map<string, UnlockGrantRecord>();
+  const webBootstrapGrants = new Map<string, WebBootstrapGrantRecord>();
   const extensionSessionRecoverSecrets = new Map<string, ExtensionSessionRecoverSecretRecord>();
   const siteIconCache = new Map<string, SiteIconCacheRecord>();
   const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
@@ -979,8 +1038,12 @@ export function createInMemoryVaultLiteStorage(input: {
         const key = `${record.userId}:${record.webDeviceId}:${record.extensionDeviceId}`;
         const existing = surfaceLinksByPair.get(key);
         const next: SurfaceLinkRecord = existing
-          ? { ...existing, updatedAt: record.updatedAt }
-          : { ...record };
+          ? {
+              ...existing,
+              updatedAt: record.updatedAt,
+              lockRevision: Number.isFinite(record.lockRevision) ? record.lockRevision : existing.lockRevision,
+            }
+          : { ...record, lockRevision: Number.isFinite(record.lockRevision) ? record.lockRevision : 0 };
         surfaceLinksByPair.set(key, next);
         return { ...next };
       },
@@ -999,6 +1062,42 @@ export function createInMemoryVaultLiteStorage(input: {
           }
         }
         return null;
+      },
+      async findByPair(userId, webDeviceId, extensionDeviceId) {
+        const key = `${userId}:${webDeviceId}:${extensionDeviceId}`;
+        const record = surfaceLinksByPair.get(key);
+        return record ? { ...record } : null;
+      },
+      async listByDeviceId(userId, deviceId) {
+        return Array.from(surfaceLinksByPair.values())
+          .filter(
+            (record) =>
+              record.userId === userId &&
+              (record.webDeviceId === deviceId || record.extensionDeviceId === deviceId),
+          )
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          .map((record) => ({ ...record }));
+      },
+      async bumpLockRevisionByDevice(input) {
+        let nextRevision = 0;
+        for (const [key, record] of surfaceLinksByPair.entries()) {
+          if (
+            record.userId !== input.userId ||
+            (record.webDeviceId !== input.deviceId && record.extensionDeviceId !== input.deviceId)
+          ) {
+            continue;
+          }
+          const updated: SurfaceLinkRecord = {
+            ...record,
+            lockRevision: record.lockRevision + 1,
+            updatedAt: input.updatedAtIso,
+          };
+          surfaceLinksByPair.set(key, updated);
+          if (updated.lockRevision > nextRevision) {
+            nextRevision = updated.lockRevision;
+          }
+        }
+        return nextRevision;
       },
       async removeByDeviceId(userId, deviceId) {
         for (const [key, record] of surfaceLinksByPair.entries()) {
@@ -1079,6 +1178,79 @@ export function createInMemoryVaultLiteStorage(input: {
         };
         unlockGrants.set(next.requestId, next);
         return { ...next };
+      },
+      async revokePendingByDeviceWithLockRevision(inputRecord) {
+        let changed = 0;
+        for (const [requestId, record] of unlockGrants.entries()) {
+          if (
+            record.userId !== inputRecord.userId ||
+            (record.requesterDeviceId !== inputRecord.deviceId &&
+              record.approverDeviceId !== inputRecord.deviceId) ||
+            record.status !== 'pending' ||
+            record.lockRevision >= inputRecord.minLockRevisionExclusive
+          ) {
+            continue;
+          }
+          unlockGrants.set(requestId, {
+            ...record,
+            status: 'rejected',
+            rejectedAt: inputRecord.revokedAt,
+            rejectionReasonCode: inputRecord.reasonCode,
+            unlockAccountKey: null,
+          });
+          changed += 1;
+        }
+        return changed;
+      },
+    },
+    webBootstrapGrants: {
+      async create(record) {
+        webBootstrapGrants.set(record.grantId, { ...record });
+        return { ...record };
+      },
+      async findByGrantId(grantId) {
+        const record = webBootstrapGrants.get(grantId);
+        return record ? { ...record } : null;
+      },
+      async consume(inputRecord) {
+        const record = webBootstrapGrants.get(inputRecord.grantId);
+        if (!record || record.status !== inputRecord.expectedStatus) {
+          return null;
+        }
+        const next: WebBootstrapGrantRecord = {
+          ...record,
+          status: 'consumed',
+          consumedAt: inputRecord.consumedAt,
+          consumedByDeviceId: inputRecord.consumedByDeviceId,
+          revokedAt: null,
+          revocationReasonCode: null,
+        };
+        webBootstrapGrants.set(next.grantId, next);
+        return { ...next };
+      },
+      async revokePendingByDeviceWithLockRevision(inputRecord) {
+        let changed = 0;
+        for (const [grantId, record] of webBootstrapGrants.entries()) {
+          if (
+            record.userId !== inputRecord.userId ||
+            (record.extensionDeviceId !== inputRecord.deviceId &&
+              record.webDeviceId !== inputRecord.deviceId) ||
+            record.status !== 'pending' ||
+            record.lockRevision >= inputRecord.minLockRevisionExclusive
+          ) {
+            continue;
+          }
+          webBootstrapGrants.set(grantId, {
+            ...record,
+            status: 'revoked',
+            revokedAt: inputRecord.revokedAt,
+            revocationReasonCode: inputRecord.reasonCode,
+            consumedAt: null,
+            consumedByDeviceId: null,
+          });
+          changed += 1;
+        }
+        return changed;
       },
     },
     extensionSessionRecoverSecrets: {

@@ -91,6 +91,30 @@ export function createExtensionApiClient(serverOrigin) {
         }),
       });
     },
+    async requestWebBootstrapGrant(input) {
+      return requestJson(`${base}/api/auth/web-bootstrap-grant/request`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          deploymentFingerprint: input?.deploymentFingerprint,
+          requestPublicKey: input?.requestPublicKey,
+          clientNonce: input?.clientNonce,
+          webChallenge: input?.webChallenge,
+          unlockAccountKey: input?.unlockAccountKey,
+        }),
+      });
+    },
+    async consumeWebBootstrapGrant(input) {
+      return requestJson(`${base}/api/auth/web-bootstrap-grant/consume`, {
+        method: 'POST',
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          grantId: input?.grantId,
+          requestProof: input?.requestProof,
+          consumeNonce: input?.consumeNonce,
+        }),
+      });
+    },
     async listPendingUnlockGrants(input = {}) {
       return requestJson(`${base}/api/auth/unlock-grant/pending`, {
         method: 'GET',
@@ -229,6 +253,15 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
         body: JSON.stringify({
           domain: input?.domain,
+        }),
+      });
+    },
+    async lockSession(input = {}) {
+      return requestJson(`${base}/api/auth/session/lock`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          reasonCode: input?.reasonCode,
         }),
       });
     },

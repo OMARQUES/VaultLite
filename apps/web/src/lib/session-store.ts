@@ -68,6 +68,8 @@ export interface SessionState {
   deviceName: string | null;
   lifecycleState: 'active' | 'suspended' | 'deprovisioned' | null;
   bundleVersion: number | null;
+  lockRevision: number;
+  lastUnlockedLockRevision: number;
   lastError: string | null;
   lastActivityAt: number | null;
   autoLockAfterMs: number;
@@ -156,12 +158,14 @@ const BRIDGE_WEB_SOURCE = 'vaultlite-webapp';
 const BRIDGE_EXTENSION_SOURCE = 'vaultlite-extension-bridge';
 const UNLOCK_GRANT_NUDGE_DEBOUNCE_MS = 1_500;
 const UNLOCK_GRANT_NUDGE_TIMEOUT_MS = 1_200;
+const WEB_BOOTSTRAP_BRIDGE_TIMEOUT_MS = 2_000;
 
 interface WebUnlockCacheRecord {
   username: string;
   deviceId: string;
   accountKey: string;
   expiresAt: number;
+  lockRevision: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -170,6 +174,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isUnlockRoute(pathname: string): boolean {
   return pathname === '/unlock' || pathname === '/unlock/';
+}
+
+function isBridgeEligibleRoute(pathname: string): boolean {
+  return pathname === '/unlock' || pathname === '/unlock/' || pathname === '/auth' || pathname === '/auth/';
 }
 
 function isSafeBridgeRequestId(value: unknown): value is string {
@@ -199,6 +207,30 @@ function encodeUnlockGrantSignaturePayload(input: {
       input.requestId,
       input.nonce,
       input.clientNonce,
+      input.serverOrigin,
+      input.deploymentFingerprint,
+    ].join('|'),
+  );
+  return encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
+}
+
+function encodeWebBootstrapGrantSignaturePayload(input: {
+  action: 'consume';
+  grantId: string;
+  nonce: string;
+  clientNonce: string;
+  webChallenge: string;
+  serverOrigin: string;
+  deploymentFingerprint: string;
+}): ArrayBuffer {
+  const encoded = new TextEncoder().encode(
+    [
+      'vaultlite-web-bootstrap-grant-v1',
+      input.action,
+      input.grantId,
+      input.nonce,
+      input.clientNonce,
+      input.webChallenge,
       input.serverOrigin,
       input.deploymentFingerprint,
     ].join('|'),
@@ -264,7 +296,8 @@ function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecor
       typeof parsed?.deviceId !== 'string' ||
       typeof parsed?.accountKey !== 'string' ||
       parsed.accountKey.length < 20 ||
-      typeof parsed?.expiresAt !== 'number'
+      typeof parsed?.expiresAt !== 'number' ||
+      typeof parsed?.lockRevision !== 'number'
     ) {
       return null;
     }
@@ -273,6 +306,7 @@ function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecor
       deviceId: parsed.deviceId,
       accountKey: parsed.accountKey,
       expiresAt: parsed.expiresAt,
+      lockRevision: Math.max(0, Math.trunc(parsed.lockRevision)),
     };
   } catch {
     return null;
@@ -336,6 +370,8 @@ export function createSessionStore(input: {
     deviceName: null,
     lifecycleState: null,
     bundleVersion: null,
+    lockRevision: 0,
+    lastUnlockedLockRevision: 0,
     lastError: null,
     lastActivityAt: null,
     autoLockAfterMs: readPersistedAutoLockAfterMs(),
@@ -510,6 +546,104 @@ export function createSessionStore(input: {
     });
   }
 
+  async function requestWebBootstrapGrantBestEffort(inputValue: {
+    requestPublicKey: string;
+    clientNonce: string;
+    webChallenge: string;
+  }): Promise<{
+    grantId: string;
+    expiresAt: string;
+    interval: number;
+    serverOrigin: string;
+  } | null> {
+    if (!isBridgeEligibleRoute(window.location.pathname)) {
+      return null;
+    }
+    const bridgeRequestId =
+      typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : createRandomBase64Url(16);
+    const targetOrigin = window.location.origin;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: {
+        grantId: string;
+        expiresAt: string;
+        interval: number;
+        serverOrigin: string;
+      } | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.removeEventListener('message', onMessage);
+        window.clearTimeout(timeoutHandle);
+        resolve(result);
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        if (event.source !== window || event.origin !== targetOrigin) {
+          return;
+        }
+        if (!isRecord(event.data)) {
+          return;
+        }
+        if (
+          event.data.type !== BRIDGE_RESPONSE_TYPE ||
+          event.data.version !== BRIDGE_PROTOCOL_VERSION ||
+          event.data.source !== BRIDGE_EXTENSION_SOURCE ||
+          event.data.requestId !== bridgeRequestId
+        ) {
+          return;
+        }
+        if (event.data.ok !== true || !isRecord(event.data.payload)) {
+          finish(null);
+          return;
+        }
+        const payload = event.data.payload;
+        if (
+          typeof payload.grantId !== 'string' ||
+          typeof payload.expiresAt !== 'string' ||
+          typeof payload.serverOrigin !== 'string' ||
+          typeof payload.interval !== 'number'
+        ) {
+          finish(null);
+          return;
+        }
+        finish({
+          grantId: payload.grantId,
+          expiresAt: payload.expiresAt,
+          serverOrigin: payload.serverOrigin,
+          interval: payload.interval,
+        });
+      };
+
+      const timeoutHandle = window.setTimeout(() => {
+        finish(null);
+      }, WEB_BOOTSTRAP_BRIDGE_TIMEOUT_MS);
+
+      window.addEventListener('message', onMessage);
+      try {
+        window.postMessage(
+          {
+            type: BRIDGE_REQUEST_TYPE,
+            version: BRIDGE_PROTOCOL_VERSION,
+            source: BRIDGE_WEB_SOURCE,
+            requestId: bridgeRequestId,
+            action: 'web-bootstrap.request',
+            payload: {
+              requestPublicKey: inputValue.requestPublicKey,
+              clientNonce: inputValue.clientNonce,
+              webChallenge: inputValue.webChallenge,
+            },
+          },
+          targetOrigin,
+        );
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
   async function maybeAutoApproveUnlockGrants() {
     if (!readyState || state.phase !== 'ready') {
       return;
@@ -545,6 +679,120 @@ export function createSessionStore(input: {
       await unlockGrantApproveInFlight;
     } finally {
       unlockGrantApproveInFlight = null;
+    }
+  }
+
+  async function tryBootstrapViaExtensionGrant(inputValue: {
+    trustedLocalState: TrustedLocalStateRecord;
+  }): Promise<boolean> {
+    if (unlockGrantConsumeInFlight) {
+      return unlockGrantConsumeInFlight;
+    }
+    const now = Date.now();
+    if (now - lastUnlockGrantAttemptAt < UNLOCK_GRANT_RETRY_COOLDOWN_MS) {
+      return false;
+    }
+    lastUnlockGrantAttemptAt = now;
+
+    unlockGrantConsumeInFlight = (async () => {
+      try {
+        const metadata = await ensureRuntimeMetadata();
+        const keyPair = await crypto.subtle.generateKey(
+          {
+            name: 'ECDSA',
+            namedCurve: 'P-256',
+          },
+          true,
+          ['sign', 'verify'],
+        );
+        const publicKeySpki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+        const requestPublicKey = toBase64Url(new Uint8Array(publicKeySpki));
+        const clientNonce = createRandomBase64Url(16);
+        const webChallenge = createRandomBase64Url(16);
+        const bootstrapGrant = await requestWebBootstrapGrantBestEffort({
+          requestPublicKey,
+          clientNonce,
+          webChallenge,
+        });
+        if (!bootstrapGrant) {
+          return false;
+        }
+
+        const consumeNonce = createRandomBase64Url(16);
+        const consumePayload = encodeWebBootstrapGrantSignaturePayload({
+          action: 'consume',
+          grantId: bootstrapGrant.grantId,
+          nonce: consumeNonce,
+          clientNonce,
+          webChallenge,
+          serverOrigin: bootstrapGrant.serverOrigin,
+          deploymentFingerprint: metadata.deploymentFingerprint,
+        });
+        const consumeSignature = await crypto.subtle.sign(
+          { name: 'ECDSA', hash: 'SHA-256' },
+          keyPair.privateKey,
+          consumePayload,
+        );
+        const consumed = await input.authClient.consumeWebBootstrapGrant({
+          grantId: bootstrapGrant.grantId,
+          consumeNonce: createRandomBase64Url(16),
+          requestProof: {
+            nonce: consumeNonce,
+            signature: toBase64Url(new Uint8Array(consumeSignature)),
+          },
+        });
+
+        if (
+          typeof consumed.unlockAccountKey === 'string' &&
+          consumed.unlockAccountKey.length >= 20 &&
+          consumed.user.username === inputValue.trustedLocalState.username &&
+          consumed.device.deviceId === inputValue.trustedLocalState.deviceId
+        ) {
+          readyState = {
+            accountKey: consumed.unlockAccountKey,
+            encryptedAccountBundle: inputValue.trustedLocalState.encryptedAccountBundle,
+          };
+          transition({
+            phase: 'ready',
+            username: consumed.user.username,
+            userId: consumed.user.userId,
+            role: consumed.user.role,
+            deviceId: consumed.device.deviceId,
+            deviceName: consumed.device.deviceName,
+            lifecycleState: consumed.user.lifecycleState,
+            bundleVersion: consumed.user.bundleVersion,
+            lockRevision: Math.max(0, Math.trunc(consumed.lockRevision ?? state.lockRevision)),
+            lastUnlockedLockRevision: Math.max(0, Math.trunc(consumed.lockRevision ?? state.lockRevision)),
+            lastError: null,
+            lastActivityAt: Date.now(),
+          });
+          persistReadyStateUnlockCache();
+          return true;
+        }
+
+        transition({
+          phase: 'local_unlock_required',
+          username: consumed.user.username,
+          userId: consumed.user.userId,
+          role: consumed.user.role,
+          deviceId: consumed.device.deviceId,
+          deviceName: consumed.device.deviceName,
+          lifecycleState: consumed.user.lifecycleState,
+          bundleVersion: consumed.user.bundleVersion,
+          lockRevision: Math.max(0, Math.trunc(consumed.lockRevision ?? state.lockRevision)),
+          lastError: null,
+          lastActivityAt: null,
+        });
+        return false;
+      } catch {
+        return false;
+      }
+    })();
+
+    try {
+      return await unlockGrantConsumeInFlight;
+    } finally {
+      unlockGrantConsumeInFlight = null;
     }
   }
 
@@ -671,6 +919,8 @@ export function createSessionStore(input: {
             deviceName: inputValue.deviceName,
             lifecycleState: inputValue.lifecycleState,
             bundleVersion: inputValue.bundleVersion,
+            lockRevision: Math.max(0, Math.trunc(state.lockRevision)),
+            lastUnlockedLockRevision: Math.max(0, Math.trunc(state.lockRevision)),
             lastError: null,
             lastActivityAt: Date.now(),
           });
@@ -710,6 +960,7 @@ export function createSessionStore(input: {
     lifecycleState: 'active' | 'suspended' | 'deprovisioned' | null;
     bundleVersion: number | null;
     trustedLocalEncryptedBundle: string;
+    lockRevision: number;
   }): boolean {
     const cached = loadWebUnlockCache();
     if (!cached) {
@@ -720,6 +971,13 @@ export function createSessionStore(input: {
       cached.deviceId !== inputValue.deviceId ||
       cached.expiresAt <= Date.now()
     ) {
+      clearWebUnlockCache();
+      return false;
+    }
+    // Lock revision is monotonic while a linked surface pair exists. When the link
+    // is removed (for example, revoking an extension device), restore may report 0.
+    // Keep a valid local unlock cache unless the backend reports a newer revision.
+    if (inputValue.lockRevision > cached.lockRevision) {
       clearWebUnlockCache();
       return false;
     }
@@ -736,6 +994,8 @@ export function createSessionStore(input: {
       deviceName: inputValue.deviceName,
       lifecycleState: inputValue.lifecycleState,
       bundleVersion: inputValue.bundleVersion,
+      lockRevision: inputValue.lockRevision,
+      lastUnlockedLockRevision: inputValue.lockRevision,
       lastError: null,
       lastActivityAt: Date.now(),
     });
@@ -752,6 +1012,7 @@ export function createSessionStore(input: {
       deviceId: state.deviceId,
       accountKey: readyState.accountKey,
       expiresAt,
+      lockRevision: Math.max(0, Math.trunc(state.lockRevision)),
     });
   }
 
@@ -796,6 +1057,15 @@ export function createSessionStore(input: {
       applyUnlockPolicy(restored.unlockIdleTimeoutMs);
       if (restored.sessionState !== 'local_unlock_required' || !restored.user || !restored.device) {
         clearReadyState();
+        const trustedLocalState = await input.trustedLocalStateStore.loadFirst();
+        if (trustedLocalState && restored.unlockGrantEnabled !== false) {
+          const unlockedViaBootstrap = await tryBootstrapViaExtensionGrant({
+            trustedLocalState,
+          });
+          if (unlockedViaBootstrap || state.phase === 'local_unlock_required' || state.phase === 'ready') {
+            return;
+          }
+        }
         transition({
           phase: 'remote_authentication_required',
           username: restored.user?.username ?? null,
@@ -805,11 +1075,14 @@ export function createSessionStore(input: {
           deviceName: null,
           lifecycleState: restored.user?.lifecycleState ?? null,
           bundleVersion: restored.user?.bundleVersion ?? null,
+          lockRevision: 0,
           lastError: null,
           lastActivityAt: null,
         });
         return;
       }
+
+      const lockRevision = Math.max(0, Math.trunc(restored.lockRevision ?? 0));
 
       const trustedLocalState = await input.trustedLocalStateStore.load(restored.user.username);
       if (!trustedLocalState || trustedLocalState.deviceId !== restored.device.deviceId) {
@@ -823,6 +1096,7 @@ export function createSessionStore(input: {
           deviceName: restored.device.deviceName,
           lifecycleState: restored.user.lifecycleState,
           bundleVersion: restored.user.bundleVersion,
+          lockRevision,
           lastError: 'This device is no longer trusted for this account. Add the device again.',
           lastActivityAt: null,
         });
@@ -840,13 +1114,33 @@ export function createSessionStore(input: {
           deviceName: null,
           lifecycleState: null,
           bundleVersion: null,
+          lockRevision: 0,
           lastError: 'Deployment initialization in progress.',
           lastActivityAt: null,
         });
         return;
       }
 
+      const lockRevisionMismatch = lockRevision > state.lastUnlockedLockRevision;
+      if (lockRevisionMismatch) {
+        clearReadyState();
+        transition({
+          phase: 'local_unlock_required',
+          username: restored.user.username,
+          userId: restored.user.userId,
+          role: restored.user.role,
+          deviceId: restored.device.deviceId,
+          deviceName: restored.device.deviceName,
+          lifecycleState: restored.user.lifecycleState,
+          bundleVersion: restored.user.bundleVersion,
+          lockRevision,
+          lastError: null,
+          lastActivityAt: null,
+        });
+      }
+
       if (
+        !lockRevisionMismatch &&
         tryRestoreReadyStateFromCache({
           username: restored.user.username,
           userId: restored.user.userId,
@@ -856,6 +1150,7 @@ export function createSessionStore(input: {
           lifecycleState: restored.user.lifecycleState,
           bundleVersion: restored.user.bundleVersion,
           trustedLocalEncryptedBundle: trustedLocalState.encryptedAccountBundle,
+          lockRevision,
         })
       ) {
         void maybeAutoApproveUnlockGrants();
@@ -881,6 +1176,7 @@ export function createSessionStore(input: {
         deviceName: restored.device.deviceName,
         lifecycleState: restored.user.lifecycleState,
         bundleVersion: restored.user.bundleVersion,
+        lockRevision,
         lastError: null,
         lastActivityAt: null,
       });
@@ -1038,6 +1334,8 @@ export function createSessionStore(input: {
           deviceName: session.device.deviceName,
           lifecycleState: session.user.lifecycleState,
           bundleVersion: session.user.bundleVersion,
+          lockRevision: 0,
+          lastUnlockedLockRevision: 0,
           lastError: null,
           lastActivityAt: Date.now(),
         });
@@ -1214,6 +1512,8 @@ export function createSessionStore(input: {
         authSalt: trustedLocalState.authSalt,
         envelope: trustedLocalState.localUnlockEnvelope,
       });
+      const currentLockRevision = Math.max(0, Math.trunc(restored.lockRevision ?? state.lockRevision));
+      const unlockAuthProofPromise = deriveAuthProof(unlock.password, trustedLocalState.authSalt);
       readyState = payload;
       transition({
         phase: 'ready',
@@ -1224,10 +1524,17 @@ export function createSessionStore(input: {
         deviceName: restored.device.deviceName,
         lifecycleState: restored.user.lifecycleState,
         bundleVersion: restored.user.bundleVersion,
+        lockRevision: currentLockRevision,
+        lastUnlockedLockRevision: currentLockRevision,
         lastError: null,
         lastActivityAt: Date.now(),
       });
       persistReadyStateUnlockCache();
+      // Best-effort: unlocking with current password should satisfy recent reauth-sensitive actions.
+      // Never block local unlock UX if network or session refresh temporarily fails.
+      void unlockAuthProofPromise
+        .then((authProof) => input.authClient.recentReauth({ authProof }))
+        .catch(() => undefined);
       void maybeAutoApproveUnlockGrants();
     },
     handleUnauthorized(inputData) {
@@ -1374,6 +1681,7 @@ export function createSessionStore(input: {
           deviceName: rotationResponse.device.deviceName,
           lifecycleState: rotationResponse.user.lifecycleState,
           bundleVersion: rotationResponse.bundleVersion,
+          lockRevision: state.lockRevision,
           lastError: 'Password rotation finished. Unlock this device again to continue securely.',
           lastActivityAt: null,
         });
@@ -1393,6 +1701,8 @@ export function createSessionStore(input: {
         deviceName: rotationResponse.device.deviceName,
         lifecycleState: rotationResponse.user.lifecycleState,
         bundleVersion: rotationResponse.bundleVersion,
+        lockRevision: state.lockRevision,
+        lastUnlockedLockRevision: state.lastUnlockedLockRevision,
         lastError: null,
         lastActivityAt: Date.now(),
       });
@@ -1431,6 +1741,20 @@ export function createSessionStore(input: {
       }
     },
     lock() {
+      if (state.phase === 'ready') {
+        void input.authClient
+          .lockSession({
+            reasonCode: 'user_lock',
+          })
+          .then((response) => {
+            if (typeof response.lockRevision === 'number') {
+              transition({
+                lockRevision: Math.max(0, Math.trunc(response.lockRevision)),
+              });
+            }
+          })
+          .catch(() => undefined);
+      }
       clearReadyState();
       transition({
         phase: state.username ? 'local_unlock_required' : 'remote_authentication_required',

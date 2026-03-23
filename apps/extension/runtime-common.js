@@ -158,6 +158,11 @@ export function isAllowedUnlockPath(input) {
   return pathname === '/unlock' || pathname === '/unlock/';
 }
 
+export function isAllowedAuthPath(input) {
+  const pathname = typeof input?.pathname === 'string' ? input.pathname : '';
+  return pathname === '/auth' || pathname === '/auth/';
+}
+
 function normalizePort(protocol, port) {
   if (port) {
     return port;

@@ -16,6 +16,7 @@ const router = useRouter();
 const handlingUnauthorized = ref(false);
 const sessionRestoreResolved = ref(false);
 const phaseRedirectInFlight = ref(false);
+const sessionSyncInFlight = ref(false);
 const isAuthenticatedRoute = computed(
   () => route.path.startsWith('/vault') || route.path.startsWith('/settings') || route.path.startsWith('/admin'),
 );
@@ -61,6 +62,34 @@ async function maybeRedirectForSessionPhase() {
     await router.replace(redirect);
   } finally {
     phaseRedirectInFlight.value = false;
+  }
+}
+
+function shouldRunSessionSync() {
+  if (!sessionRestoreResolved.value || handlingUnauthorized.value || sessionSyncInFlight.value) {
+    return false;
+  }
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return false;
+  }
+  return sessionStore.state.phase !== 'anonymous' && sessionStore.state.phase !== 'onboarding_in_progress';
+}
+
+async function refreshSessionBestEffort() {
+  if (!shouldRunSessionSync()) {
+    return;
+  }
+  sessionSyncInFlight.value = true;
+  try {
+    await sessionStore.restoreSession();
+  } catch (error) {
+    sessionStore.handleUnauthorized({
+      reasonCode: 'session_restore_failed',
+      message: toHumanErrorMessage(error),
+    });
+  } finally {
+    sessionSyncInFlight.value = false;
+    await maybeRedirectForSessionPhase();
   }
 }
 
@@ -113,6 +142,13 @@ async function handleUnauthorizedEvent(event: Event) {
 }
 
 let autoLockInterval: number | undefined;
+let sessionSyncInterval: number | undefined;
+
+function handleVisibilityChange() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+    void refreshSessionBestEffort();
+  }
+}
 
 onMounted(() => {
   void (async () => {
@@ -131,10 +167,14 @@ onMounted(() => {
   })();
   window.addEventListener('pointerdown', handleActivity);
   window.addEventListener('keydown', handleActivity);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
   autoLockInterval = window.setInterval(() => {
     sessionStore.enforceAutoLock();
   }, 15000);
+  sessionSyncInterval = window.setInterval(() => {
+    void refreshSessionBestEffort();
+  }, 8000);
 });
 
 watch(
@@ -155,8 +195,12 @@ onUnmounted(() => {
   if (autoLockInterval !== undefined) {
     window.clearInterval(autoLockInterval);
   }
+  if (sessionSyncInterval !== undefined) {
+    window.clearInterval(sessionSyncInterval);
+  }
   window.removeEventListener('pointerdown', handleActivity);
   window.removeEventListener('keydown', handleActivity);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
   window.removeEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
 });
 </script>
