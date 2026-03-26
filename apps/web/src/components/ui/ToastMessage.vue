@@ -5,7 +5,5 @@ defineProps<{
 </script>
 
 <template>
-  <div class="toast-message" role="status" aria-live="polite">
-    {{ message }}
-  </div>
+  <div class="toast-message toast-message--hidden" aria-hidden="true"></div>
 </template>

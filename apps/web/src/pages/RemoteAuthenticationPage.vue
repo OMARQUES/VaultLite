@@ -9,7 +9,7 @@ import SecretField from '../components/ui/SecretField.vue';
 import TextField from '../components/ui/TextField.vue';
 import TextareaField from '../components/ui/TextareaField.vue';
 import { useSessionStore } from '../composables/useSessionStore';
-import { toHumanErrorMessage } from '../lib/human-error';
+import { toHumanErrorMessage, toPasswordRetryMessage } from '../lib/human-error';
 
 const router = useRouter();
 const sessionStore = useSessionStore();
@@ -27,7 +27,9 @@ const busyStep = ref<'bootstrap' | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const isBusy = computed(() => busyStep.value !== null);
-const surfaceError = computed(() => errorMessage.value ?? sessionStore.state.lastError);
+const rawSurfaceError = computed(() => errorMessage.value ?? sessionStore.state.lastError);
+const passwordFieldError = computed(() => toPasswordRetryMessage(rawSurfaceError.value));
+const surfaceError = computed(() => (passwordFieldError.value ? null : rawSurfaceError.value));
 const bootstrapLabel = computed(() =>
   busyStep.value === 'bootstrap' ? 'Bootstrapping new device...' : 'Bootstrap new device',
 );
@@ -152,6 +154,7 @@ async function bootstrapDevice() {
           autocomplete="current-password"
           required
         />
+        <p v-if="passwordFieldError" class="field-error">{{ passwordFieldError }}</p>
 
         <div class="file-picker">
           <input

@@ -15,6 +15,8 @@ import type {
   ExtensionSessionRecoverSecretRepository,
   ManualSiteIconOverrideRecord,
   ManualSiteIconOverrideRepository,
+  PasswordGeneratorHistoryRecord,
+  PasswordGeneratorHistoryRepository,
   ExtensionLinkRequestRecord,
   ExtensionLinkRequestRepository,
   ExtensionLinkRequestStatus,
@@ -478,6 +480,24 @@ CREATE INDEX IF NOT EXISTS idx_web_bootstrap_grants_extension
 CREATE INDEX IF NOT EXISTS idx_web_bootstrap_grants_expires
   ON web_bootstrap_grants (expires_at);`,
   },
+  {
+    id: '0014_password_generator_history',
+    filename: '0014_password_generator_history.sql',
+    sql: `CREATE TABLE IF NOT EXISTS password_generator_history (
+  user_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  encrypted_payload TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, entry_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_generator_history_user_updated
+  ON password_generator_history (user_id, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_password_generator_history_user_created
+  ON password_generator_history (user_id, created_at);`,
+  },
 ];
 
 export function getInfrastructureMigrationDirectory(): URL | string {
@@ -554,11 +574,19 @@ export async function loadCloudflareMigrations(
     return migrations;
   } catch (error) {
     const message = error instanceof Error ? error.message.toLowerCase() : '';
+    const missingMigrationSource =
+      message.includes('no such file or directory') ||
+      message.includes('invalid url string') ||
+      message.includes('access to the file system is not allowed');
+    const filesystemModuleUnavailable =
+      (message.includes('node:fs') || message.includes('fs/promises')) &&
+      (message.includes('no such module') ||
+        message.includes('not implemented') ||
+        message.includes('not available') ||
+        message.includes('unsupported'));
     if (
       isDefaultSource &&
-      (message.includes('no such file or directory') ||
-        message.includes('invalid url string') ||
-        message.includes('access to the file system is not allowed'))
+      (missingMigrationSource || filesystemModuleUnavailable)
     ) {
       return EMBEDDED_CLOUDFLARE_MIGRATIONS.map((migration) => ({
         ...migration,
@@ -2119,6 +2147,73 @@ class CloudflareManualSiteIconOverrideRepository implements ManualSiteIconOverri
   }
 }
 
+class CloudflarePasswordGeneratorHistoryRepository implements PasswordGeneratorHistoryRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async listByUserId(userId: string, limit: number): Promise<PasswordGeneratorHistoryRecord[]> {
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(500, Math.trunc(limit)))
+      : 200;
+    return selectMany<PasswordGeneratorHistoryRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              entry_id AS entryId,
+              encrypted_payload AS encryptedPayload,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM password_generator_history
+       WHERE user_id = ?
+       ORDER BY updated_at DESC, entry_id DESC
+       LIMIT ?`,
+      [userId, normalizedLimit],
+    );
+  }
+
+  async upsert(record: PasswordGeneratorHistoryRecord): Promise<PasswordGeneratorHistoryRecord> {
+    const normalized: PasswordGeneratorHistoryRecord = {
+      ...record,
+      entryId: record.entryId.trim(),
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO password_generator_history (user_id, entry_id, encrypted_payload, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, entry_id)
+       DO UPDATE SET
+         encrypted_payload = excluded.encrypted_payload,
+         created_at = excluded.created_at,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.userId,
+        normalized.entryId,
+        normalized.encryptedPayload,
+        normalized.createdAt,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+
+  async pruneByUserId(userId: string, limit: number): Promise<void> {
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(500, Math.trunc(limit)))
+      : 200;
+    await executeOne(
+      this.db,
+      `DELETE FROM password_generator_history
+       WHERE user_id = ?
+         AND entry_id IN (
+           SELECT entry_id
+           FROM password_generator_history
+           WHERE user_id = ?
+           ORDER BY updated_at DESC, entry_id DESC
+           LIMIT -1 OFFSET ?
+         )`,
+      [userId, userId, normalizedLimit],
+    );
+  }
+}
+
 class CloudflareAuthRateLimitRepository implements AuthRateLimitRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -2928,6 +3023,7 @@ export function createCloudflareVaultLiteStorage(input: {
   const extensionSessionRecoverSecrets = new CloudflareExtensionSessionRecoverSecretRepository(input.db);
   const siteIconCache = new CloudflareSiteIconCacheRepository(input.db);
   const manualSiteIconOverrides = new CloudflareManualSiteIconOverrideRepository(input.db);
+  const passwordGeneratorHistory = new CloudflarePasswordGeneratorHistoryRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
 
   return {
@@ -2945,6 +3041,7 @@ export function createCloudflareVaultLiteStorage(input: {
     extensionSessionRecoverSecrets,
     siteIconCache,
     manualSiteIconOverrides,
+    passwordGeneratorHistory,
     authRateLimits: new CloudflareAuthRateLimitRepository(input.db),
     idempotency: new CloudflareIdempotencyRepository(input.db),
     auditEvents: new CloudflareAuditEventRepository(input.db),

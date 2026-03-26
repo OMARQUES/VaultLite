@@ -1,6 +1,8 @@
 const BACKGROUND_COMMAND_TIMEOUT_MS = 7_000;
-const BACKGROUND_COMMAND_RETRY_DELAY_MS = 180;
-const BACKGROUND_COMMAND_MAX_ATTEMPTS = 2;
+const BACKGROUND_COMMAND_MAX_ATTEMPTS = 7;
+const BACKGROUND_COMMAND_RETRY_BUDGET_MS = 4_000;
+const BACKGROUND_COMMAND_RETRY_BASE_DELAY_MS = 120;
+const BACKGROUND_COMMAND_RETRY_MAX_DELAY_MS = 700;
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 function sleep(milliseconds) {
@@ -47,8 +49,62 @@ function isRetriableBackgroundError(error) {
   return (
     message.includes('could not establish connection') ||
     message.includes('receiving end does not exist') ||
+    message.includes('message port closed before a response was received') ||
+    message.includes('extension context invalidated') ||
     message === 'background_timeout'
   );
+}
+
+function classifyBackgroundError(error) {
+  if (!(error instanceof Error)) {
+    return {
+      kind: 'protocol',
+      code: 'background_unavailable',
+      retriable: false,
+      rawMessage: null,
+    };
+  }
+  const message = error.message.toLowerCase();
+  if (message === 'background_timeout') {
+    return {
+      kind: 'transport_transient',
+      code: 'background_timeout',
+      retriable: true,
+      rawMessage: error.message,
+    };
+  }
+  if (isRetriableBackgroundError(error)) {
+    return {
+      kind: 'transport_transient',
+      code: 'background_unavailable',
+      retriable: true,
+      rawMessage: error.message,
+    };
+  }
+  if (message.includes('invalid_extension_response')) {
+    return {
+      kind: 'protocol',
+      code: 'background_protocol_error',
+      retriable: false,
+      rawMessage: error.message,
+    };
+  }
+  return {
+    kind: 'transport_terminal',
+    code: 'background_unavailable',
+    retriable: false,
+    rawMessage: error.message,
+  };
+}
+
+function computeRetryDelayMs(attempt) {
+  const exponent = Math.max(0, attempt - 1);
+  const baseDelay = Math.min(
+    BACKGROUND_COMMAND_RETRY_MAX_DELAY_MS,
+    BACKGROUND_COMMAND_RETRY_BASE_DELAY_MS * 2 ** exponent,
+  );
+  const jitterFactor = 0.75 + Math.random() * 0.5;
+  return Math.max(40, Math.round(baseDelay * jitterFactor));
 }
 
 async function sendMessageOnce(payload) {
@@ -77,8 +133,15 @@ async function sendMessageOnce(payload) {
 }
 
 export async function sendBackgroundCommand(payload) {
+  const startedAt = Date.now();
   let attempt = 0;
   let lastError = null;
+  let lastClassification = {
+    kind: 'transport_terminal',
+    code: 'background_unavailable',
+    retriable: false,
+    rawMessage: null,
+  };
 
   while (attempt < BACKGROUND_COMMAND_MAX_ATTEMPTS) {
     attempt += 1;
@@ -86,24 +149,38 @@ export async function sendBackgroundCommand(payload) {
       return await sendMessageOnce(payload);
     } catch (error) {
       lastError = error;
-      if (attempt >= BACKGROUND_COMMAND_MAX_ATTEMPTS || !isRetriableBackgroundError(error)) {
+      lastClassification = classifyBackgroundError(error);
+      if (attempt >= BACKGROUND_COMMAND_MAX_ATTEMPTS || !lastClassification.retriable) {
         break;
       }
-      await sleep(BACKGROUND_COMMAND_RETRY_DELAY_MS);
+      const elapsedMs = Date.now() - startedAt;
+      const remainingBudgetMs = BACKGROUND_COMMAND_RETRY_BUDGET_MS - elapsedMs;
+      if (remainingBudgetMs <= 0) {
+        break;
+      }
+      const retryDelayMs = computeRetryDelayMs(attempt);
+      await sleep(Math.min(retryDelayMs, remainingBudgetMs));
     }
   }
 
-  const message =
-    lastError instanceof Error && lastError.message === 'background_timeout'
-      ? 'Extension background timed out. Reload the extension and try again.'
-      : lastError instanceof Error
-      ? lastError.message
-      : 'Extension background is unavailable. Reload the extension and try again.';
+  const message = (() => {
+    if (lastClassification.code === 'background_timeout') {
+      return 'Extension background timed out. Reload the extension and try again.';
+    }
+    if (lastClassification.kind === 'transport_transient') {
+      return 'Extension background is waking up. Try again in a moment.';
+    }
+    if (lastError instanceof Error && typeof lastError.message === 'string' && lastError.message.length > 0) {
+      return lastError.message;
+    }
+    return 'Extension background is unavailable. Reload the extension and try again.';
+  })();
   const enriched = new Error(message);
-  enriched.code =
-    lastError instanceof Error && lastError.message === 'background_timeout'
-      ? 'background_timeout'
-      : 'background_unavailable';
+  enriched.code = lastClassification.code;
+  enriched.kind = lastClassification.kind;
+  enriched.retriable = lastClassification.retriable;
+  enriched.rawMessage = lastClassification.rawMessage;
+  enriched.attempts = attempt;
   throw enriched;
 }
 

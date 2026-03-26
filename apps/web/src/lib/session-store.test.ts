@@ -1,10 +1,31 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('./browser-crypto', () => ({
+  LOCAL_UNLOCK_KDF_BASELINE_PROFILE: {
+    algorithm: 'argon2id',
+    memory: 65536,
+    passes: 3,
+    parallelism: 4,
+    tagLength: 32,
+  },
+  calibrateLocalUnlockKdfProfile: vi.fn().mockResolvedValue({
+    algorithm: 'argon2id',
+    memory: 65536,
+    passes: 3,
+    parallelism: 4,
+    tagLength: 32,
+  }),
   createLocalUnlockEnvelope: vi.fn().mockResolvedValue({
     version: 'local-unlock.v1',
     nonce: 'AAAAAAAAAAAAAAAA',
     ciphertext: 'BBBBBBBBBBBBBBBB',
+    kdfProfile: {
+      algorithm: 'argon2id',
+      memory: 65536,
+      passes: 3,
+      parallelism: 4,
+      tagLength: 32,
+    },
   }),
   createOpaqueBundlePlaceholder: vi.fn(({ serverUrl, deviceId }: { serverUrl: string; deviceId: string }) =>
     `opaque:${serverUrl}:${deviceId}`,
@@ -16,6 +37,13 @@ vi.mock('./browser-crypto', () => ({
   }),
   deriveAuthProof: vi.fn().mockResolvedValue('derived_auth_proof'),
   generateAccountKey: vi.fn(() => 'A'.repeat(43)),
+  normalizeLocalUnlockKdfProfile: vi.fn((input) => ({
+    algorithm: 'argon2id',
+    memory: Number.isFinite(input?.memory) ? Math.trunc(Number(input.memory)) : 65536,
+    passes: Number.isFinite(input?.passes) ? Math.trunc(Number(input.passes)) : 3,
+    parallelism: Number.isFinite(input?.parallelism) ? Math.trunc(Number(input.parallelism)) : 4,
+    tagLength: 32,
+  })),
 }));
 
 import { createSessionStore } from './session-store';
@@ -126,6 +154,7 @@ describe('createSessionStore', () => {
     vi.clearAllMocks();
     globalThis.localStorage?.removeItem('vaultlite:auto-lock-after-ms');
     globalThis.localStorage?.removeItem('vaultlite:web-unlock-cache.v1');
+    globalThis.localStorage?.removeItem('vaultlite:web-unlock-cache-legacy-cleaned.v1');
     globalThis.sessionStorage?.removeItem('vaultlite:web-unlock-cache.v1');
   });
 
@@ -139,9 +168,9 @@ describe('createSessionStore', () => {
     expect(store.state.username).toBe('alice');
   });
 
-  test('restores ready state from shared localStorage unlock cache across tabs', async () => {
+  test('restores ready state from per-tab sessionStorage unlock cache', async () => {
     const dependencies = createMockDependencies();
-    globalThis.localStorage?.setItem(
+    globalThis.sessionStorage?.setItem(
       'vaultlite:web-unlock-cache.v1',
       JSON.stringify({
         username: 'alice',
@@ -178,7 +207,7 @@ describe('createSessionStore', () => {
         platform: 'web',
       },
     });
-    globalThis.localStorage?.setItem(
+    globalThis.sessionStorage?.setItem(
       'vaultlite:web-unlock-cache.v1',
       JSON.stringify({
         username: 'alice',
@@ -196,9 +225,9 @@ describe('createSessionStore', () => {
     expect(store.state.lastUnlockedLockRevision).toBe(0);
   });
 
-  test('migrates legacy unlock cache from sessionStorage to localStorage', async () => {
+  test('cleans legacy unlock cache from localStorage on boot', async () => {
     const dependencies = createMockDependencies();
-    globalThis.sessionStorage?.setItem(
+    globalThis.localStorage?.setItem(
       'vaultlite:web-unlock-cache.v1',
       JSON.stringify({
         username: 'alice',
@@ -212,18 +241,13 @@ describe('createSessionStore', () => {
 
     await store.restoreSession();
 
-    expect(store.state.phase).toBe('ready');
-    expect(globalThis.localStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeTruthy();
-    expect(globalThis.sessionStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeNull();
+    expect(store.state.phase).toBe('local_unlock_required');
+    expect(globalThis.localStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeNull();
+    expect(globalThis.localStorage?.getItem('vaultlite:web-unlock-cache-legacy-cleaned.v1')).toBe('1');
   });
 
-  test('restoreSession does not block UI while unlock grant polling is pending', async () => {
+  test('restoreSession resolves quickly in local unlock phase without bridge polling', async () => {
     const dependencies = createMockDependencies();
-    dependencies.authClient.requestUnlockGrant.mockReturnValue(
-      new Promise(() => {
-        // Keep pending to validate restore fallback path is non-blocking.
-      }),
-    );
     const store = createSessionStore(dependencies as never);
 
     const result = await Promise.race([
@@ -235,41 +259,18 @@ describe('createSessionStore', () => {
 
     expect(result).toBe('resolved');
     expect(store.state.phase).toBe('local_unlock_required');
+    expect(dependencies.authClient.requestUnlockGrant).not.toHaveBeenCalled();
   });
 
-  test('restoreSession sends unlock-grant nudge after requesting unlock grant on /unlock', async () => {
+  test('restoreSession does not send bridge nudge on /unlock', async () => {
     const dependencies = createMockDependencies();
-    dependencies.authClient.requestUnlockGrant.mockResolvedValue({
-      ok: true,
-      requestId: 'unlock_req_12345678',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      interval: 1,
-      serverOrigin: 'https://vaultlite.example.com',
-      targetSurface: 'extension',
-    });
-    dependencies.authClient.getUnlockGrantStatus.mockResolvedValue({
-      ok: true,
-      status: 'denied',
-    });
     const postMessageSpy = vi.spyOn(window, 'postMessage');
     window.history.replaceState({}, '', '/unlock');
     const store = createSessionStore(dependencies as never);
 
     await store.restoreSession();
-    await vi.waitFor(() => {
-      expect(postMessageSpy).toHaveBeenCalled();
-    });
-
-    expect(postMessageSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'vaultlite.bridge.request',
-        action: 'unlock-grant.nudge',
-        payload: {
-          requestId: 'unlock_req_12345678',
-        },
-      }),
-      window.location.origin,
-    );
+    expect(postMessageSpy).not.toHaveBeenCalled();
+    expect(dependencies.authClient.requestUnlockGrant).not.toHaveBeenCalled();
   });
 
   test('locks after auto-lock threshold when ready', () => {

@@ -29,9 +29,7 @@ function parseBridgeRequest(value) {
   if (
     value.action !== 'bridge.ping' &&
     value.action !== 'link.poll' &&
-    value.action !== 'popup.open' &&
-    value.action !== 'unlock-grant.nudge' &&
-    value.action !== 'web-bootstrap.request'
+    value.action !== 'popup.open'
   ) {
     return null;
   }
@@ -56,38 +54,6 @@ function parseBridgeRequest(value) {
     return {
       requestId: value.requestId,
       action: 'popup.open',
-    };
-  }
-  if (value.action === 'unlock-grant.nudge') {
-    const payload = value.payload;
-    if (!isRecord(payload) || !isSafeRequestId(payload.requestId)) {
-      return null;
-    }
-    return {
-      requestId: value.requestId,
-      action: 'unlock-grant.nudge',
-      unlockGrantRequestId: payload.requestId,
-    };
-  }
-  if (value.action === 'web-bootstrap.request') {
-    const payload = value.payload;
-    if (
-      !isRecord(payload) ||
-      typeof payload.requestPublicKey !== 'string' ||
-      payload.requestPublicKey.length < 40 ||
-      typeof payload.clientNonce !== 'string' ||
-      payload.clientNonce.length < 16 ||
-      typeof payload.webChallenge !== 'string' ||
-      payload.webChallenge.length < 16
-    ) {
-      return null;
-    }
-    return {
-      requestId: value.requestId,
-      action: 'web-bootstrap.request',
-      requestPublicKey: payload.requestPublicKey,
-      clientNonce: payload.clientNonce,
-      webChallenge: payload.webChallenge,
     };
   }
   return null;
@@ -131,21 +97,9 @@ if (!globalThis[BRIDGE_READY_FLAG]) {
               type: 'vaultlite.bridge_poll_link_pairing',
               requestId: parsed.linkRequestId,
             }
-        : parsed.action === 'popup.open'
-            ? {
-              type: 'vaultlite.bridge_open_popup',
-            }
-            : parsed.action === 'unlock-grant.nudge'
-              ? {
-              type: 'vaultlite.bridge_nudge_unlock_grant',
-              requestId: parsed.unlockGrantRequestId,
-              }
-              : {
-                type: 'vaultlite.bridge_request_web_bootstrap_grant',
-                requestPublicKey: parsed.requestPublicKey,
-                clientNonce: parsed.clientNonce,
-                webChallenge: parsed.webChallenge,
-              };
+        : {
+            type: 'vaultlite.bridge_open_popup',
+          };
     void chrome.runtime
       .sendMessage(command)
       .then((response) => {

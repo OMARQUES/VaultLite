@@ -193,6 +193,14 @@ export interface ManualSiteIconOverrideRecord {
   updatedAt: string;
 }
 
+export interface PasswordGeneratorHistoryRecord {
+  userId: string;
+  entryId: string;
+  encryptedPayload: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AuthRateLimitRecord {
   key: string;
   attemptCount: number;
@@ -473,6 +481,12 @@ export interface ManualSiteIconOverrideRepository {
   remove(userId: string, domain: string): Promise<boolean>;
 }
 
+export interface PasswordGeneratorHistoryRepository {
+  listByUserId(userId: string, limit: number): Promise<PasswordGeneratorHistoryRecord[]>;
+  upsert(record: PasswordGeneratorHistoryRecord): Promise<PasswordGeneratorHistoryRecord>;
+  pruneByUserId(userId: string, limit: number): Promise<void>;
+}
+
 export interface AttachmentBlobRepository {
   put(record: AttachmentBlobRecord): Promise<AttachmentBlobRecord>;
   get(key: string): Promise<AttachmentBlobRecord | null>;
@@ -606,6 +620,7 @@ export interface VaultLiteStorage {
   extensionSessionRecoverSecrets: ExtensionSessionRecoverSecretRepository;
   siteIconCache: SiteIconCacheRepository;
   manualSiteIconOverrides: ManualSiteIconOverrideRepository;
+  passwordGeneratorHistory: PasswordGeneratorHistoryRepository;
   authRateLimits: AuthRateLimitRepository;
   idempotency: IdempotencyRepository;
   auditEvents: AuditEventRepository;
@@ -637,6 +652,7 @@ export function createInMemoryVaultLiteStorage(input: {
   const extensionSessionRecoverSecrets = new Map<string, ExtensionSessionRecoverSecretRecord>();
   const siteIconCache = new Map<string, SiteIconCacheRecord>();
   const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
+  const passwordGeneratorHistory = new Map<string, PasswordGeneratorHistoryRecord>();
   const rateLimits = new Map<string, AuthRateLimitRecord>();
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
@@ -1344,6 +1360,46 @@ export function createInMemoryVaultLiteStorage(input: {
       async remove(userId, domain) {
         const key = `${userId}:${domain.trim().toLowerCase()}`;
         return manualSiteIconOverrides.delete(key);
+      },
+    },
+    passwordGeneratorHistory: {
+      async listByUserId(userId, limit) {
+        const normalizedLimit = Number.isFinite(limit)
+          ? Math.max(1, Math.min(500, Math.trunc(limit)))
+          : 200;
+        return Array.from(passwordGeneratorHistory.values())
+          .filter((record) => record.userId === userId)
+          .sort((left, right) => {
+            const updatedCompare = right.updatedAt.localeCompare(left.updatedAt);
+            if (updatedCompare !== 0) return updatedCompare;
+            return right.entryId.localeCompare(left.entryId);
+          })
+          .slice(0, normalizedLimit)
+          .map((record) => ({ ...record }));
+      },
+      async upsert(record) {
+        const normalized: PasswordGeneratorHistoryRecord = {
+          ...record,
+          entryId: record.entryId.trim(),
+        };
+        const key = `${normalized.userId}:${normalized.entryId}`;
+        passwordGeneratorHistory.set(key, normalized);
+        return { ...normalized };
+      },
+      async pruneByUserId(userId, limit) {
+        const normalizedLimit = Number.isFinite(limit)
+          ? Math.max(1, Math.min(500, Math.trunc(limit)))
+          : 200;
+        const userRecords = Array.from(passwordGeneratorHistory.values())
+          .filter((record) => record.userId === userId)
+          .sort((left, right) => {
+            const updatedCompare = right.updatedAt.localeCompare(left.updatedAt);
+            if (updatedCompare !== 0) return updatedCompare;
+            return right.entryId.localeCompare(left.entryId);
+          });
+        userRecords.slice(normalizedLimit).forEach((record) => {
+          passwordGeneratorHistory.delete(`${record.userId}:${record.entryId}`);
+        });
       },
     },
     authRateLimits: {

@@ -23,6 +23,7 @@ import SecondaryButton from '../components/ui/SecondaryButton.vue';
 import TextField from '../components/ui/TextField.vue';
 import TextareaField from '../components/ui/TextareaField.vue';
 import ToastMessage from '../components/ui/ToastMessage.vue';
+import PasswordGeneratorPopover from '../components/vault/PasswordGeneratorPopover.vue';
 import { useSessionStore } from '../composables/useSessionStore';
 import {
   loadVaultUiState,
@@ -96,6 +97,7 @@ const workspace = createVaultWorkspace({
 
 const searchInputRef = ref<InstanceType<typeof SearchField> | null>(null);
 const detailIconFileInput = ref<HTMLInputElement | null>(null);
+const loginPasswordFieldWrapRef = ref<HTMLElement | null>(null);
 const searchQuery = ref('');
 const errorMessage = ref<string | null>(null);
 const toastMessage = ref('');
@@ -124,6 +126,9 @@ const canonicalSiteIconsByHost = ref<
 >({});
 const iconDiscoveryCooldownByHost = ref<Record<string, number>>({});
 const detailIconUploadBusy = ref(false);
+const toolbarPasswordGeneratorOpen = ref(false);
+const loginPasswordGeneratorOpen = ref(false);
+const loginPasswordFieldFocused = ref(false);
 let iconHydrationNonce = 0;
 let manualIconRemoteRefreshInFlight: Promise<void> | null = null;
 let lastManualIconRemoteRefreshAt = 0;
@@ -582,6 +587,69 @@ const editorHeaderMonogram = computed(() => {
   return monogramFromText(editorTitle.value || detailTitle.value, '•');
 });
 const canOpenAdminFromVault = computed(() => sessionStore.state.role === 'owner');
+const passwordGeneratorContextUrl = computed(() => {
+  if (isCreateLogin.value) {
+    return loginDraft.urls[0] ?? '';
+  }
+  if (selectedItemInContext.value?.itemType === 'login') {
+    return selectedItemInContext.value.payload.urls[0] ?? '';
+  }
+  if (typeof window !== 'undefined') {
+    return window.location.href;
+  }
+  return '';
+});
+const isLoginEditorMode = computed(
+  () => isCreateLogin.value || (isEditing.value && selectedItem.value?.itemType === 'login'),
+);
+const showLoginPasswordGeneratorTrigger = computed(
+  () => isLoginEditorMode.value && loginPasswordFieldFocused.value && !loginPasswordGeneratorOpen.value,
+);
+const showLoginPasswordGeneratorPanel = computed(
+  () => isLoginEditorMode.value && loginPasswordGeneratorOpen.value,
+);
+
+function toggleToolbarPasswordGenerator() {
+  toolbarPasswordGeneratorOpen.value = !toolbarPasswordGeneratorOpen.value;
+  if (toolbarPasswordGeneratorOpen.value) {
+    loginPasswordGeneratorOpen.value = false;
+  }
+}
+
+function closeToolbarPasswordGenerator() {
+  toolbarPasswordGeneratorOpen.value = false;
+}
+
+function openLoginPasswordGenerator() {
+  loginPasswordGeneratorOpen.value = true;
+  toolbarPasswordGeneratorOpen.value = false;
+}
+
+function closeLoginPasswordGenerator() {
+  loginPasswordGeneratorOpen.value = false;
+}
+
+function onFillGeneratedPassword(password: string) {
+  loginDraft.password = password;
+  setDirty();
+  closeLoginPasswordGenerator();
+}
+
+function onLoginPasswordFieldFocusIn() {
+  if (!isLoginEditorMode.value) {
+    return;
+  }
+  loginPasswordFieldFocused.value = true;
+}
+
+function onLoginPasswordFieldFocusOut() {
+  window.setTimeout(() => {
+    const activeElement = document.activeElement;
+    loginPasswordFieldFocused.value = Boolean(
+      loginPasswordFieldWrapRef.value && activeElement && loginPasswordFieldWrapRef.value.contains(activeElement),
+    );
+  }, 0);
+}
 
 function attachmentStatusLabel(state: AttachmentUploadState): string {
   if (state === 'pending') {
@@ -1223,6 +1291,9 @@ watch(
   () => route.path,
   () => {
     closeMobileSheets();
+    closeToolbarPasswordGenerator();
+    closeLoginPasswordGenerator();
+    loginPasswordFieldFocused.value = false;
   },
 );
 
@@ -2167,7 +2238,7 @@ async function loadVault() {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   unsubscribeUiState = onVaultUiStateUpdated((detail) => {
     if (detail.username === (sessionStore.state.username ?? null)) {
       refreshUiState();
@@ -2186,8 +2257,8 @@ onMounted(async () => {
   window.addEventListener('focus', handleManualIconRefreshOnFocus);
   document.addEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   refreshManualSiteIcons();
-  await refreshManualSiteIconsFromServer({ force: true });
-  await loadVault();
+  void refreshManualSiteIconsFromServer({ force: true });
+  void loadVault();
   workspace.startSync();
 });
 
@@ -2232,6 +2303,15 @@ onBeforeUnmount(() => {
             <AppIcon name="plus" :size="17" />
           </IconButton>
           <IconButton
+            data-testid="vault-mobile-password-generator-button"
+            type="button"
+            label="Password generator"
+            @pointerdown.stop
+            @click.stop="toggleToolbarPasswordGenerator"
+          >
+            <AppIcon name="login" :size="17" />
+          </IconButton>
+          <IconButton
             data-testid="vault-mobile-account-button"
             type="button"
             label="Account and session"
@@ -2251,14 +2331,34 @@ onBeforeUnmount(() => {
           placeholder="Search vault"
           @update:model-value="setSearchQuery"
         />
-        <DropdownMenu
-          v-if="!isMobileViewport"
-          label="New"
-          icon-only
-          :items="createOptions"
-          @select="onDropdownSelect"
-        />
+        <div v-if="!isMobileViewport" class="vault-list-toolbar__actions">
+          <div class="vault-password-generator-toolbar">
+            <IconButton
+              type="button"
+              label="Password generator"
+              @pointerdown.stop
+              @click.stop="toggleToolbarPasswordGenerator"
+            >
+              <AppIcon name="login" :size="17" />
+            </IconButton>
+          </div>
+          <DropdownMenu
+            label="New"
+            icon-only
+            :items="createOptions"
+            @select="onDropdownSelect"
+          />
+        </div>
       </div>
+      <PasswordGeneratorPopover
+        v-if="toolbarPasswordGeneratorOpen"
+        :class="[
+          'vault-password-generator-toolbar__panel',
+          { 'vault-password-generator-toolbar__panel--mobile': isMobileViewport },
+        ]"
+        :context-url="passwordGeneratorContextUrl"
+        @close="closeToolbarPasswordGenerator"
+      />
 
       <div
         v-if="activeFiltersSummary.length > 0"
@@ -2509,14 +2609,39 @@ onBeforeUnmount(() => {
                   required
                   @update:model-value="setDirty"
                 />
-                <SecretField
-                  v-model="loginDraft.password"
-                  label="Password"
-                  autocomplete="current-password"
-                  required
-                  :mask-key="maskKey"
-                  @update:model-value="setDirty"
-                />
+                <div
+                  ref="loginPasswordFieldWrapRef"
+                  class="vault-password-generator-field"
+                  @focusin="onLoginPasswordFieldFocusIn"
+                  @focusout="onLoginPasswordFieldFocusOut"
+                >
+                  <SecretField
+                    v-model="loginDraft.password"
+                    label="Password"
+                    autocomplete="current-password"
+                    required
+                    :mask-key="maskKey"
+                    @update:model-value="setDirty"
+                  />
+                  <button
+                    v-if="showLoginPasswordGeneratorTrigger"
+                    type="button"
+                    class="vault-password-generator-field__trigger"
+                    @pointerdown.stop
+                    @click.stop="openLoginPasswordGenerator"
+                  >
+                    <AppIcon name="login" :size="16" />
+                    <span>Criar nova senha</span>
+                  </button>
+                  <PasswordGeneratorPopover
+                    v-if="showLoginPasswordGeneratorPanel"
+                    class="vault-password-generator-field__panel"
+                    :context-url="loginDraft.urls[0] || passwordGeneratorContextUrl"
+                    :show-fill="true"
+                    @fill="onFillGeneratedPassword"
+                    @close="closeLoginPasswordGenerator"
+                  />
+                </div>
                 <TextField
                   :model-value="loginDraft.urls[0] ?? ''"
                   label="URL"

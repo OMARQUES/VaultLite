@@ -34,6 +34,9 @@ import type {
   OnboardingAccountKitSignInput,
   PasswordRotationCompleteOutput,
   PasswordRotationInput,
+  PasswordGeneratorHistoryActionOutput,
+  PasswordGeneratorHistoryListOutput,
+  PasswordGeneratorHistoryUpsertInput,
   RecentReauthInput,
   RecentReauthOutput,
   RemoteAuthenticationChallengeOutput,
@@ -150,6 +153,10 @@ export interface VaultLiteAuthClient {
   listManualSiteIcons(): Promise<SiteIconManualListOutput>;
   upsertManualSiteIcon(input: SiteIconManualUpsertInput): Promise<SiteIconManualActionOutput>;
   removeManualSiteIcon(input: SiteIconManualRemoveInput): Promise<SiteIconManualActionOutput>;
+  listPasswordGeneratorHistory(): Promise<PasswordGeneratorHistoryListOutput>;
+  upsertPasswordGeneratorHistoryEntry(
+    input: PasswordGeneratorHistoryUpsertInput,
+  ): Promise<PasswordGeneratorHistoryActionOutput>;
 }
 
 async function requestJson<T>(
@@ -595,6 +602,23 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
     removeManualSiteIcon(input) {
       return requestJson<SiteIconManualActionOutput>(
         `${baseUrl}/api/icons/manual/remove`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listPasswordGeneratorHistory() {
+      return requestJson<PasswordGeneratorHistoryListOutput>(
+        `${baseUrl}/api/password-generator/history`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    upsertPasswordGeneratorHistoryEntry(input) {
+      return requestJson<PasswordGeneratorHistoryActionOutput>(
+        `${baseUrl}/api/password-generator/history/upsert`,
         {
           method: 'POST',
           body: JSON.stringify(input),

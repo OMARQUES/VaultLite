@@ -146,7 +146,7 @@ describe('App shell', () => {
     await flushPromises();
 
     expect(router.currentRoute.value.path).toBe('/unlock');
-    expect(wrapper.text()).toContain('Unlock this device');
+    expect(wrapper.text()).toContain('VaultLite');
   });
 
   test('preserves /admin target through unlock and reaches admin after local unlock', async () => {

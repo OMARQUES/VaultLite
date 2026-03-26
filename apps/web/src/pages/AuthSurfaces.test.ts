@@ -258,18 +258,15 @@ describe('auth surfaces', () => {
 
     await flushPromises();
 
-    expect(wrapper.text()).toContain('Unlock this device');
-    expect(wrapper.text()).toContain('Enter your master password to unlock this trusted device.');
+    expect(wrapper.text()).toContain('VaultLite');
     expect(wrapper.text()).toContain('alice');
-    expect(wrapper.text()).toContain('Device');
-    expect(wrapper.text()).toContain('Primary Browser');
     expect(wrapper.findAll('input')).toHaveLength(1);
     expect((wrapper.get('input').element as HTMLInputElement).type).toBe('password');
     expect(document.activeElement).toBe(wrapper.get('input').element);
     expect(push).not.toHaveBeenCalled();
   });
 
-  test('unlock surfaces suspended-account message from route reason', async () => {
+  test('unlock renders normally even when suspended-account reason is present in route', async () => {
     routeState.path = '/unlock';
     routeState.query = {
       reason: 'account_suspended',
@@ -286,6 +283,8 @@ describe('auth surfaces', () => {
 
     await flushPromises();
 
-    expect(wrapper.text()).toContain('Your account is suspended. Ask the owner to reactivate access.');
+    expect(wrapper.text()).toContain('VaultLite');
+    expect(wrapper.text()).toContain('alice');
+    expect(wrapper.text()).not.toContain('Your account is suspended. Ask the owner to reactivate access.');
   });
 });

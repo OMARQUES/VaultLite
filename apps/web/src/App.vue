@@ -198,12 +198,14 @@ async function handleUnauthorizedEvent(event: Event) {
 }
 
 let autoLockInterval: number | undefined;
-let sessionSyncInterval: number | undefined;
-
 function handleVisibilityChange() {
   if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
     void refreshSessionBestEffort();
   }
+}
+
+function handleWindowFocus() {
+  void refreshSessionBestEffort();
 }
 
 onMounted(() => {
@@ -224,14 +226,12 @@ onMounted(() => {
   })();
   window.addEventListener('pointerdown', handleActivity);
   window.addEventListener('keydown', handleActivity);
+  window.addEventListener('focus', handleWindowFocus);
   document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
   autoLockInterval = window.setInterval(() => {
     sessionStore.enforceAutoLock();
   }, 15000);
-  sessionSyncInterval = window.setInterval(() => {
-    void refreshSessionBestEffort();
-  }, 8000);
 });
 
 watch(
@@ -255,11 +255,9 @@ onUnmounted(() => {
   if (autoLockInterval !== undefined) {
     window.clearInterval(autoLockInterval);
   }
-  if (sessionSyncInterval !== undefined) {
-    window.clearInterval(sessionSyncInterval);
-  }
   window.removeEventListener('pointerdown', handleActivity);
   window.removeEventListener('keydown', handleActivity);
+  window.removeEventListener('focus', handleWindowFocus);
   document.removeEventListener('visibilitychange', handleVisibilityChange);
   window.removeEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
 });
@@ -267,7 +265,19 @@ onUnmounted(() => {
 
 <template>
   <main
-    v-if="isAuthenticatedRoute && !isAuthenticatedShell"
+    v-if="!sessionRestoreResolved"
+    data-testid="auth-gate"
+    class="public-shell"
+  >
+    <div class="public-shell__content">
+      <section class="panel-card panel-card--compact panel-card--narrow">
+        <p class="module-empty-hint">Checking your session…</p>
+      </section>
+    </div>
+  </main>
+
+  <main
+    v-else-if="isAuthenticatedRoute && !isAuthenticatedShell"
     data-testid="auth-gate"
     class="public-shell"
   >

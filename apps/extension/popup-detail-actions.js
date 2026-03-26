@@ -27,13 +27,22 @@ function toNavigableUrl(rawUrl) {
   }
 }
 
-export function buildDetailViewModel(item) {
+const MASKED_PASSWORD = '••••••••••••';
+const MASKED_CVV = '•••';
+const MASKED_EXPIRY = '••/••';
+
+export function buildDetailViewModel(item, options = {}) {
   const itemType = item?.itemType ?? 'item';
   const title = item?.title || 'Untitled item';
   const subtitle = item?.subtitle || '—';
   const firstUrl = item?.firstUrl || '';
   const urlValue = firstUrl || item?.urlHostSummary || 'No URL';
   const navigableUrl = toNavigableUrl(firstUrl);
+  const passwordVisible = options?.passwordVisible === true;
+  const passwordValue =
+    passwordVisible && typeof options?.passwordValue === 'string' && options.passwordValue.length > 0
+      ? options.passwordValue
+      : MASKED_PASSWORD;
 
   if (itemType === 'login') {
     return {
@@ -52,10 +61,16 @@ export function buildDetailViewModel(item) {
         },
         {
           label: 'Password',
-          value: '••••••••••••',
+          value: passwordValue,
           password: true,
-          defaultAction: 'copy_password',
-          actions: [{ id: 'copy_password', label: 'Copy password' }],
+          defaultAction: 'toggle_password_visibility',
+          actions: [
+            {
+              id: 'toggle_password_visibility',
+              label: passwordVisible ? 'Hide password' : 'Show password',
+            },
+            { id: 'copy_password', label: 'Copy password' },
+          ],
         },
         {
           label: 'URL',
@@ -87,14 +102,14 @@ export function buildDetailViewModel(item) {
         },
         {
           label: 'Security code',
-          value: '•••',
+          value: MASKED_CVV,
           password: true,
           defaultAction: 'copy_card_cvv',
           actions: [{ id: 'copy_card_cvv', label: 'Copy security code' }],
         },
         {
           label: 'Expiry',
-          value: '••/••',
+          value: MASKED_EXPIRY,
           defaultAction: 'copy_card_expiry',
           actions: [{ id: 'copy_card_expiry', label: 'Copy expiry' }],
         },

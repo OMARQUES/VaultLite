@@ -115,6 +115,7 @@ export function toggleSelectedItem(previousItemId, nextItemId) {
 export function resolvePopupPhase(state) {
   const knownPhase = state?.phase;
   if (
+    knownPhase === 'reconnecting_background' ||
     knownPhase === 'pairing_required' ||
     knownPhase === 'remote_authentication_required' ||
     knownPhase === 'local_unlock_required' ||
@@ -205,6 +206,7 @@ export function parsePersistedPopupUiState(rawState) {
   const searchQueryRaw = source.searchQuery;
   const typeFilterRaw = source.typeFilter;
   const suggestedOnlyRaw = source.suggestedOnly;
+  const sortModeRaw = source.sortMode;
   const validTypeFilter =
     typeFilterRaw === 'login' || typeFilterRaw === 'card' || typeFilterRaw === 'document' || typeFilterRaw === 'secure_note'
       ? typeFilterRaw
@@ -218,6 +220,10 @@ export function parsePersistedPopupUiState(rawState) {
     searchQuery: typeof searchQueryRaw === 'string' ? searchQueryRaw.slice(0, 256) : '',
     typeFilter: validTypeFilter,
     suggestedOnly: suggestedOnlyRaw === true,
+    sortMode:
+      sortModeRaw === 'title_asc' || sortModeRaw === 'title_desc'
+        ? sortModeRaw
+        : 'default',
   };
 }
 

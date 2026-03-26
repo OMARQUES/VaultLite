@@ -874,6 +874,16 @@ export const LocalUnlockEnvelopeSchema = z
     version: z.literal('local-unlock.v1'),
     nonce: base64UrlSchema,
     ciphertext: base64UrlSchema,
+    kdfProfile: z
+      .object({
+        algorithm: z.literal('argon2id'),
+        memory: z.number().int().positive(),
+        passes: z.number().int().positive(),
+        parallelism: z.number().int().positive(),
+        tagLength: z.literal(32),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -1108,6 +1118,45 @@ export const SiteIconManualActionOutputSchema = z
   })
   .strict();
 
+export const PasswordGeneratorHistoryEntryIdSchema = z
+  .string()
+  .trim()
+  .min(12)
+  .max(96)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
+export const PasswordGeneratorHistoryRecordSchema = z
+  .object({
+    entryId: PasswordGeneratorHistoryEntryIdSchema,
+    encryptedPayload: encryptedPayloadSchema,
+    createdAt: isoDatetimeSchema,
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const PasswordGeneratorHistoryListOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    entries: z.array(PasswordGeneratorHistoryRecordSchema),
+  })
+  .strict();
+
+export const PasswordGeneratorHistoryUpsertInputSchema = z
+  .object({
+    entryId: PasswordGeneratorHistoryEntryIdSchema,
+    encryptedPayload: encryptedPayloadSchema,
+    createdAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const PasswordGeneratorHistoryActionOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    reasonCode: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const AccountKitSignatureInputSchema = z
   .object({
     payload: z.object({
@@ -1262,6 +1311,10 @@ export type SiteIconManualUpsertInput = z.infer<typeof SiteIconManualUpsertInput
 export type SiteIconManualListOutput = z.infer<typeof SiteIconManualListOutputSchema>;
 export type SiteIconManualRemoveInput = z.infer<typeof SiteIconManualRemoveInputSchema>;
 export type SiteIconManualActionOutput = z.infer<typeof SiteIconManualActionOutputSchema>;
+export type PasswordGeneratorHistoryRecord = z.infer<typeof PasswordGeneratorHistoryRecordSchema>;
+export type PasswordGeneratorHistoryListOutput = z.infer<typeof PasswordGeneratorHistoryListOutputSchema>;
+export type PasswordGeneratorHistoryUpsertInput = z.infer<typeof PasswordGeneratorHistoryUpsertInputSchema>;
+export type PasswordGeneratorHistoryActionOutput = z.infer<typeof PasswordGeneratorHistoryActionOutputSchema>;
 export type GenericAuthFailure = z.infer<typeof GenericAuthFailureSchema>;
 export type AccountKitSignatureInput = z.infer<typeof AccountKitSignatureInputSchema>;
 export type AccountKitSignatureOutput = z.infer<typeof AccountKitSignatureOutputSchema>;

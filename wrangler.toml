@@ -21,3 +21,21 @@ bucket_name = "vaultlite-local-blobs"
 [dev]
 ip = "127.0.0.1"
 port = 8787
+
+
+[env.production]
+name = "vaultlite-api-prod"
+
+[env.production.vars]
+VAULTLITE_RUNTIME_MODE = "production"
+VAULTLITE_SERVER_URL = "https://vaultlite-web.pages.dev"
+VAULTLITE_DEPLOYMENT_FINGERPRINT = "vaultlite_prod_001"
+
+[[env.production.d1_databases]]
+binding = "VAULTLITE_DB"
+database_name = "vaultlite-prod-db"
+database_id = "7868f682-0288-4766-8acf-d780cf03a3ad"
+
+[[env.production.r2_buckets]]
+binding = "VAULTLITE_BLOBS"
+bucket_name = "vaultlite-prod-blobs"

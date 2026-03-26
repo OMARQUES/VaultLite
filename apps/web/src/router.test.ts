@@ -124,4 +124,33 @@ describe('resolveNavigationTarget', () => {
       }),
     ).toBe('/bootstrap/checkpoint');
   });
+
+  test('locks bootstrap routes after initialization', () => {
+    expect(
+      resolveTarget({
+        phase: 'ready',
+        targetPath: '/bootstrap',
+        bootstrapState: 'INITIALIZED',
+        role: 'owner',
+      }),
+    ).toBe('/auth');
+
+    expect(
+      resolveTarget({
+        phase: 'local_unlock_required',
+        targetPath: '/bootstrap/checkpoint',
+        bootstrapState: 'INITIALIZED',
+        role: 'user',
+      }),
+    ).toBe('/auth');
+
+    expect(
+      resolveTarget({
+        phase: 'remote_authentication_required',
+        targetPath: '/bootstrap/success',
+        bootstrapState: 'INITIALIZED',
+        role: null,
+      }),
+    ).toBe('/auth');
+  });
 });

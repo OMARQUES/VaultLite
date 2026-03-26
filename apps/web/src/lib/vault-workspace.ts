@@ -2,6 +2,13 @@ import { computed, reactive, readonly, ref } from 'vue';
 
 import { decryptVaultItemPayload, encryptVaultItemPayload } from './browser-crypto';
 import { toHumanErrorMessage } from './human-error';
+import {
+  clearLocalVaultCache,
+  loadLocalVaultCache,
+  saveLocalVaultCache,
+  type CacheWarmState,
+  type LocalVaultCachePayloadV1,
+} from './local-vault-cache';
 import type { SessionStore } from './session-store';
 import type { VaultLiteVaultClient } from './vault-client';
 import { buildVaultSearchIndex, queryVaultSearchIndex } from './vault-search';
@@ -78,6 +85,7 @@ export interface VaultWorkspaceTombstone {
 export interface VaultWorkspaceState {
   isLoading: boolean;
   lastError: string | null;
+  cacheWarmState: CacheWarmState;
   items: VaultWorkspaceItem[];
   tombstones: VaultWorkspaceTombstone[];
 }
@@ -104,6 +112,9 @@ const SYNC_PAGE_SIZE = 25;
 const SYNC_INTERVAL_MS = 30_000;
 const SYNC_INTERVAL_JITTER_RATIO = 0.2;
 const SYNC_ERROR_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 60_000] as const;
+const SNAPSHOT_DECRYPT_CHUNK_SIZE = 20;
+const SNAPSHOT_DECRYPT_MAX_CONCURRENCY = 4;
+const ENABLE_DECRYPT_CHUNKING_V1 = true;
 
 function normalizeCustomFields(fields: unknown): VaultCustomField[] {
   if (!Array.isArray(fields)) {
@@ -222,6 +233,27 @@ async function decryptRecord(
   } as VaultWorkspaceItem;
 }
 
+function compareWorkspaceItemsDeterministically(
+  left: VaultWorkspaceItem,
+  right: VaultWorkspaceItem,
+): number {
+  const revisionDelta = right.revision - left.revision;
+  if (revisionDelta !== 0) {
+    return revisionDelta;
+  }
+  return left.itemId.localeCompare(right.itemId);
+}
+
+function yieldCooperative(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => resolve(), { timeout: 16 });
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
+}
+
 export function createVaultWorkspace(input: {
   sessionStore: SessionStore;
   vaultClient: VaultLiteVaultClient;
@@ -230,6 +262,7 @@ export function createVaultWorkspace(input: {
   const state = reactive<VaultWorkspaceState>({
     isLoading: false,
     lastError: null,
+    cacheWarmState: 'idle',
     items: [],
     tombstones: [],
   });
@@ -243,6 +276,7 @@ export function createVaultWorkspace(input: {
   let syncStarted = false;
   let syncTimer: ReturnType<typeof setTimeout> | null = null;
   let syncBackoffIndex = 0;
+  let cachedDeploymentFingerprint: string | null = null;
 
   const onWindowFocus = () => {
     void triggerSync('focus').catch(() => undefined);
@@ -300,7 +334,7 @@ export function createVaultWorkspace(input: {
       revision: number;
       deletedAt: string;
     };
-  }>) {
+  }>, metadata?: { snapshotToken: string | null; etag: string | null }) {
     const { accountKey } = input.sessionStore.getUnlockedVaultContext();
     const itemEntries = entries
       .filter((entry): entry is { entryType: 'item'; item: NonNullable<typeof entry.item> } =>
@@ -316,9 +350,191 @@ export function createVaultWorkspace(input: {
       )
       .map((entry) => entry.tombstone)
       .sort((left, right) => right.deletedAt.localeCompare(left.deletedAt));
-    state.items = await Promise.all(itemEntries.map((item) => decryptRecord(accountKey, item)));
+    const decryptedItems: VaultWorkspaceItem[] = [];
+    state.items = [];
+    if (!ENABLE_DECRYPT_CHUNKING_V1) {
+      const allItems = await Promise.all(itemEntries.map((item) => decryptRecord(accountKey, item)));
+      state.items = [...allItems].sort(compareWorkspaceItemsDeterministically);
+      state.tombstones = tombstoneEntries.map((entry) => ({ ...entry }));
+      rebuildIndex();
+      await persistLocalCacheFromStateBestEffort({
+        snapshotToken: metadata?.snapshotToken ?? null,
+        etag: metadata?.etag ?? null,
+      });
+      return;
+    }
+    for (let offset = 0; offset < itemEntries.length; offset += SNAPSHOT_DECRYPT_CHUNK_SIZE) {
+      const chunk = itemEntries.slice(offset, offset + SNAPSHOT_DECRYPT_CHUNK_SIZE);
+      for (let index = 0; index < chunk.length; index += SNAPSHOT_DECRYPT_MAX_CONCURRENCY) {
+        const lane = chunk.slice(index, index + SNAPSHOT_DECRYPT_MAX_CONCURRENCY);
+        const laneItems = await Promise.all(lane.map((item) => decryptRecord(accountKey, item)));
+        decryptedItems.push(...laneItems);
+      }
+      state.items = [...decryptedItems].sort(compareWorkspaceItemsDeterministically);
+      rebuildIndex();
+      await yieldCooperative();
+    }
     state.tombstones = tombstoneEntries.map((entry) => ({ ...entry }));
     rebuildIndex();
+    await persistLocalCacheFromStateBestEffort({
+      snapshotToken: metadata?.snapshotToken ?? null,
+      etag: metadata?.etag ?? null,
+    });
+  }
+
+  function normalizeCachedItem(value: unknown): VaultWorkspaceItem | null {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    const candidate = value as Partial<VaultWorkspaceItem> & { itemType?: unknown; payload?: unknown };
+    if (
+      typeof candidate.itemId !== 'string' ||
+      (candidate.itemType !== 'login' &&
+        candidate.itemType !== 'document' &&
+        candidate.itemType !== 'card' &&
+        candidate.itemType !== 'secure_note') ||
+      !Number.isFinite(candidate.revision) ||
+      typeof candidate.createdAt !== 'string' ||
+      typeof candidate.updatedAt !== 'string'
+    ) {
+      return null;
+    }
+    const itemType = candidate.itemType as VaultItemType;
+    return {
+      itemId: candidate.itemId,
+      itemType,
+      revision: Math.trunc(candidate.revision as number),
+      createdAt: candidate.createdAt,
+      updatedAt: candidate.updatedAt,
+      payload: normalizePayloadByType(itemType, candidate.payload),
+    } as VaultWorkspaceItem;
+  }
+
+  function normalizeCachedTombstone(value: unknown): VaultWorkspaceTombstone | null {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    const candidate = value as Partial<VaultWorkspaceTombstone>;
+    if (
+      typeof candidate.itemId !== 'string' ||
+      (candidate.itemType !== 'login' &&
+        candidate.itemType !== 'document' &&
+        candidate.itemType !== 'card' &&
+        candidate.itemType !== 'secure_note') ||
+      !Number.isFinite(candidate.revision) ||
+      typeof candidate.deletedAt !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      itemId: candidate.itemId,
+      itemType: candidate.itemType as VaultItemType,
+      revision: Math.trunc(Number(candidate.revision)),
+      deletedAt: candidate.deletedAt,
+    };
+  }
+
+  async function resolveCacheIdentity() {
+    const { username, accountKey } = input.sessionStore.getUnlockedVaultContext();
+    const userId = input.sessionStore.state.userId ?? username;
+    const deviceId = input.sessionStore.state.deviceId ?? 'web-device';
+    if (!cachedDeploymentFingerprint) {
+      try {
+        const runtimeMetadata = await input.sessionStore.getRuntimeMetadata();
+        cachedDeploymentFingerprint = runtimeMetadata.deploymentFingerprint?.trim() || null;
+      } catch {
+        cachedDeploymentFingerprint = null;
+      }
+    }
+    return {
+      userId,
+      deviceId,
+      deploymentFingerprint: cachedDeploymentFingerprint ?? 'unknown',
+      accountKey,
+    };
+  }
+
+  async function loadLocalCacheBestEffort(): Promise<boolean> {
+    try {
+      const identity = await resolveCacheIdentity();
+      const cached = await loadLocalVaultCache({
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        deploymentFingerprint: identity.deploymentFingerprint,
+        accountKey: identity.accountKey,
+      });
+      if (!cached) {
+        return false;
+      }
+      const nextItems = (Array.isArray(cached.payload.items) ? cached.payload.items : [])
+        .map((entry) => normalizeCachedItem(entry))
+        .filter((entry): entry is VaultWorkspaceItem => Boolean(entry))
+        .sort(compareWorkspaceItemsDeterministically);
+      const nextTombstones = (Array.isArray(cached.payload.tombstones) ? cached.payload.tombstones : [])
+        .map((entry) => normalizeCachedTombstone(entry))
+        .filter((entry): entry is VaultWorkspaceTombstone => Boolean(entry))
+        .sort((left, right) => right.deletedAt.localeCompare(left.deletedAt));
+      state.items = nextItems;
+      state.tombstones = nextTombstones;
+      rebuildIndex();
+      lastSnapshotEtag = cached.record.etag ?? null;
+      return true;
+    } catch {
+      try {
+        const identity = await resolveCacheIdentity();
+        await clearLocalVaultCache({
+          userId: identity.userId,
+          deviceId: identity.deviceId,
+          deploymentFingerprint: identity.deploymentFingerprint,
+        });
+      } catch {
+        // Ignore cache cleanup failures.
+      }
+      return false;
+    }
+  }
+
+  function currentCachePayload(): LocalVaultCachePayloadV1 {
+    return {
+      schemaVersion: 1,
+      index: state.items.map((item) => ({
+        itemId: item.itemId,
+        itemType: item.itemType,
+        title: item.payload.title,
+        subtitle:
+          item.itemType === 'login'
+            ? item.payload.username
+            : item.itemType === 'card'
+              ? item.payload.cardholderName
+              : item.payload.content.slice(0, 80),
+        urlHost: item.itemType === 'login' ? item.payload.urls[0] ?? '' : '',
+        revision: item.revision,
+        updatedAt: item.updatedAt,
+        iconRef: null,
+      })),
+      items: state.items,
+      tombstones: state.tombstones,
+    };
+  }
+
+  async function persistLocalCacheFromStateBestEffort(metadata: {
+    snapshotToken: string | null;
+    etag: string | null;
+  }) {
+    try {
+      const identity = await resolveCacheIdentity();
+      await saveLocalVaultCache({
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        deploymentFingerprint: identity.deploymentFingerprint,
+        accountKey: identity.accountKey,
+        snapshotToken: metadata.snapshotToken,
+        etag: metadata.etag,
+        payload: currentCachePayload(),
+      });
+    } catch {
+      // Best effort only.
+    }
   }
 
   async function runSnapshotPull(reason: string): Promise<boolean> {
@@ -381,7 +597,10 @@ export function createVaultWorkspace(input: {
             if (!isSessionReady() || abortController.signal.aborted || activePullGeneration !== generation) {
               return false;
             }
-            await applySnapshotEntries(mergedEntries);
+            await applySnapshotEntries(mergedEntries, {
+              snapshotToken: snapshotToken ?? null,
+              etag: page.etag ?? `"${page.payload.snapshotDigest}"`,
+            });
             lastSnapshotEtag = page.etag ?? `"${page.payload.snapshotDigest}"`;
             didApply = true;
             return true;
@@ -415,17 +634,23 @@ export function createVaultWorkspace(input: {
     }
 
     state.lastError = null;
+    state.cacheWarmState = 'syncing';
     activePullPromise = (async () => {
       try {
         const ok = await runSnapshotPull(reason);
         if (ok) {
+          state.cacheWarmState = 'completed';
           syncBackoffIndex = 0;
           scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
         } else if (syncStarted) {
+          if (state.cacheWarmState === 'syncing') {
+            state.cacheWarmState = 'completed';
+          }
           scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
         }
       } catch (error) {
         state.lastError = toHumanErrorMessage(error);
+        state.cacheWarmState = 'sync_failed';
         syncBackoffIndex = Math.min(syncBackoffIndex + 1, SYNC_ERROR_BACKOFF_MS.length - 1);
         scheduleNextSync(SYNC_ERROR_BACKOFF_MS[syncBackoffIndex] ?? SYNC_ERROR_BACKOFF_MS.at(-1) ?? 60_000);
         throw error;
@@ -446,12 +671,22 @@ export function createVaultWorkspace(input: {
   async function load() {
     state.isLoading = true;
     state.lastError = null;
+    state.cacheWarmState = 'loading_local';
+    let localLoaded = false;
 
     try {
+      localLoaded = await loadLocalCacheBestEffort();
+      if (localLoaded) {
+        state.cacheWarmState = 'ready_local';
+        state.isLoading = false;
+      }
       await triggerSync('load');
     } catch (error) {
       state.lastError = toHumanErrorMessage(error);
-      throw error;
+      state.cacheWarmState = 'sync_failed';
+      if (!localLoaded) {
+        throw error;
+      }
     } finally {
       state.isLoading = false;
     }
@@ -475,6 +710,10 @@ export function createVaultWorkspace(input: {
     state.items = [...state.items, await decryptRecord(accountKey, created)];
     state.tombstones = state.tombstones.filter((entry) => entry.itemId !== created.itemId);
     rebuildIndex();
+    void persistLocalCacheFromStateBestEffort({
+      snapshotToken: null,
+      etag: lastSnapshotEtag,
+    });
     if (syncStarted) {
       void triggerSync('post_mutation').catch(() => undefined);
     }
@@ -520,6 +759,10 @@ export function createVaultWorkspace(input: {
         );
         state.tombstones = state.tombstones.filter((entry) => entry.itemId !== decrypted.itemId);
         rebuildIndex();
+        void persistLocalCacheFromStateBestEffort({
+          snapshotToken: null,
+          etag: lastSnapshotEtag,
+        });
       } catch (error) {
         state.lastError = toHumanErrorMessage(error);
         throw error;
@@ -543,6 +786,10 @@ export function createVaultWorkspace(input: {
         state.tombstones = [tombstone, ...state.tombstones.filter((entry) => entry.itemId !== itemId)];
       }
       rebuildIndex();
+      void persistLocalCacheFromStateBestEffort({
+        snapshotToken: null,
+        etag: lastSnapshotEtag,
+      });
       if (syncStarted) {
         void triggerSync('post_mutation').catch(() => undefined);
       }
@@ -560,6 +807,10 @@ export function createVaultWorkspace(input: {
       }
       state.tombstones = state.tombstones.filter((entry) => entry.itemId !== decrypted.itemId);
       rebuildIndex();
+      void persistLocalCacheFromStateBestEffort({
+        snapshotToken: null,
+        etag: lastSnapshotEtag,
+      });
       if (syncStarted) {
         void triggerSync('post_mutation').catch(() => undefined);
       }

@@ -22,6 +22,23 @@ describe('sendBackgroundCommand', () => {
     expect(response.ok).toBe(true);
     expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(2);
   });
+
+  test('classifies transient background transport failure with retry metadata', async () => {
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: vi.fn(async () => {
+          throw new Error('Could not establish connection. Receiving end does not exist.');
+        }),
+      },
+    };
+
+    await expect(sendBackgroundCommand({ type: 'vaultlite.get_state', passive: true })).rejects.toMatchObject({
+      code: 'background_unavailable',
+      kind: 'transport_transient',
+      retriable: true,
+    });
+    expect(chrome.runtime.sendMessage).toHaveBeenCalled();
+  });
 });
 
 describe('ensureServerOriginPermission', () => {

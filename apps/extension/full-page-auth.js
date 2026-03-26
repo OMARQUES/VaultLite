@@ -43,13 +43,9 @@ function shouldForceStateRefreshAfterError(code) {
 }
 
 function setStatus(message) {
-  if (!message) {
-    elements.statusBanner.hidden = true;
-    elements.statusBanner.textContent = '';
-    return;
-  }
-  elements.statusBanner.hidden = false;
-  elements.statusBanner.textContent = message;
+  void message;
+  elements.statusBanner.hidden = true;
+  elements.statusBanner.textContent = '';
 }
 
 function showPanel(panel) {

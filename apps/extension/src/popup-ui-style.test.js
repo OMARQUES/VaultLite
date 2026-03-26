@@ -9,7 +9,7 @@ describe('popup ui style regressions', () => {
     const source = readFileSync(popupHtmlPath, 'utf8');
     expect(source).toContain('--vl-primary: #2562ea;');
     const selectedBlock = source.match(/\.vault-row\.is-selected\s*\{[\s\S]*?\}/)?.[0] ?? '';
-    expect(selectedBlock).toContain('background: #2562ea;');
+    expect(selectedBlock).toContain('background: #2562ea');
     const newItemBlock = source.match(/\.new-item-btn\s*\{[\s\S]*?\}/)?.[0] ?? '';
     expect(newItemBlock).toContain('background: var(--vl-primary);');
   });
@@ -17,14 +17,14 @@ describe('popup ui style regressions', () => {
   test('uses smooth master-detail transition instead of jumpy toggle', () => {
     const source = readFileSync(popupHtmlPath, 'utf8');
     expect(source).toContain('grid-template-columns: 1fr 0fr;');
-    expect(source).toContain('transition: grid-template-columns 340ms cubic-bezier(0.22, 1, 0.36, 1);');
+    expect(source).toContain('transition: grid-template-columns 360ms cubic-bezier(0.4, 0, 0.2, 1);');
     expect(source).toContain('opacity: 0;');
-    expect(source).toContain('transform: translateX(8px);');
+    expect(source).toContain('transform: translateX(18px) scale(0.985);');
     expect(source).toMatch(
-      /transition:[\s\S]*opacity 320ms cubic-bezier\(0.22, 1, 0.36, 1\),[\s\S]*transform 320ms cubic-bezier\(0.22, 1, 0.36, 1\)/,
+      /transition:[\s\S]*opacity 360ms cubic-bezier\(0.4, 0, 0.2, 1\),[\s\S]*transform 360ms cubic-bezier\(0.4, 0, 0.2, 1\)/,
     );
     expect(source).toContain('opacity: 1;');
-    expect(source).toContain('transform: translateX(0);');
+    expect(source).toContain('transform: translateX(0) scale(1);');
   });
 
   test('uses primary blue tone for copy icon animation feedback', () => {
@@ -35,7 +35,7 @@ describe('popup ui style regressions', () => {
     expect(copiedBlock).not.toContain('#22c55e');
   });
 
-  test('keeps pre-auth layouts compact and top-aligned', () => {
+  test('keeps pre-auth layouts compact with centered simplified unlock stage', () => {
     const source = readFileSync(popupHtmlPath, 'utf8');
     expect(source).toContain('--pairing-min-height: 340px;');
     expect(source).toContain('--pairing-min-height-link-open: 470px;');
@@ -48,19 +48,27 @@ describe('popup ui style regressions', () => {
     expect(source).toContain('grid-template-rows: auto minmax(0, 1fr);');
     expect(source).toContain("body[data-layout='pairing'] .popup-content,");
     expect(source).toContain("body[data-layout='unlock'] .popup-content {");
-    expect(source).toContain('justify-content: flex-start;');
+    expect(source).toContain("body[data-layout='unlock'] .popup-header {");
+    expect(source).toContain('display: none;');
+    expect(source).toContain('justify-content: center;');
+    expect(source).toContain('align-items: center;');
     expect(source).toContain("body[data-layout='pairing'] {");
     expect(source).toContain("body[data-layout='unlock'] {");
-    expect(source).toContain('background: #19181d;');
+    expect(source).toContain('background: #1c1e24;');
   });
 
-  test('renders unlock context block with account and device details', () => {
+  test('renders simplified unlock stage with account-only title and inline field actions', () => {
     const source = readFileSync(popupHtmlPath, 'utf8');
-    expect(source).toContain('class="unlock-context"');
+    expect(source).toContain('class="compact-stage unlock-stage"');
+    expect(source).toContain('class="unlock-stage-logo">VaultLite</h2>');
     expect(source).toContain('id="unlockAccountValue"');
     expect(source).toContain('id="unlockDeviceValue"');
-    expect(source).toContain('Enter your master password to unlock this trusted device.');
-    expect(source).toContain('<span>Master password</span>');
+    expect(source).toContain('id="unlockRevealBtn"');
+    expect(source).toContain('id="unlockBtn"');
+    expect(source).toContain('placeholder="Enter your password"');
+    expect(source).toContain('.unlock-password-shell');
+    expect(source).toContain('background: #2a2f37;');
+    expect(source).toContain('border-color: #2562ea;');
   });
 
   test('keeps detail icon edit affordance transient and aligned', () => {

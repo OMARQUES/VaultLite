@@ -32,9 +32,7 @@ export function measurePopupHeight(input) {
   const headerHeight = header ? Math.ceil(toFiniteNumber(header.offsetHeight, 0)) : 0;
   const contentScrollHeight = content ? Math.ceil(toFiniteNumber(content.scrollHeight, 0)) : 0;
   const measuredFromRegions =
-    headerHeight > 0 && contentScrollHeight > 0
-      ? headerHeight + contentScrollHeight + MEASURE_SAFETY_OFFSET_PX
-      : null;
+    contentScrollHeight > 0 ? headerHeight + contentScrollHeight + MEASURE_SAFETY_OFFSET_PX : null;
   const measuredHeight = measuredFromRegions ?? shellScrollHeight;
   const upperBound = Math.max(minHeight, toFiniteNumber(input?.maxHeight, MAX_POPUP_HEIGHT));
   const clamped = Math.max(minHeight, Math.min(measuredHeight, upperBound));

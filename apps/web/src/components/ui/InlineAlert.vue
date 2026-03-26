@@ -5,7 +5,5 @@ defineProps<{
 </script>
 
 <template>
-  <div class="inline-alert" :class="`inline-alert--${tone ?? 'neutral'}`" role="alert">
-    <slot />
-  </div>
+  <div class="inline-alert inline-alert--hidden" aria-hidden="true"></div>
 </template>

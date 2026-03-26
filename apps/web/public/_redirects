@@ -1,0 +1,2 @@
+/api/* https://vaultlite-api-prod.otavio-marques20.workers.dev/api/:splat 200
+/* /index.html 200

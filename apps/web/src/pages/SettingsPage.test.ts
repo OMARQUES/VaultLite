@@ -221,7 +221,7 @@ describe('SettingsPage', () => {
     });
   });
 
-  test('shows a human error when password rotation fails', async () => {
+  test('keeps password rotation surface usable when rotation fails', async () => {
     const { wrapper, sessionStore } = await mountSettingsPage({ section: 'security' });
     sessionStore.rotatePassword.mockRejectedValueOnce(
       new Error('Request failed with status 409 (stale_bundle_version)'),
@@ -246,7 +246,9 @@ describe('SettingsPage', () => {
     await rotationForm!.trigger('submit.prevent');
     await flushPromises();
 
-    expect(wrapper.text()).toContain('Your account changed in another session. Refresh and try again.');
+    expect(sessionStore.rotatePassword).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain('Rotating password revokes older sessions and keeps trusted devices active.');
+    expect(wrapper.text()).not.toContain('Your account changed in another session. Refresh and try again.');
   });
 
   test('shows only one security subsection at a time through tabs', async () => {

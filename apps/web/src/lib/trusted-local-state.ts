@@ -1,4 +1,5 @@
 import type { LocalUnlockEnvelope } from './browser-crypto';
+import type { LocalUnlockKdfProfile } from './browser-crypto';
 
 export interface TrustedLocalStateRecord {
   username: string;
@@ -9,6 +10,7 @@ export interface TrustedLocalStateRecord {
   encryptedAccountBundle: string;
   accountKeyWrapped: string;
   localUnlockEnvelope: LocalUnlockEnvelope;
+  localUnlockKdfProfile?: LocalUnlockKdfProfile;
   accountKit?: {
     payload: {
       version: 'account-kit.v1';

@@ -38,6 +38,8 @@ const CODE_TO_MESSAGE: Record<string, string> = {
   snapshot_expired: 'Sync token expired. Retrying automatically.',
 };
 
+export const PASSWORD_RETRY_MESSAGE = 'Check your password and try again.';
+
 const STATUS_TO_MESSAGE: Record<number, string> = {
   400: 'We couldn’t process this request. Check the form and try again.',
   401: 'Your credentials or session are no longer valid. Try again.',
@@ -153,4 +155,25 @@ export function toHumanErrorMessage(
   }
 
   return rawMessage;
+}
+
+export function toPasswordRetryMessage(message: string | null | undefined): string | null {
+  if (typeof message !== 'string') {
+    return null;
+  }
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.includes('check your password and try again') ||
+    normalized.includes("couldn't verify your credentials") ||
+    normalized.includes('couldn’t verify your credentials') ||
+    normalized.includes('could not unlock this device with the provided password') ||
+    normalized.includes('operation-specific reason') ||
+    normalized.includes('invalid_credentials')
+  ) {
+    return PASSWORD_RETRY_MESSAGE;
+  }
+  return null;
 }

@@ -107,9 +107,6 @@ export function resolveNavigationTarget(input: {
   }
 
   if (input.targetPath === '/bootstrap' || input.targetPath === '/bootstrap/checkpoint' || input.targetPath === '/bootstrap/success') {
-    if (input.phase === 'ready') {
-      return '/vault';
-    }
     return '/auth';
   }
 

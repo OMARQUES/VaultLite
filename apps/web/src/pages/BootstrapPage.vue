@@ -88,6 +88,7 @@ async function initializeOwner() {
         encryptedAccountBundle,
         accountKeyWrapped,
       },
+      calibrateKdf: true,
     });
 
     await trustedLocalStateStore.save({
@@ -99,6 +100,7 @@ async function initializeOwner() {
       encryptedAccountBundle,
       accountKeyWrapped,
       localUnlockEnvelope,
+      localUnlockKdfProfile: localUnlockEnvelope.kdfProfile,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

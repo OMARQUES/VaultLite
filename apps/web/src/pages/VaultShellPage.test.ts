@@ -470,7 +470,7 @@ describe('VaultShellPage', () => {
 
     await firstMount.wrapper.get('button[aria-label="Open URL"]').trigger('click');
     expect(openSpy).not.toHaveBeenCalled();
-    expect(firstMount.wrapper.text()).toContain('Invalid or unsafe URL');
+    expect(firstMount.wrapper.text()).not.toContain('Invalid or unsafe URL');
 
     const secondMount = await mountVaultAt('/vault/item/item_2', [
       {
@@ -490,7 +490,7 @@ describe('VaultShellPage', () => {
     ]);
     await secondMount.wrapper.get('button[aria-label="Open URL"]').trigger('click');
     expect(openSpy).not.toHaveBeenCalled();
-    expect(secondMount.wrapper.text()).toContain('Invalid or unsafe URL');
+    expect(secondMount.wrapper.text()).not.toContain('Invalid or unsafe URL');
   });
 
   test('opens only absolute http/https URLs with noopener,noreferrer', async () => {

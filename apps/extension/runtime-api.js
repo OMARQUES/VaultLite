@@ -256,6 +256,23 @@ export function createExtensionApiClient(serverOrigin) {
         }),
       });
     },
+    async listPasswordGeneratorHistory(input = {}) {
+      return requestJson(`${base}/api/password-generator/history`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async upsertPasswordGeneratorHistoryEntry(input) {
+      return requestJson(`${base}/api/password-generator/history/upsert`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          entryId: input?.entryId,
+          encryptedPayload: input?.encryptedPayload,
+          createdAt: input?.createdAt,
+        }),
+      });
+    },
     async lockSession(input = {}) {
       return requestJson(`${base}/api/auth/session/lock`, {
         method: 'POST',

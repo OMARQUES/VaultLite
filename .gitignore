@@ -28,6 +28,8 @@ test-results/
 .dev.vars.*
 !.dev.vars.example
 *.local
+*.pem
+*.key
 
 # Logs
 *.log

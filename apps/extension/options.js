@@ -43,14 +43,10 @@ function setBusy(nextBusy) {
 }
 
 function setStatus(tone, message) {
-  if (!message) {
-    elements.statusBanner.hidden = true;
-    elements.statusBanner.textContent = '';
-    return;
-  }
-  elements.statusBanner.hidden = false;
-  elements.statusBanner.dataset.tone = tone;
-  elements.statusBanner.textContent = message;
+  void tone;
+  void message;
+  elements.statusBanner.hidden = true;
+  elements.statusBanner.textContent = '';
 }
 
 function renderState(state) {

@@ -77,7 +77,9 @@ const extensionLinkModalRequiresPassword = ref(false);
 const extensionLinkModalErrorMessage = ref<string | null>(null);
 const extensionLinkAutoOpenedRequestCode = ref<string | null>(null);
 let extensionLinkAutoRefreshTimer: number | null = null;
-const EXTENSION_LINK_AUTO_REFRESH_MS = 3_000;
+let extensionLinkAutoRefreshBackoffMs = 10_000;
+const EXTENSION_LINK_AUTO_REFRESH_MIN_MS = 10_000;
+const EXTENSION_LINK_AUTO_REFRESH_MAX_MS = 60_000;
 const runtimeMetadata = ref<{
   serverUrl: string;
   deploymentFingerprint: string;
@@ -216,19 +218,39 @@ const rotationHint = computed(() => {
 
 function clearExtensionLinkAutoRefreshTimer() {
   if (extensionLinkAutoRefreshTimer !== null) {
-    window.clearInterval(extensionLinkAutoRefreshTimer);
+    window.clearTimeout(extensionLinkAutoRefreshTimer);
     extensionLinkAutoRefreshTimer = null;
   }
 }
 
-function startExtensionLinkAutoRefresh() {
+function scheduleExtensionLinkAutoRefresh(delayMs = extensionLinkAutoRefreshBackoffMs) {
   clearExtensionLinkAutoRefreshTimer();
-  extensionLinkAutoRefreshTimer = window.setInterval(() => {
+  extensionLinkAutoRefreshTimer = window.setTimeout(() => {
     if (extensionLinkBusy.value) {
+      scheduleExtensionLinkAutoRefresh();
+      return;
+    }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      scheduleExtensionLinkAutoRefresh();
       return;
     }
     void refreshExtensionLinkRequests();
-  }, EXTENSION_LINK_AUTO_REFRESH_MS);
+  }, Math.max(2_000, delayMs));
+}
+
+function startExtensionLinkAutoRefresh() {
+  extensionLinkAutoRefreshBackoffMs = EXTENSION_LINK_AUTO_REFRESH_MIN_MS;
+  scheduleExtensionLinkAutoRefresh(1_000);
+}
+
+function handleSettingsVisibilityChange() {
+  if (!showExtensionSection.value) {
+    return;
+  }
+  if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+    extensionLinkAutoRefreshBackoffMs = EXTENSION_LINK_AUTO_REFRESH_MIN_MS;
+    scheduleExtensionLinkAutoRefresh(500);
+  }
 }
 
 watch(
@@ -240,6 +262,7 @@ watch(
 
 onMounted(() => {
   window.addEventListener('message', handleBridgeResponseEvent as EventListener);
+  document.addEventListener('visibilitychange', handleSettingsVisibilityChange);
   void refreshDevices();
   void refreshRuntimeMetadata();
   void sessionStore.refreshSessionPolicy().catch(() => undefined);
@@ -255,6 +278,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('message', handleBridgeResponseEvent as EventListener);
+  document.removeEventListener('visibilitychange', handleSettingsVisibilityChange);
   clearBridgePendingRequests();
   clearExtensionLinkAutoRefreshTimer();
 });
@@ -546,11 +570,19 @@ async function refreshExtensionLinkRequests() {
     ) {
       closeExtensionLinkDecisionModal();
     }
+    extensionLinkAutoRefreshBackoffMs = EXTENSION_LINK_AUTO_REFRESH_MIN_MS;
   } catch (error) {
     extensionLinkErrorMessage.value = toHumanErrorMessage(error);
+    extensionLinkAutoRefreshBackoffMs = Math.min(
+      EXTENSION_LINK_AUTO_REFRESH_MAX_MS,
+      Math.max(EXTENSION_LINK_AUTO_REFRESH_MIN_MS, extensionLinkAutoRefreshBackoffMs * 2),
+    );
   } finally {
     extensionLinkBusyAction.value = null;
     extensionLinkBusyRequestId.value = null;
+    if (showExtensionSection.value) {
+      scheduleExtensionLinkAutoRefresh();
+    }
   }
 }
 

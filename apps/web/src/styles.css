@@ -228,9 +228,10 @@ h2 {
 }
 
 .app-shell-layout {
-  width: min(100%, 1760px);
+  width: 100%;
+  max-width: none;
   height: calc(100vh - 24px);
-  margin: 0 auto;
+  margin: 0;
   display: grid;
   grid-template-columns: minmax(260px, 22%) minmax(0, 1fr);
   border: 1px solid var(--vl-border);
@@ -636,43 +637,173 @@ h2 {
   font-size: 12px;
 }
 
-.unlock-card {
-  max-width: 450px;
-  padding: 20px;
+.public-page--unlock {
+  min-height: calc(100vh - 104px);
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
-.unlock-context {
+.unlock-simplified-shell {
+  width: min(640px, 100%);
+  padding: 22px 26px;
+  border: 1px solid color-mix(in srgb, var(--vl-border) 84%, transparent);
+  border-radius: 18px;
+  background: #1c1e24;
+  box-shadow: var(--vl-shadow-md);
   display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--vl-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--vl-surface-2) 78%, transparent);
+  justify-items: center;
+  gap: 36px;
 }
 
-.unlock-context__row {
-  display: grid;
-  gap: 3px;
-}
-
-.unlock-context__row + .unlock-context__row {
-  padding-top: 8px;
-  border-top: 1px solid var(--vl-divider);
-}
-
-.unlock-context__label {
-  color: var(--vl-text-soft);
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 600;
-}
-
-.unlock-context__value {
+.unlock-simplified-logo {
   margin: 0;
+  font-size: clamp(56px, 8vw, 88px);
+  line-height: 0.9;
+  letter-spacing: -0.045em;
+  font-weight: 700;
   color: var(--vl-text);
-  font-size: 15px;
-  line-height: 21px;
+  text-align: center;
+}
+
+.unlock-simplified-account {
+  margin: 0;
+  max-width: 100%;
+  color: color-mix(in srgb, var(--vl-text) 92%, #cad4ea);
+  font-size: clamp(34px, 3.8vw, 46px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  text-align: center;
+  word-break: break-word;
+}
+
+.unlock-simplified-account-row {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.unlock-simplified-account-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  font-size: clamp(30px, 3.8vw, 44px);
+  line-height: 1;
+  color: color-mix(in srgb, #8eb4ff 82%, var(--vl-text));
+  /* Optical alignment with large username glyph metrics on web unlock surface */
+  transform: translateY(0.1em);
+}
+
+.unlock-simplified-alert {
+  width: min(580px, 100%);
+}
+
+.unlock-simplified-form {
+  width: min(580px, 100%);
+  display: grid;
+  gap: 14px;
+}
+
+.unlock-simplified-password-shell {
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid color-mix(in srgb, var(--vl-border) 84%, transparent);
+  border-radius: 16px;
+  background: #2a2f37;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  overflow: hidden;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.unlock-simplified-password-shell:focus-within {
+  border-color: #2562ea;
+  box-shadow: 0 0 0 1px color-mix(in srgb, #2562ea 58%, transparent);
+}
+
+.unlock-simplified-password-shell input {
+  width: 100%;
+  min-width: 0;
+  height: 56px;
+  border: 0;
+  background: transparent;
+  color: var(--vl-text);
+  padding: 0 16px;
+  outline: none;
+  font-size: 18px;
+  letter-spacing: 0.01em;
+}
+
+.unlock-simplified-password-shell input::placeholder {
+  color: color-mix(in srgb, var(--vl-text-soft) 95%, #9ca6ba);
+  font-size: 16px;
+}
+
+.unlock-simplified-password-action,
+.unlock-simplified-password-submit {
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: color-mix(in srgb, var(--vl-text-soft) 92%, #a2acc0);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.unlock-simplified-password-action .material-symbols-rounded,
+.unlock-simplified-password-submit .material-symbols-rounded {
+  font-size: 23px;
+  line-height: 1;
+}
+
+.unlock-simplified-password-action:hover:not(:disabled),
+.unlock-simplified-password-submit:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--vl-text) 94%, #d4ddf2);
+}
+
+.unlock-simplified-password-divider {
+  width: 1px;
+  height: 34px;
+  background: color-mix(in srgb, var(--vl-divider) 95%, transparent);
+}
+
+.unlock-simplified-password-submit {
+  color: #9fc1ff;
+  border-radius: 0;
+}
+
+.unlock-simplified-error {
+  padding-left: 6px;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.unlock-simplified-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.unlock-simplified-device {
+  width: min(580px, 100%);
+  margin: 0;
+  text-align: right;
+  color: color-mix(in srgb, var(--vl-text-soft) 92%, #a9b3c9);
+  font-size: 14px;
+  line-height: 1.3;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .stack-layout,
@@ -687,13 +818,7 @@ h2 {
 }
 
 .warning-banner {
-  padding: 11px 13px;
-  border: 1px solid var(--vl-warning-border);
-  border-radius: 10px;
-  background: var(--vl-warning-surface);
-  color: var(--vl-warning-text);
-  font-size: 13px;
-  line-height: 19px;
+  display: none !important;
 }
 
 .warning-banner--subtle {
@@ -892,13 +1017,7 @@ h2 {
 }
 
 .inline-alert {
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--vl-border);
-  background: var(--vl-surface-2);
-  color: var(--vl-text);
-  font-size: 13px;
-  line-height: 19px;
+  display: none !important;
 }
 
 .inline-alert--danger {
@@ -1179,6 +1298,7 @@ h2 {
   gap: 10px;
   padding: 14px;
   background: var(--vl-surface);
+  position: relative;
 }
 
 .vault-detail-pane {
@@ -1208,6 +1328,32 @@ h2 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+}
+
+.vault-list-toolbar__actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.vault-password-generator-toolbar {
+  display: inline-flex;
+}
+
+.vault-password-generator-toolbar__panel {
+  position: absolute;
+  top: 58px;
+  right: 14px;
+  z-index: 24;
+}
+
+.vault-password-generator-toolbar__panel--mobile {
+  position: fixed;
+  top: 88px;
+  left: 12px;
+  right: 12px;
+  z-index: 72;
 }
 
 .vault-active-summary {
@@ -1605,6 +1751,41 @@ h2 {
 .editor-section__body {
   display: grid;
   gap: 7px;
+}
+
+.vault-password-generator-field {
+  position: relative;
+  display: grid;
+  gap: 0;
+}
+
+.vault-password-generator-field__trigger {
+  position: absolute;
+  left: 8px;
+  top: calc(100% + 6px);
+  min-height: 34px;
+  border: 1px solid color-mix(in srgb, var(--vl-border) 90%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--vl-surface-2) 92%, transparent);
+  color: color-mix(in srgb, var(--vl-primary) 80%, #9ec1ff);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  z-index: 8;
+  cursor: pointer;
+}
+
+.vault-password-generator-field__trigger:hover {
+  border-color: color-mix(in srgb, var(--vl-primary) 45%, var(--vl-border));
+  color: color-mix(in srgb, var(--vl-primary) 94%, #d2e4ff);
+}
+
+.vault-password-generator-field__panel {
+  position: absolute;
+  left: 8px;
+  top: calc(100% + 6px);
+  z-index: 16;
 }
 
 .detail-card__header {
@@ -3799,18 +3980,12 @@ h2 {
 }
 
 .toast-message {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 70;
-  min-width: 140px;
-  padding: 10px 12px;
-  border: 1px solid var(--vl-border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--vl-surface-2) 88%, var(--vl-shell));
-  box-shadow: var(--vl-shadow-sm);
-  font-size: 12px;
-  line-height: 17px;
+  display: none !important;
+}
+
+.toast-message--hidden,
+.inline-alert--hidden {
+  display: none !important;
 }
 
 /* Vault route behavior: mobile/tablet single surface, desktop side-by-side list+detail */
@@ -4011,9 +4186,37 @@ h2 {
     flex-wrap: wrap;
   }
 
-  .unlock-card {
-    max-width: none;
-    padding: 18px;
+  .public-page--unlock {
+    min-height: calc(100vh - 90px);
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .unlock-simplified-shell {
+    width: 100%;
+    border-radius: 16px;
+    padding: 18px 16px;
+    gap: 28px;
+  }
+
+  .unlock-simplified-logo {
+    font-size: clamp(44px, 11vw, 60px);
+  }
+
+  .unlock-simplified-account {
+    font-size: clamp(30px, 8.6vw, 40px);
+  }
+
+  .unlock-simplified-account-row {
+    gap: 8px;
+  }
+
+  .unlock-simplified-account-icon {
+    font-size: clamp(26px, 7vw, 34px);
+  }
+
+  .unlock-simplified-password-shell input {
+    font-size: 16px;
   }
 
   .account-kit-card {

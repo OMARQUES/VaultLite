@@ -177,6 +177,12 @@ describe('popup view model helpers', () => {
     expect(resolvePopupPhase({ phase: 'anonymous', hasTrustedState: true })).toBe('local_unlock_required');
   });
 
+  test('keeps reconnecting phase explicit for popup state machine', () => {
+    expect(resolvePopupPhase({ phase: 'reconnecting_background', hasTrustedState: true })).toBe(
+      'reconnecting_background',
+    );
+  });
+
   test('resolves unknown state to pairing when trusted state does not exist', () => {
     expect(resolvePopupPhase({ phase: 'unknown', hasTrustedState: false })).toBe('pairing_required');
   });
@@ -192,18 +198,21 @@ describe('popup view model helpers', () => {
       searchQuery: 'amazon',
       typeFilter: 'card',
       suggestedOnly: true,
+      sortMode: 'default',
     });
     expect(parsePersistedPopupUiState({})).toEqual({
       selectedItemId: null,
       searchQuery: '',
       typeFilter: 'all',
       suggestedOnly: false,
+      sortMode: 'default',
     });
     expect(parsePersistedPopupUiState(null)).toEqual({
       selectedItemId: null,
       searchQuery: '',
       typeFilter: 'all',
       suggestedOnly: false,
+      sortMode: 'default',
     });
   });
 
@@ -218,12 +227,14 @@ describe('popup view model helpers', () => {
       searchQuery: 'bank',
       typeFilter: 'document',
       suggestedOnly: true,
+      sortMode: 'default',
     });
     expect(buildPersistedPopupUiState({ selectedItemId: '', searchQuery: '' })).toEqual({
       selectedItemId: null,
       searchQuery: '',
       typeFilter: 'all',
       suggestedOnly: false,
+      sortMode: 'default',
     });
   });
 });

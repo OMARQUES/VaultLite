@@ -26,6 +26,9 @@ import {
   SiteIconManualListOutputSchema,
   SiteIconManualRemoveInputSchema,
   SiteIconManualUpsertInputSchema,
+  PasswordGeneratorHistoryActionOutputSchema,
+  PasswordGeneratorHistoryListOutputSchema,
+  PasswordGeneratorHistoryUpsertInputSchema,
   SiteIconResolveBatchInputSchema,
   SiteIconResolveBatchOutputSchema,
   AdminInviteCreateInputSchema,
@@ -53,6 +56,7 @@ import {
   MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
   MAX_ATTACHMENT_UPLOAD_SIZE_BYTES,
   MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
+  LocalUnlockEnvelopeSchema,
   OnboardingAccountKitSignInputSchema,
   OnboardingCompleteInputSchema,
   PasswordRotationCompleteOutputSchema,
@@ -171,6 +175,12 @@ const UNLOCK_GRANT_STATUS_ATTEMPT_LIMIT = 1;
 const UNLOCK_GRANT_STATUS_WINDOW_SECONDS = UNLOCK_GRANT_DEFAULT_INTERVAL_SECONDS;
 const WEB_BOOTSTRAP_GRANT_TTL_SECONDS = 60;
 const WEB_BOOTSTRAP_GRANT_DEFAULT_INTERVAL_SECONDS = 2;
+const WEB_BOOTSTRAP_GRANT_REQUEST_IP_ATTEMPT_LIMIT = 20;
+const WEB_BOOTSTRAP_GRANT_REQUEST_PAIR_ATTEMPT_LIMIT = 12;
+const WEB_BOOTSTRAP_GRANT_REQUEST_WINDOW_SECONDS = 5 * 60;
+const WEB_BOOTSTRAP_GRANT_CONSUME_IP_ATTEMPT_LIMIT = 30;
+const WEB_BOOTSTRAP_GRANT_CONSUME_PAIR_ATTEMPT_LIMIT = 20;
+const WEB_BOOTSTRAP_GRANT_CONSUME_WINDOW_SECONDS = 5 * 60;
 const EXTENSION_SESSION_RECOVER_ATTEMPT_LIMIT = 10;
 const EXTENSION_SESSION_RECOVER_WINDOW_SECONDS = 5 * 60;
 const BOOTSTRAP_VERIFY_ATTEMPT_LIMIT = 20;
@@ -185,6 +195,7 @@ const SYNC_SNAPSHOT_TOKEN_TTL_SECONDS = 5 * 60;
 const SYNC_SNAPSHOT_PAGE_SIZE_DEFAULT = 25;
 const SYNC_SNAPSHOT_PAGE_SIZE_MAX = 100;
 const SYNC_SNAPSHOT_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
 const VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS = 30;
 const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
 const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
@@ -1152,6 +1163,7 @@ async function persistIdempotencyResult(input: {
 }
 
 const ATTACHMENT_PENDING_TTL_MINUTES = 15;
+let SECURITY_HEADERS_INCLUDE_HSTS = false;
 
 function toAttachmentUploadRecord(record: {
   key: string;
@@ -1186,7 +1198,7 @@ function addSecurityHeaders(response: Response): Response {
     {
       cspValue:
         "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-      includeHsts: false,
+      includeHsts: SECURITY_HEADERS_INCLUDE_HSTS,
       noStore: true,
     },
   );
@@ -1401,6 +1413,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
   const app = new Hono();
   const includeHsts =
     options.runtimeMode === 'production' && resolveServerUrlProtocol(options.serverUrl) === 'https:';
+  SECURITY_HEADERS_INCLUDE_HSTS = includeHsts;
   const configuredServerOrigin = canonicalizeServerOrigin(options.serverUrl) ?? options.serverUrl;
 
   app.use('*', async (c, next) => {
@@ -3461,11 +3474,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (!consumed.localUnlockEnvelope) {
       return jsonResponse(409, { ok: false, code: 'pairing_code_already_used' });
     }
-    const localUnlockEnvelope = JSON.parse(consumed.localUnlockEnvelope) as {
-      version: 'local-unlock.v1';
-      nonce: string;
-      ciphertext: string;
-    };
+    const localUnlockEnvelope = LocalUnlockEnvelopeSchema.parse(
+      JSON.parse(consumed.localUnlockEnvelope),
+    );
     return jsonResponse(
       200,
       ExtensionLinkConsumeOutputSchema.parse({
@@ -4047,6 +4058,25 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(409, { ok: false, code: 'no_linked_surface' });
     }
     const nowIso = isoNow(options.clock);
+    const requestIp = resolveRequestIp(c.req.raw);
+    const [ipRate, pairRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: `web-bootstrap-request:ip:${requestIp}`,
+        nowIso,
+        windowSeconds: WEB_BOOTSTRAP_GRANT_REQUEST_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: `web-bootstrap-request:pair:${sessionContext.user.userId}:${sessionContext.device.deviceId}:${link.webDeviceId}`,
+        nowIso,
+        windowSeconds: WEB_BOOTSTRAP_GRANT_REQUEST_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      ipRate.attemptCount > WEB_BOOTSTRAP_GRANT_REQUEST_IP_ATTEMPT_LIMIT ||
+      pairRate.attemptCount > WEB_BOOTSTRAP_GRANT_REQUEST_PAIR_ATTEMPT_LIMIT
+    ) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
     const grantId = issueWebBootstrapGrantId();
     const expiresAt = addSeconds(nowIso, WEB_BOOTSTRAP_GRANT_TTL_SECONDS);
     await options.storage.webBootstrapGrants.create({
@@ -4095,6 +4125,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
 
   app.post('/api/auth/web-bootstrap-grant/consume', async (c) => {
     const nowIso = isoNow(options.clock);
+    const requestIp = resolveRequestIp(c.req.raw);
     const parsedBody = await parseJsonBodyWithLimit<unknown>({
       request: c.req.raw,
       maxBytes: 24 * 1024,
@@ -4107,6 +4138,24 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     const record = await options.storage.webBootstrapGrants.findByGrantId(input.grantId);
     if (!record) {
       return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const [ipRate, pairRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: `web-bootstrap-consume:ip:${requestIp}`,
+        nowIso,
+        windowSeconds: WEB_BOOTSTRAP_GRANT_CONSUME_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: `web-bootstrap-consume:pair:${record.userId}:${record.extensionDeviceId}:${record.webDeviceId}`,
+        nowIso,
+        windowSeconds: WEB_BOOTSTRAP_GRANT_CONSUME_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      ipRate.attemptCount > WEB_BOOTSTRAP_GRANT_CONSUME_IP_ATTEMPT_LIMIT ||
+      pairRate.attemptCount > WEB_BOOTSTRAP_GRANT_CONSUME_PAIR_ATTEMPT_LIMIT
+    ) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
     }
     if (
       record.serverOrigin !== configuredServerOrigin ||
@@ -4556,6 +4605,71 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       SiteIconManualActionOutputSchema.parse({
         ok: true,
         result: changed ? 'success_changed' : 'success_no_op',
+      }),
+    );
+  });
+
+  app.get('/api/password-generator/history', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const entries = await options.storage.passwordGeneratorHistory.listByUserId(
+      sessionContext.user.userId,
+      PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES,
+    );
+    return jsonResponse(
+      200,
+      PasswordGeneratorHistoryListOutputSchema.parse({
+        ok: true,
+        entries: entries.map((entry) => ({
+          entryId: entry.entryId,
+          encryptedPayload: entry.encryptedPayload,
+          createdAt: entry.createdAt,
+          updatedAt: entry.updatedAt,
+        })),
+      }),
+    );
+  });
+
+  app.post('/api/password-generator/history/upsert', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 64 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = PasswordGeneratorHistoryUpsertInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    await options.storage.passwordGeneratorHistory.upsert({
+      userId: sessionContext.user.userId,
+      entryId: input.entryId,
+      encryptedPayload: input.encryptedPayload,
+      createdAt: input.createdAt,
+      updatedAt: nowIso,
+    });
+    await options.storage.passwordGeneratorHistory.pruneByUserId(
+      sessionContext.user.userId,
+      PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES,
+    );
+    return jsonResponse(
+      200,
+      PasswordGeneratorHistoryActionOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
       }),
     );
   });
