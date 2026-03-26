@@ -28,6 +28,12 @@ import {
   toNavigableUrl,
 } from './popup-view-model.js';
 import {
+  isTrustedIdentitySoftMatch,
+  resolveTrustedIdentitySignatureFromPersistedPayload,
+  resolveTrustedIdentitySignatureFromState,
+  resolveTrustedIdentitySignatureFromTrustedRecord,
+} from './popup-snapshot-identity.js';
+import {
   resolveLayoutMode,
   shouldShowLockIcon,
   shouldUseExpandedPopup,
@@ -204,7 +210,10 @@ let passwordGeneratorValue = generatePassword(passwordGeneratorState);
 let passwordGeneratorCopyFeedbackTimer = null;
 let passwordGeneratorHistoryOpen = false;
 let passwordGeneratorHistory = [];
+let passwordGeneratorHistoryLastSyncedAt = 0;
+let passwordGeneratorHistorySyncInFlight = null;
 const passwordGeneratorVisibleHistoryIds = new Set();
+let trustedIdentitySignature = null;
 const detailSecretState = {
   itemId: null,
   passwordVisible: false,
@@ -213,10 +222,11 @@ const detailSecretState = {
 const POPUP_UI_STATE_STORAGE_KEY = 'vaultlite.popup.ui.v1';
 const POPUP_LAST_STATE_STORAGE_KEY = 'vaultlite.popup.last_state.v1';
 const POPUP_LAST_READY_LIST_STORAGE_KEY = 'vaultlite.popup.last_ready_list.v1';
-const POPUP_LAST_STATE_MAX_AGE_MS = 2 * 60 * 1000;
 const POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS = 2 * 60 * 1000;
 const PASSWORD_GENERATOR_HISTORY_STORAGE_KEY = 'vaultlite.popup.password.generator.history.v1';
+const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.popup.password.generator.history.synced_at.v1';
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 80;
+const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 90 * 1000;
 const PASSWORD_RETRY_MESSAGE = 'Check your password and try again.';
 const FALLBACK_PAIRING_STATE = {
   phase: 'pairing_required',
@@ -396,12 +406,25 @@ async function persistPasswordGeneratorHistory() {
   });
 }
 
+async function persistPasswordGeneratorHistorySyncMarker() {
+  if (!chrome.storage?.session) {
+    return;
+  }
+  await chrome.storage.session.set({
+    [PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY]: passwordGeneratorHistoryLastSyncedAt,
+  });
+}
+
 async function loadPasswordGeneratorHistory() {
   if (!chrome.storage?.session) {
     passwordGeneratorHistory = [];
+    passwordGeneratorHistoryLastSyncedAt = 0;
   } else {
     try {
-      const stored = await chrome.storage.session.get(PASSWORD_GENERATOR_HISTORY_STORAGE_KEY);
+      const stored = await chrome.storage.session.get([
+        PASSWORD_GENERATOR_HISTORY_STORAGE_KEY,
+        PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY,
+      ]);
       const raw = stored?.[PASSWORD_GENERATOR_HISTORY_STORAGE_KEY];
       const normalized = Array.isArray(raw) ? raw.filter(Boolean) : [];
       passwordGeneratorHistory = normalized
@@ -413,36 +436,59 @@ async function loadPasswordGeneratorHistory() {
           pageHost: typeof entry.pageHost === 'string' ? entry.pageHost : 'unknown',
         }))
         .filter((entry) => entry.id && entry.password);
+      const syncedAtRaw = Number(stored?.[PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY]);
+      passwordGeneratorHistoryLastSyncedAt = Number.isFinite(syncedAtRaw) ? Math.max(0, syncedAtRaw) : 0;
     } catch {
       passwordGeneratorHistory = [];
+      passwordGeneratorHistoryLastSyncedAt = 0;
     }
   }
+}
 
-  try {
-    const response = await sendBackgroundCommand({
-      type: 'vaultlite.list_password_generator_history',
-    });
-    if (response?.ok !== true) {
-      return;
-    }
-    const remoteEntries = Array.isArray(response.entries) ? response.entries : [];
-    const normalizedRemote = remoteEntries
-      .map((entry) => ({
-        id: typeof entry.id === 'string' ? entry.id : '',
-        createdAt: Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : Date.now(),
-        password: typeof entry.password === 'string' ? entry.password : '',
-        pageUrl: typeof entry.pageUrl === 'string' ? entry.pageUrl : '',
-        pageHost: typeof entry.pageHost === 'string' ? entry.pageHost : 'unknown',
-      }))
-      .filter((entry) => entry.id && entry.password);
-    if (normalizedRemote.length === 0) {
-      return;
-    }
-    passwordGeneratorHistory = normalizedRemote;
-    await persistPasswordGeneratorHistory();
-  } catch {
-    // Keep local fallback history when remote sync is unavailable.
+async function syncPasswordGeneratorHistoryFromRemote(options = {}) {
+  const force = options?.force === true;
+  if (passwordGeneratorHistorySyncInFlight) {
+    await passwordGeneratorHistorySyncInFlight;
+    return;
   }
+  if (!force && Date.now() - passwordGeneratorHistoryLastSyncedAt < PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS) {
+    return;
+  }
+  passwordGeneratorHistorySyncInFlight = (async () => {
+    try {
+      const response = await sendBackgroundCommand({
+        type: 'vaultlite.list_password_generator_history',
+      });
+      passwordGeneratorHistoryLastSyncedAt = Date.now();
+      void persistPasswordGeneratorHistorySyncMarker();
+      if (response?.ok !== true) {
+        return;
+      }
+      const remoteEntries = Array.isArray(response.entries) ? response.entries : [];
+      const normalizedRemote = remoteEntries
+        .map((entry) => ({
+          id: typeof entry.id === 'string' ? entry.id : '',
+          createdAt: Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : Date.now(),
+          password: typeof entry.password === 'string' ? entry.password : '',
+          pageUrl: typeof entry.pageUrl === 'string' ? entry.pageUrl : '',
+          pageHost: typeof entry.pageHost === 'string' ? entry.pageHost : 'unknown',
+        }))
+        .filter((entry) => entry.id && entry.password);
+      if (normalizedRemote.length === 0) {
+        return;
+      }
+      passwordGeneratorHistory = normalizedRemote;
+      await persistPasswordGeneratorHistory();
+      if (passwordGeneratorHistoryOpen) {
+        renderPasswordGeneratorHistory();
+      }
+    } catch {
+      // Keep local fallback history when remote sync is unavailable.
+    }
+  })().finally(() => {
+    passwordGeneratorHistorySyncInFlight = null;
+  });
+  await passwordGeneratorHistorySyncInFlight;
 }
 
 async function pushPasswordGeneratorHistoryEntry(password) {
@@ -550,6 +596,7 @@ function setPasswordGeneratorHistoryOpen(open) {
   elements.passwordGeneratorHistoryView.hidden = !passwordGeneratorHistoryOpen;
   if (passwordGeneratorHistoryOpen) {
     renderPasswordGeneratorHistory();
+    void syncPasswordGeneratorHistoryFromRemote();
   }
 }
 
@@ -923,12 +970,48 @@ async function loadPersistedPopupUiState() {
   }
 }
 
-function sanitizePersistedPopupState(rawState) {
+async function clearPersistedFirstPaintSnapshots() {
+  lastReadyListSnapshot = [];
+  lastReadyListPageSnapshot = { url: '', eligible: false };
+  if (!chrome.storage?.session) {
+    return;
+  }
+  try {
+    await chrome.storage.session.remove([POPUP_LAST_STATE_STORAGE_KEY, POPUP_LAST_READY_LIST_STORAGE_KEY]);
+  } catch {
+    // Ignore cleanup failures.
+  }
+}
+
+async function loadTrustedIdentitySignatureFromLocal() {
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_LOCAL_TRUSTED_KEY);
+    const trusted = stored?.[STORAGE_LOCAL_TRUSTED_KEY];
+    trustedIdentitySignature = resolveTrustedIdentitySignatureFromTrustedRecord(trusted);
+    return trusted && typeof trusted === 'object' ? trusted : null;
+  } catch {
+    trustedIdentitySignature = null;
+    return null;
+  }
+}
+
+function sanitizePersistedPopupState(rawState, expectedTrustedSignature) {
   if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
     return null;
   }
   const updatedAt = Number(rawState.updatedAt);
-  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > POPUP_LAST_STATE_MAX_AGE_MS) {
+  const withinConfidenceWindow =
+    Number.isFinite(updatedAt) && Date.now() - updatedAt <= POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS;
+  const payloadTrustedSignature = resolveTrustedIdentitySignatureFromPersistedPayload(rawState);
+  if (typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0) {
+    if (
+      !payloadTrustedSignature ||
+      (payloadTrustedSignature !== expectedTrustedSignature &&
+        !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
+    ) {
+      return null;
+    }
+  } else if (!payloadTrustedSignature || !withinConfidenceWindow) {
     return null;
   }
   const phase = resolvePopupPhase(rawState);
@@ -963,24 +1046,42 @@ function sanitizePersistedPopupState(rawState) {
   };
 }
 
-async function loadPersistedPopupStateSnapshot() {
+async function loadPersistedPopupStateSnapshot(expectedTrustedSignature) {
   if (!chrome.storage?.session) {
     return null;
   }
   try {
     const stored = await chrome.storage.session.get(POPUP_LAST_STATE_STORAGE_KEY);
-    return sanitizePersistedPopupState(stored?.[POPUP_LAST_STATE_STORAGE_KEY] ?? null);
+    const rawState = stored?.[POPUP_LAST_STATE_STORAGE_KEY] ?? null;
+    const parsed = sanitizePersistedPopupState(rawState, expectedTrustedSignature);
+    const hasExpectedSignature =
+      typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
+    if (!parsed && rawState && hasExpectedSignature) {
+      await chrome.storage.session.remove(POPUP_LAST_STATE_STORAGE_KEY).catch(() => {});
+    }
+    return parsed;
   } catch {
     return null;
   }
 }
 
-function sanitizePersistedReadyListSnapshot(rawState) {
+function sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature) {
   if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
     return null;
   }
   const updatedAt = Number(rawState.updatedAt);
-  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > POPUP_LAST_STATE_MAX_AGE_MS) {
+  const withinConfidenceWindow =
+    Number.isFinite(updatedAt) && Date.now() - updatedAt <= POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS;
+  const payloadTrustedSignature = resolveTrustedIdentitySignatureFromPersistedPayload(rawState);
+  if (typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0) {
+    if (
+      !payloadTrustedSignature ||
+      (payloadTrustedSignature !== expectedTrustedSignature &&
+        !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
+    ) {
+      return null;
+    }
+  } else if (!payloadTrustedSignature || !withinConfidenceWindow) {
     return null;
   }
   const rawItems = Array.isArray(rawState.items) ? rawState.items : [];
@@ -999,31 +1100,46 @@ function sanitizePersistedReadyListSnapshot(rawState) {
   };
 }
 
-async function loadPersistedReadyListSnapshot() {
+async function loadPersistedReadyListSnapshot(expectedTrustedSignature) {
   if (!chrome.storage?.session) {
-    return;
+    return false;
   }
   try {
     const stored = await chrome.storage.session.get(POPUP_LAST_READY_LIST_STORAGE_KEY);
-    const parsed = sanitizePersistedReadyListSnapshot(stored?.[POPUP_LAST_READY_LIST_STORAGE_KEY] ?? null);
+    const rawState = stored?.[POPUP_LAST_READY_LIST_STORAGE_KEY] ?? null;
+    const parsed = sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature);
+    const hasExpectedSignature =
+      typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
     if (!parsed) {
-      return;
+      if (rawState && hasExpectedSignature) {
+        await chrome.storage.session.remove(POPUP_LAST_READY_LIST_STORAGE_KEY).catch(() => {});
+      }
+      lastReadyListSnapshot = [];
+      lastReadyListPageSnapshot = { url: '', eligible: false };
+      return false;
     }
     lastReadyListSnapshot = parsed.items;
     lastReadyListPageSnapshot = parsed.page;
+    return true;
   } catch {
     // Ignore popup list snapshot load failures.
+    return false;
   }
 }
 
-function persistReadyListSnapshot(items, page) {
+function persistReadyListSnapshot(items, page, stateSnapshot = currentState) {
   if (!chrome.storage?.session || !Array.isArray(items) || items.length === 0) {
+    return;
+  }
+  const snapshotTrustedSignature = resolveTrustedIdentitySignatureFromState(stateSnapshot);
+  if (!snapshotTrustedSignature) {
     return;
   }
   const payload = {
     items: items.slice(0, 400),
     pageUrl: typeof page?.url === 'string' ? page.url : '',
     pageEligible: page?.eligible === true,
+    trustedIdentitySignature: snapshotTrustedSignature,
     updatedAt: Date.now(),
   };
   void chrome.storage.session
@@ -1051,6 +1167,10 @@ function persistPopupStateSnapshot(snapshot) {
   if (!chrome.storage?.session || !shouldPersistPopupStateSnapshot(snapshot)) {
     return;
   }
+  const snapshotTrustedSignature = resolveTrustedIdentitySignatureFromState(snapshot);
+  if (!snapshotTrustedSignature) {
+    return;
+  }
   const payload = {
     phase: resolvePopupPhase(snapshot),
     serverOrigin: typeof snapshot.serverOrigin === 'string' ? snapshot.serverOrigin : null,
@@ -1071,6 +1191,7 @@ function persistPopupStateSnapshot(snapshot) {
     hasTrustedState: snapshot.hasTrustedState === true,
     hasTokenInMemory: snapshot.hasTokenInMemory === true,
     lastError: typeof snapshot.lastError === 'string' ? snapshot.lastError : null,
+    trustedIdentitySignature: snapshotTrustedSignature,
     updatedAt: Date.now(),
   };
   void chrome.storage.session
@@ -1080,33 +1201,58 @@ function persistPopupStateSnapshot(snapshot) {
     .catch(() => {});
 }
 
-async function buildInitialStateSnapshot() {
-  const persisted = await loadPersistedPopupStateSnapshot();
+async function buildInitialStateSnapshot(options = {}) {
+  const expectedTrustedSignature =
+    typeof options.expectedTrustedSignature === 'string' ? options.expectedTrustedSignature : null;
+  const persisted = await loadPersistedPopupStateSnapshot(expectedTrustedSignature);
   if (persisted) {
     return persisted;
   }
 
-  try {
-    const stored = await chrome.storage.local.get(STORAGE_LOCAL_TRUSTED_KEY);
-    const trusted = stored?.[STORAGE_LOCAL_TRUSTED_KEY];
-    if (trusted && typeof trusted === 'object') {
-      return {
-        ...FALLBACK_PAIRING_STATE,
-        phase: 'local_unlock_required',
-        serverOrigin: typeof trusted.serverOrigin === 'string' ? trusted.serverOrigin : null,
-        deploymentFingerprint:
-          typeof trusted.deploymentFingerprint === 'string' ? trusted.deploymentFingerprint : null,
-        username: typeof trusted.username === 'string' ? trusted.username : null,
-        deviceId: typeof trusted.deviceId === 'string' ? trusted.deviceId : null,
-        deviceName: typeof trusted.deviceName === 'string' ? trusted.deviceName : null,
-        hasTrustedState: true,
-      };
-    }
-  } catch {
-    // Ignore storage read failure and keep fallback.
+  const trusted = options.trustedRecord;
+  if (trusted && typeof trusted === 'object') {
+    return {
+      ...FALLBACK_PAIRING_STATE,
+      phase: 'local_unlock_required',
+      serverOrigin: typeof trusted.serverOrigin === 'string' ? trusted.serverOrigin : null,
+      deploymentFingerprint: typeof trusted.deploymentFingerprint === 'string' ? trusted.deploymentFingerprint : null,
+      username: typeof trusted.username === 'string' ? trusted.username : null,
+      deviceId: typeof trusted.deviceId === 'string' ? trusted.deviceId : null,
+      deviceName: typeof trusted.deviceName === 'string' ? trusted.deviceName : null,
+      hasTrustedState: true,
+    };
   }
 
   return { ...FALLBACK_PAIRING_STATE };
+}
+
+function syncTrustedIdentitySignatureFromState(nextState) {
+  const runtimeTrustedSignature = resolveTrustedIdentitySignatureFromState(nextState);
+  const hasStoredSignature = typeof trustedIdentitySignature === 'string' && trustedIdentitySignature.length > 0;
+  const hasTrustedState = nextState?.hasTrustedState === true;
+
+  if (!hasTrustedState) {
+    if (hasStoredSignature) {
+      trustedIdentitySignature = null;
+      void clearPersistedFirstPaintSnapshots();
+    }
+    return;
+  }
+
+  if (typeof runtimeTrustedSignature !== 'string' || runtimeTrustedSignature.length === 0) {
+    // Keep existing signature on transient/incomplete snapshots.
+    return;
+  }
+
+  if (!hasStoredSignature) {
+    trustedIdentitySignature = runtimeTrustedSignature;
+    return;
+  }
+
+  if (runtimeTrustedSignature !== trustedIdentitySignature) {
+    trustedIdentitySignature = runtimeTrustedSignature;
+    void clearPersistedFirstPaintSnapshots();
+  }
 }
 
 function persistPopupUiState() {
@@ -1872,6 +2018,7 @@ function renderCredentialList(items, options = {}) {
 
 function renderState(payload) {
   currentState = payload.state;
+  syncTrustedIdentitySignatureFromState(currentState);
   const nextPageUrl = typeof payload.page?.url === 'string' ? payload.page.url : '';
   const nextPageEligible = payload.page?.eligible === true;
   if (nextPageUrl !== activePageUrl) {
@@ -1952,7 +2099,7 @@ function renderState(payload) {
         url: typeof payload.page?.url === 'string' ? payload.page.url : activePageUrl,
         eligible: payload.page?.eligible === true,
       };
-      persistReadyListSnapshot(lastReadyListSnapshot, lastReadyListPageSnapshot);
+      persistReadyListSnapshot(lastReadyListSnapshot, lastReadyListPageSnapshot, currentState);
     }
   } else if (effectivePhase !== 'ready') {
     renderCredentialList([], { preserveSelectionOnEmpty: true });
@@ -2390,6 +2537,9 @@ async function handleUnlock() {
 
   const unlockedState = response.state ?? null;
   if (resolvePopupPhase(unlockedState) === 'ready') {
+    if ((!Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0) && trustedIdentitySignature) {
+      await loadPersistedReadyListSnapshot(trustedIdentitySignature);
+    }
     const hasRenderableItems = Array.isArray(currentItems) && currentItems.length > 0;
     const fallbackItems =
       hasRenderableItems || !Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0
@@ -3341,21 +3491,35 @@ popupAutosizer = createPopupAutosizer({
 });
 void (async () => {
   await loadPersistedPopupUiState();
-  await loadPersistedReadyListSnapshot();
+  const trustedRecord = await loadTrustedIdentitySignatureFromLocal();
+  await loadPersistedReadyListSnapshot(trustedIdentitySignature);
   popupUiStateHydrated = true;
-  const initialState = await buildInitialStateSnapshot();
+  const initialState = await buildInitialStateSnapshot({
+    expectedTrustedSignature: trustedIdentitySignature,
+    trustedRecord,
+  });
   const initialPhase = resolvePopupPhase(initialState);
   const startupState =
     initialState?.hasTrustedState === true && initialPhase === 'pairing_required'
       ? buildReconnectingSnapshot(initialState)
       : initialState;
+  const startupItems =
+    resolvePopupPhase(startupState) === 'ready' && Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0
+      ? lastReadyListSnapshot
+      : [];
+  const startupPage =
+    startupItems.length > 0
+      ? {
+          url: lastReadyListPageSnapshot.url,
+          eligible: lastReadyListPageSnapshot.eligible === true,
+        }
+      : {};
   renderState({
     state: startupState,
-    page: {},
-    items: [],
+    page: startupPage,
+    items: startupItems,
   });
-  const passwordHistoryPromise = loadPasswordGeneratorHistory();
+  await loadPasswordGeneratorHistory();
   await refreshStateAndMaybeList();
-  void passwordHistoryPromise;
   scheduleRefresh();
 })();

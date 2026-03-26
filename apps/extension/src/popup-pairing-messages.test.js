@@ -13,9 +13,9 @@ describe('popup pairing completion messaging', () => {
   test('binds simplified unlock context value from current extension state', () => {
     const source = readFileSync(popupScriptPath, 'utf8');
     expect(source).toContain("unlockAccountValue: byId('unlockAccountValue')");
+    expect(source).toContain("unlockDeviceValue: byId('unlockDeviceValue')");
     expect(source).toContain("unlockRevealBtn: byId('unlockRevealBtn')");
     expect(source).toContain("elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';");
-    expect(source).not.toContain("unlockDeviceValue: byId('unlockDeviceValue')");
-    expect(source).not.toContain("elements.unlockDeviceValue.textContent = currentState?.deviceName ?? 'This device';");
+    expect(source).toContain("elements.unlockDeviceValue.textContent = `#${currentState?.deviceName ?? 'VaultLite Extension'}`;");
   });
 });

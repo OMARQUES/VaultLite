@@ -58,6 +58,8 @@ const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
 const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
+const ICON_HYDRATION_START_COOLDOWN_MS = 5 * 60 * 1000;
+const MANUAL_ICON_HYDRATE_COOLDOWN_MS = 5 * 60 * 1000;
 const ICON_CACHE_STORAGE_KEY = 'vaultlite.icon_cache.v1';
 const ICON_CACHE_PERSIST_DEBOUNCE_MS = 1_000;
 const ICON_CACHE_MAX_ENTRIES = 160;
@@ -73,7 +75,6 @@ const UNLOCK_GRANT_TTL_SECONDS = 120;
 const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
 const MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY = 'vaultlite.manual_icon_sync_queue.v1';
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
-const ENABLE_UNLOCK_ASYNC_WARMUP_V1 = true;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
 
 const state = {
@@ -119,6 +120,16 @@ const projectionCacheDiagnostics = {
   quotaExceededCount: 0,
   lastFailureCode: null,
   lastFailureAt: null,
+  projectionHitCount: 0,
+  localCacheHitCount: 0,
+  networkSyncCount: 0,
+  lastProjectionLoadMs: null,
+  lastLocalCacheLoadMs: null,
+  lastFirstItemRenderMs: null,
+  lastListSource: null,
+  lastEmptyListReasonCode: null,
+  lastNetworkSyncStartedAt: null,
+  lastNetworkSyncFinishedAt: null,
 };
 let cacheWarmupState = 'idle';
 let cacheWarmupInFlight = null;
@@ -128,6 +139,9 @@ const canonicalIconCacheByDomain = new Map();
 const iconDiscoverLastAttemptByDomain = new Map();
 const iconResolveMissByDomain = new Map();
 let iconHydrationInFlight = null;
+let lastIconHydrationStartedAt = 0;
+let lastManualIconHydratedAt = 0;
+let manualIconHydrationInFlight = null;
 let iconCachePersistTimer = null;
 let iconCachePersistInFlight = null;
 let iconCacheDirty = false;
@@ -149,6 +163,7 @@ let linkPairingSession = null;
 let manualIconSyncQueueProcessInFlight = null;
 let runtimeInitializationPromise = null;
 let runtimeInitialized = false;
+let lastCredentialCacheSource = 'none';
 
 function sessionStorageArea() {
   if (!chrome.storage || !chrome.storage.session) {
@@ -293,6 +308,14 @@ function normalizeLockRevision(value) {
   }
   const parsed = Math.trunc(value);
   return parsed < 0 ? 0 : parsed;
+}
+
+function normalizeRuntimeTimestamp(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const parsed = Math.trunc(value);
+  return parsed > 0 ? parsed : 0;
 }
 
 function normalizeRecoverRetryState(value) {
@@ -541,16 +564,6 @@ function setPhase(phase, errorMessage = null) {
     if (phase === 'ready') {
       lastUnlockGrantApproveAttemptAt = 0;
       void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
-      if (
-        cacheWarmupState === 'idle' ||
-        cacheWarmupState === 'failed' ||
-        cacheWarmupState === 'sync_failed'
-      ) {
-        void refreshCredentialCache({
-          force: true,
-          awaitCompletion: !ENABLE_UNLOCK_ASYNC_WARMUP_V1,
-        });
-      }
     } else if (
       cacheWarmupState === 'running' ||
       cacheWarmupState === 'syncing' ||
@@ -608,6 +621,7 @@ function clearSensitiveMemory() {
     loadedAt: 0,
     credentials: [],
   };
+  lastCredentialCacheSource = 'none';
   cacheWarmupState = 'idle';
   cacheWarmupError = null;
   cacheWarmupInFlight = null;
@@ -680,6 +694,8 @@ async function persistRuntimeState() {
       lockRevision: normalizeLockRevision(state.lockRevision),
       lastUnlockedLockRevision: normalizeLockRevision(lastUnlockedLockRevision),
       recoverRetryState: normalizeRecoverRetryState(recoverRetryState),
+      lastIconHydrationStartedAt: normalizeRuntimeTimestamp(lastIconHydrationStartedAt),
+      lastManualIconHydratedAt: normalizeRuntimeTimestamp(lastManualIconHydratedAt),
       updatedAt: nowIso(),
     },
   });
@@ -734,6 +750,7 @@ async function persistSessionToken() {
   await sessionStorage.set({
     [STORAGE_SESSION_KEY]: {
       token: sessionToken,
+      sessionExpiresAt: state.sessionExpiresAt,
       updatedAt: nowIso(),
     },
   });
@@ -891,6 +908,7 @@ function snapshotForUi() {
     lastError: state.lastError,
     cacheWarmupState,
     cacheWarmupError,
+    listSource: projectionCacheDiagnostics.lastListSource,
     bridgeUnavailable,
     linkRequest,
   };
@@ -898,6 +916,24 @@ function snapshotForUi() {
 
 function isCredentialCacheFresh() {
   return Date.now() - credentialsCache.loadedAt < CREDENTIAL_CACHE_TTL_MS;
+}
+
+function isSessionNearExpiry(minRemainingMs = 60_000) {
+  if (!sessionToken) {
+    return true;
+  }
+  const expiresAtMs = typeof state.sessionExpiresAt === 'string' ? Date.parse(state.sessionExpiresAt) : NaN;
+  if (!Number.isFinite(expiresAtMs)) {
+    return true;
+  }
+  return expiresAtMs - Date.now() <= Math.max(1_000, Math.trunc(minRemainingMs));
+}
+
+function shouldRefreshSessionAfterUnlock(previousPhase) {
+  if (previousPhase === 'remote_authentication_required') {
+    return true;
+  }
+  return isSessionNearExpiry(60_000);
 }
 
 function extensionCacheIdentity() {
@@ -1057,12 +1093,15 @@ async function persistSessionListProjectionCacheBestEffort() {
 }
 
 async function loadSessionListProjectionCacheBestEffort() {
+  const loadStartedAt = Date.now();
   const identity = extensionCacheIdentity();
   if (!identity) {
+    projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
     return false;
   }
   const expectedCacheKey = extensionProjectionCacheKey(identity);
   if (!expectedCacheKey) {
+    projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
     return false;
   }
   if (
@@ -1070,6 +1109,8 @@ async function loadSessionListProjectionCacheBestEffort() {
     Array.isArray(sessionListProjectionCache.items) &&
     sessionListProjectionCache.items.length > 0
   ) {
+    projectionCacheDiagnostics.projectionHitCount += 1;
+    projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
     return true;
   }
 
@@ -1089,6 +1130,8 @@ async function loadSessionListProjectionCacheBestEffort() {
         items: persistedProjection.items,
       };
       projectionCacheDiagnostics.idbHitCount += 1;
+      projectionCacheDiagnostics.projectionHitCount += 1;
+      projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
       return true;
     }
   } catch (error) {
@@ -1147,6 +1190,7 @@ async function loadSessionListProjectionCacheBestEffort() {
       items: normalizedItems,
     };
     projectionCacheDiagnostics.sessionFallbackHitCount += 1;
+    projectionCacheDiagnostics.projectionHitCount += 1;
     void saveExtensionProjectionCache({
       username: identity.username,
       deviceId: identity.deviceId,
@@ -1157,9 +1201,11 @@ async function loadSessionListProjectionCacheBestEffort() {
     }).catch((error) => {
       recordProjectionCacheDiagnostic(classifyProjectionCacheErrorCode(error, 'idb_persist_failed'));
     });
+    projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
     return true;
   } catch (error) {
     recordProjectionCacheDiagnostic(classifyProjectionCacheErrorCode(error, 'session_load_failed'));
+    projectionCacheDiagnostics.lastProjectionLoadMs = Date.now() - loadStartedAt;
     return false;
   }
 }
@@ -1210,6 +1256,9 @@ function projectionCacheDiagnosticsSnapshot() {
     cacheKey: sessionListProjectionCache.cacheKey,
     itemCount: Array.isArray(sessionListProjectionCache.items) ? sessionListProjectionCache.items.length : 0,
     loadedAt: sessionListProjectionCache.loadedAt,
+    credentialCacheItemCount: Array.isArray(credentialsCache.credentials) ? credentialsCache.credentials.length : 0,
+    credentialCacheLoadedAt: credentialsCache.loadedAt,
+    lastCredentialCacheSource,
   };
 }
 
@@ -1217,8 +1266,10 @@ async function loadCredentialCacheFromLocalBestEffort() {
   if (localCacheLoadInFlight) {
     return localCacheLoadInFlight;
   }
+  const loadStartedAt = Date.now();
   const identity = extensionCacheIdentity();
   if (!identity) {
+    projectionCacheDiagnostics.lastLocalCacheLoadMs = Date.now() - loadStartedAt;
     return false;
   }
   localCacheLoadInFlight = (async () => {
@@ -1227,16 +1278,20 @@ async function loadCredentialCacheFromLocalBestEffort() {
       const cached = await loadExtensionVaultCache(identity);
       if (!cached) {
         cacheWarmupState = 'idle';
+        projectionCacheDiagnostics.lastLocalCacheLoadMs = Date.now() - loadStartedAt;
         return false;
       }
       credentialsCache = {
         loadedAt: Date.now(),
         credentials: Array.isArray(cached.credentials) ? cached.credentials : [],
       };
+      lastCredentialCacheSource = 'vault_local';
       hydrateSessionListProjectionCacheFromCredentials();
       void persistSessionListProjectionCacheBestEffort();
       cacheWarmupError = null;
       cacheWarmupState = 'ready_local';
+      projectionCacheDiagnostics.localCacheHitCount += 1;
+      projectionCacheDiagnostics.lastLocalCacheLoadMs = Date.now() - loadStartedAt;
       return true;
     } catch {
       try {
@@ -1249,6 +1304,7 @@ async function loadCredentialCacheFromLocalBestEffort() {
         // Best effort cleanup only.
       }
       cacheWarmupState = 'idle';
+      projectionCacheDiagnostics.lastLocalCacheLoadMs = Date.now() - loadStartedAt;
       return false;
     }
   })().finally(() => {
@@ -1369,6 +1425,9 @@ async function loadPersistedState() {
   }
   state.hasTrustedState = Boolean(trustedState);
   sessionToken = typeof sessionEntry?.token === 'string' ? sessionEntry.token : null;
+  if (typeof sessionEntry?.sessionExpiresAt === 'string') {
+    state.sessionExpiresAt = sessionEntry.sessionExpiresAt;
+  }
   unlockedContext = null;
   if (
     unlockContextEntry &&
@@ -1387,6 +1446,8 @@ async function loadPersistedState() {
   state.lockRevision = normalizeLockRevision(runtimeStateEntry?.lockRevision);
   lastUnlockedLockRevision = normalizeLockRevision(runtimeStateEntry?.lastUnlockedLockRevision);
   recoverRetryState = normalizeRecoverRetryState(runtimeStateEntry?.recoverRetryState);
+  lastIconHydrationStartedAt = normalizeRuntimeTimestamp(runtimeStateEntry?.lastIconHydrationStartedAt);
+  lastManualIconHydratedAt = normalizeRuntimeTimestamp(runtimeStateEntry?.lastManualIconHydratedAt);
   if (
     sessionListProjectionEntry &&
     typeof sessionListProjectionEntry === 'object' &&
@@ -1873,6 +1934,12 @@ async function restoreSessionInternal(force = false) {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return;
     }
+    if (!isSessionNearExpiry(90_000)) {
+      return;
+    }
+  }
+  if (!force && state.phase === 'local_unlock_required' && !isSessionNearExpiry(90_000)) {
+    return;
   }
 
   if (state.serverOrigin) {
@@ -1997,6 +2064,7 @@ async function restoreSessionInternal(force = false) {
       }
 
       withSessionIdentity(restoreOutput);
+      await persistSessionToken();
 
       if (
         (restoreOutput.sessionState !== 'local_unlock_required' ||
@@ -2018,6 +2086,7 @@ async function restoreSessionInternal(force = false) {
             await persistSessionToken();
           }
           withSessionIdentity(restoreOutput);
+          await persistSessionToken();
         } else if (recovered.kind === 'terminal') {
           await clearTrustedStateForReconnect(
             'Trusted link is no longer valid. Reconnect this extension from web settings.',
@@ -2352,10 +2421,7 @@ async function tryAutoUnlockViaGrantInternalLegacy() {
               setPhase('ready', null);
               setLastUnlockedLockRevision(state.lockRevision);
               armIdleLockTimer();
-              void refreshCredentialCache({
-                force: true,
-                awaitCompletion: !ENABLE_UNLOCK_ASYNC_WARMUP_V1,
-              });
+              void loadCredentialCacheFromLocalBestEffort();
               return true;
             }
             return false;
@@ -2483,8 +2549,15 @@ async function decryptSnapshotEntriesInChunks(entries, accountKey, options = {})
 
 async function performCredentialCacheWarmup(options = {}) {
   const force = options?.force === true;
+  const preferLocalCache = options?.preferLocalCache === true;
   if (!force && isCredentialCacheFresh()) {
     cacheWarmupState = 'completed';
+    cacheWarmupError = null;
+    return ok();
+  }
+
+  if (!force && preferLocalCache && localCacheLoadInFlight) {
+    cacheWarmupState = 'loading_local';
     cacheWarmupError = null;
     return ok();
   }
@@ -2504,6 +2577,7 @@ async function performCredentialCacheWarmup(options = {}) {
 
   cacheWarmupState = 'syncing';
   cacheWarmupError = null;
+  projectionCacheDiagnostics.lastNetworkSyncStartedAt = nowIso();
 
   try {
     const allEntries = [];
@@ -2512,6 +2586,7 @@ async function performCredentialCacheWarmup(options = {}) {
     while (true) {
       if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
         cacheWarmupState = 'idle';
+        projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
         return ok();
       }
       const page = await apiClient.fetchSnapshot({
@@ -2533,10 +2608,6 @@ async function performCredentialCacheWarmup(options = {}) {
       }
     }
 
-    credentialsCache = {
-      loadedAt: 0,
-      credentials: [],
-    };
     const { decrypted, loginEntriesSeen, decryptFailures } = await decryptSnapshotEntriesInChunks(
       allEntries,
       unlockedContext.accountKey,
@@ -2564,12 +2635,16 @@ async function performCredentialCacheWarmup(options = {}) {
       loadedAt: Date.now(),
       credentials: decrypted,
     };
+    lastCredentialCacheSource = 'network';
+    projectionCacheDiagnostics.networkSyncCount += 1;
+    projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
     await persistCredentialCacheToLocalBestEffort(snapshotToken ?? null);
     cacheWarmupState = 'completed';
     cacheWarmupError = null;
     return ok();
   } catch (error) {
     const described = describeError(error, 'snapshot_failed');
+    projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
     if (
       described.code === 'unauthorized' ||
       described.code === 'request_failed_401' ||
@@ -3038,7 +3113,15 @@ async function ensureProjectedIconsHydrated(items) {
   if (domains.length === 0) {
     return;
   }
+  if (!sessionToken || !currentApiClient()) {
+    return;
+  }
+  if (Date.now() - lastIconHydrationStartedAt < ICON_HYDRATION_START_COOLDOWN_MS) {
+    return;
+  }
   if (!iconHydrationInFlight) {
+    lastIconHydrationStartedAt = Date.now();
+    void persistRuntimeState();
     iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains).finally(() => {
       iconHydrationInFlight = null;
     });
@@ -3199,27 +3282,46 @@ async function hydrateManualIconsFromServerBestEffort() {
   if (!apiClient || !sessionToken) {
     return;
   }
-  try {
-    const response = await apiClient.listManualSiteIcons({
-      bearerToken: sessionToken,
-    });
-    if (!response || !Array.isArray(response.icons)) {
-      return;
-    }
-    const nextManualIconMap = {};
-    for (const entry of response.icons) {
-      const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
-      const dataUrl = String(entry.dataUrl ?? '');
-      if (!safeHost || !validateManualIconDataUrl(dataUrl)) {
-        continue;
-      }
-      nextManualIconMap[safeHost] = dataUrl;
-    }
-    manualIconMap = nextManualIconMap;
-    await processManualIconSyncQueueBestEffort();
-  } catch {
-    // Best-effort hydration.
+  const now = Date.now();
+  if (now - lastManualIconHydratedAt < MANUAL_ICON_HYDRATE_COOLDOWN_MS) {
+    return;
   }
+  if (manualIconHydrationInFlight) {
+    await manualIconHydrationInFlight;
+    return;
+  }
+
+  lastManualIconHydratedAt = now;
+  void persistRuntimeState();
+  manualIconHydrationInFlight = (async () => {
+    try {
+      const response = await apiClient.listManualSiteIcons({
+        bearerToken: sessionToken,
+      });
+      if (!response || !Array.isArray(response.icons)) {
+        return;
+      }
+      const nextManualIconMap = {};
+      for (const entry of response.icons) {
+        const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
+        const dataUrl = String(entry.dataUrl ?? '');
+        if (!safeHost || !validateManualIconDataUrl(dataUrl)) {
+          continue;
+        }
+        nextManualIconMap[safeHost] = dataUrl;
+      }
+      manualIconMap = nextManualIconMap;
+      lastManualIconHydratedAt = Date.now();
+      void persistRuntimeState();
+      await processManualIconSyncQueueBestEffort();
+    } catch {
+      // Best-effort hydration.
+    }
+  })().finally(() => {
+    manualIconHydrationInFlight = null;
+  });
+
+  await manualIconHydrationInFlight;
 }
 
 async function listManualIconsInternal() {
@@ -3503,6 +3605,7 @@ function projectCredentialsFromSessionCacheForPage(pageUrl) {
 }
 
 async function listCredentialsInternal(input = {}) {
+  const listStartedAt = Date.now();
   if (credentialsCache.credentials.length === 0) {
     const projectionLoaded = await loadSessionListProjectionCacheBestEffort();
     if (projectionLoaded) {
@@ -3513,6 +3616,7 @@ async function listCredentialsInternal(input = {}) {
   }
   const cacheResult = await refreshCredentialCache({
     awaitCompletion: false,
+    preferLocalCache: true,
   });
   if (!cacheResult.ok) {
     return cacheResult;
@@ -3561,6 +3665,16 @@ async function listCredentialsInternal(input = {}) {
   }
 
   const exactMatchCount = projections.filter((entry) => entry.matchFlags.exactOrigin).length;
+  const listSource =
+    credentialsCache.credentials.length > 0
+      ? lastCredentialCacheSource || 'memory'
+      : sessionListProjectionCache.items.length > 0
+        ? 'projection'
+        : 'empty';
+  projectionCacheDiagnostics.lastListSource = listSource;
+  projectionCacheDiagnostics.lastFirstItemRenderMs =
+    projections.length > 0 ? Date.now() - listStartedAt : null;
+  projectionCacheDiagnostics.lastEmptyListReasonCode = projections.length > 0 ? null : 'no_projected_items';
 
   return ok({
     page: {
@@ -3569,6 +3683,7 @@ async function listCredentialsInternal(input = {}) {
       exactMatchCount,
     },
     items: projections,
+    source: listSource,
   });
 }
 
@@ -4098,11 +4213,9 @@ async function unlockLocalInternal(input) {
     void maybeUpgradeLocalUnlockEnvelopeProfile(password);
     void loadCredentialCacheFromLocalBestEffort();
 
-    void refreshCredentialCache({
-      force: true,
-      awaitCompletion: !ENABLE_UNLOCK_ASYNC_WARMUP_V1,
-    });
-    void restoreSessionInternal(false).catch(() => {});
+    if (shouldRefreshSessionAfterUnlock(currentPhase)) {
+      void restoreSessionInternal(false).catch(() => {});
+    }
 
     return ok({ state: snapshotForUi() });
   } catch (error) {
@@ -4184,7 +4297,7 @@ async function initializeBackgroundRuntimeCore() {
     void clearPersistedUnlockedContext();
     setPhase('local_unlock_required', null);
   }
-  void restoreSessionInternal(true).catch(() => {});
+  void restoreSessionInternal(false).catch(() => {});
 }
 
 async function initializeBackgroundRuntime(force = false) {
