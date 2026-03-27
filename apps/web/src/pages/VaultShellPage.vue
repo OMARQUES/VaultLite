@@ -25,6 +25,7 @@ import TextareaField from '../components/ui/TextareaField.vue';
 import ToastMessage from '../components/ui/ToastMessage.vue';
 import PasswordGeneratorPopover from '../components/vault/PasswordGeneratorPopover.vue';
 import { useSessionStore } from '../composables/useSessionStore';
+import { createVaultLiteAuthClient } from '../lib/auth-client';
 import {
   loadVaultUiState,
   onVaultUiStateUpdated,
@@ -38,6 +39,7 @@ import {
   type ManualSiteIconMap,
 } from '../lib/manual-site-icons';
 import { encryptAttachmentBlobPayload } from '../lib/browser-crypto';
+import { createWebRealtimeClient, type WebRealtimeClient } from '../lib/realtime-client';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
 import {
   type CardVaultItemPayload,
@@ -89,6 +91,7 @@ interface LocalAttachmentAsset {
 const route = useRoute();
 const router = useRouter();
 const sessionStore = useSessionStore();
+const authClient = createVaultLiteAuthClient();
 const vaultClient = createVaultLiteVaultClient();
 const workspace = createVaultWorkspace({
   sessionStore,
@@ -133,7 +136,13 @@ let iconHydrationNonce = 0;
 let manualIconRemoteRefreshInFlight: Promise<void> | null = null;
 let lastManualIconRemoteRefreshAt = 0;
 const MANUAL_ICON_REMOTE_REFRESH_COOLDOWN_MS = 12_000;
+const REALTIME_WATCHDOG_MS = 15 * 60_000;
 const attachmentObjectUrls = new Set<string>();
+const realtimeEnabled = ref(false);
+const realtimeHealthy = ref(false);
+let realtimeClient: WebRealtimeClient | null = null;
+let realtimePollingPaused = false;
+let realtimeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 const loginDraft = reactive<LoginVaultItemPayload>({
   title: '',
@@ -318,8 +327,99 @@ function handleManualIconRefreshOnFocus() {
 }
 
 function handleManualIconRefreshOnVisibilityChange() {
+  realtimeClient?.setVisibilityState(document.visibilityState);
   if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
     void refreshManualSiteIconsFromServer({ force: true });
+  }
+}
+
+function clearRealtimeWatchdog() {
+  if (!realtimeWatchdogTimer) {
+    return;
+  }
+  clearInterval(realtimeWatchdogTimer);
+  realtimeWatchdogTimer = null;
+}
+
+function startRealtimeWatchdog() {
+  clearRealtimeWatchdog();
+  realtimeWatchdogTimer = setInterval(() => {
+    if (sessionStore.state.phase !== 'ready') {
+      return;
+    }
+    void workspace.triggerSync('realtime_watchdog').catch(() => undefined);
+  }, REALTIME_WATCHDOG_MS);
+}
+
+function applyRealtimeHealth(healthy: boolean) {
+  realtimeHealthy.value = healthy;
+  if (healthy && !realtimePollingPaused) {
+    realtimePollingPaused = true;
+    workspace.stopSync();
+    startRealtimeWatchdog();
+    return;
+  }
+  if (!healthy && realtimePollingPaused) {
+    realtimePollingPaused = false;
+    clearRealtimeWatchdog();
+    workspace.startSync();
+  }
+}
+
+function onRealtimeNetworkOnline() {
+  if (!realtimeEnabled.value || sessionStore.state.phase !== 'ready') {
+    return;
+  }
+  realtimeClient?.start();
+}
+
+async function handleRealtimeDomainResync(domains: Array<'vault' | 'icons_manual' | 'password_history' | 'attachments'>) {
+  if (domains.includes('vault')) {
+    void workspace.triggerSync('realtime_vault_resync').catch(() => undefined);
+  }
+  if (domains.includes('icons_manual')) {
+    void refreshManualSiteIconsFromServer({ force: true });
+  }
+  if (domains.includes('attachments')) {
+    const itemId = selectedAttachmentItem.value?.itemId ?? null;
+    if (itemId) {
+      void loadAttachmentUploads(itemId);
+    }
+  }
+}
+
+async function initializeRealtimeClient() {
+  try {
+    const metadata = await sessionStore.getRuntimeMetadata();
+    if (!metadata.realtime?.enabled || metadata.realtime.flags?.realtime_apply_web_v1 !== true) {
+      realtimeEnabled.value = false;
+      return;
+    }
+  } catch {
+    realtimeEnabled.value = false;
+    return;
+  }
+
+  realtimeEnabled.value = true;
+  realtimeClient = createWebRealtimeClient({
+    authClient,
+    sessionStore,
+    onVaultDelta: () => {
+      void workspace.triggerSync('realtime_vault_delta').catch(() => undefined);
+    },
+    onDomainResync: (domains) => {
+      void handleRealtimeDomainResync(domains);
+    },
+    onHealthChange: (healthy) => {
+      applyRealtimeHealth(healthy);
+    },
+  });
+
+  if (typeof document !== 'undefined') {
+    realtimeClient.setVisibilityState(document.visibilityState);
+  }
+  if (sessionStore.state.phase === 'ready') {
+    realtimeClient.start();
   }
 }
 
@@ -1317,6 +1417,21 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => sessionStore.state.phase,
+  (phase) => {
+    if (!realtimeEnabled.value || !realtimeClient) {
+      return;
+    }
+    if (phase === 'ready') {
+      realtimeClient.start();
+      return;
+    }
+    realtimeClient.stop();
+    applyRealtimeHealth(false);
+  },
+);
+
 let unsubscribeUiState: (() => void) | null = null;
 
 function setDirty() {
@@ -2255,14 +2370,21 @@ onMounted(() => {
 
   window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('focus', handleManualIconRefreshOnFocus);
+  window.addEventListener('online', onRealtimeNetworkOnline);
   document.addEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   refreshManualSiteIcons();
   void refreshManualSiteIconsFromServer({ force: true });
   void loadVault();
   workspace.startSync();
+  void initializeRealtimeClient();
 });
 
 onBeforeUnmount(() => {
+  realtimeClient?.stop();
+  realtimeClient = null;
+  realtimeHealthy.value = false;
+  realtimePollingPaused = false;
+  clearRealtimeWatchdog();
   workspace.stopSync();
   unsubscribeUiState?.();
   unsubscribeUiState = null;
@@ -2272,6 +2394,7 @@ onBeforeUnmount(() => {
   compactDesktopQuery = null;
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('focus', handleManualIconRefreshOnFocus);
+  window.removeEventListener('online', onRealtimeNetworkOnline);
   document.removeEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   for (const objectUrl of attachmentObjectUrls) {
     URL.revokeObjectURL(objectUrl);

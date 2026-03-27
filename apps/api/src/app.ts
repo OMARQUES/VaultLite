@@ -7,6 +7,7 @@ import {
   AttachmentUploadInitInputSchema,
   AttachmentUploadInitOutputSchema,
   AttachmentUploadListOutputSchema,
+  AttachmentStateOutputSchema,
   AttachmentUploadRecordSchema,
   ExtensionLinkActionOutputSchema,
   ExtensionLinkApproveInputSchema,
@@ -69,6 +70,7 @@ import {
   SessionLockOutputSchema,
   RemoteAuthenticationChallengeInputSchema,
   RemoteAuthenticationChallengeOutputSchema,
+  RealtimeConnectTokenOutputSchema,
   RuntimeMetadataSchema,
   RemoteAuthenticationInputSchema,
   SessionRestoreResponseSchema,
@@ -95,6 +97,8 @@ import {
   VaultItemRecordSchema,
   VaultItemRestoreOutputSchema,
   VaultItemUpdateInputSchema,
+  type AttachmentStateEntry,
+  type RealtimeTopic,
   type TrustedSessionResponse,
 } from '@vaultlite/contracts';
 import {
@@ -120,6 +124,11 @@ import { Hono } from 'hono';
 import { createHash, createHmac, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { ZodError } from 'zod';
 import { discoverSiteIcon, normalizeDomainCandidate } from './site-icons';
+import {
+  REALTIME_CLOSE_CODES,
+  createRealtimeConnectToken,
+  verifyRealtimeConnectToken,
+} from './realtime';
 
 const GENERIC_INVALID_CREDENTIALS = GenericAuthFailureSchema.parse({
   ok: false,
@@ -139,6 +148,30 @@ interface VaultLiteApiOptions {
   accountKitPrivateKey: KeyObject | string;
   accountKitPublicKey: KeyObject | string;
   csrfValidator?: MutableRequestCsrfValidator;
+  realtime?: {
+    enabled: boolean;
+    wsBaseUrl: string;
+    webAllowedOrigins?: string[];
+    connectTokenSecret: string;
+    connectTokenTtlSeconds: number;
+    authLeaseSeconds: number;
+    heartbeatIntervalMs: number;
+    flags: {
+      realtime_ws_v1: boolean;
+      realtime_delta_vault_v1: boolean;
+      realtime_delta_icons_v1: boolean;
+      realtime_delta_history_v1: boolean;
+      realtime_delta_attachments_v1: boolean;
+      realtime_apply_web_v1: boolean;
+      realtime_apply_extension_v1: boolean;
+    };
+    hubNamespace: {
+      idFromName(name: string): unknown;
+      get(id: unknown): {
+        fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+      };
+    } | null;
+  };
 }
 
 type CanonicalResult = 'success_changed' | 'success_no_op' | 'conflict' | 'denied';
@@ -200,6 +233,17 @@ const VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS = 30;
 const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
 const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
 const ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES = MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES;
+const REALTIME_CONNECT_TOKEN_RATE_LIMIT_ATTEMPTS = 30;
+const REALTIME_CONNECT_TOKEN_RATE_LIMIT_WINDOW_SECONDS = 60;
+const REALTIME_WS_UPGRADE_INITIAL_GLOBAL_RATE_LIMIT_ATTEMPTS = 600;
+const REALTIME_WS_UPGRADE_INITIAL_IP_RATE_LIMIT_ATTEMPTS = 180;
+const REALTIME_WS_UPGRADE_INITIAL_RATE_LIMIT_WINDOW_SECONDS = 60;
+const REALTIME_WS_UPGRADE_RATE_LIMIT_ATTEMPTS = 60;
+const REALTIME_WS_UPGRADE_RATE_LIMIT_WINDOW_SECONDS = 60;
+const REALTIME_JTI_CONSUME_WINDOW_SECONDS = 120;
+const REALTIME_OUTBOX_DISPATCH_BATCH_SIZE = 100;
+const REALTIME_OUTBOX_PUBLISHED_RETENTION_HOURS = 24;
+const REALTIME_OUTBOX_PRUNE_LIMIT = 500;
 
 function isoNow(clock: Clock): string {
   return clock.now().toISOString();
@@ -306,6 +350,18 @@ function canonicalizeServerOrigin(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeAllowedWebOrigins(origins: string[]): string[] {
+  const normalized = new Set<string>();
+  for (const origin of origins) {
+    const canonicalOrigin = canonicalizeServerOrigin(origin);
+    if (!canonicalOrigin) {
+      continue;
+    }
+    normalized.add(canonicalOrigin);
+  }
+  return Array.from(normalized);
 }
 
 type ResolvedSiteIcon = {
@@ -1025,6 +1081,30 @@ function decodeSyncSnapshotCursor(cursor: string): SyncSnapshotCursorPayload | n
   }
 }
 
+type AttachmentStateCursorPayload = {
+  v: 'attachments.cursor.v1';
+  offset: number;
+};
+
+function encodeAttachmentStateCursor(input: AttachmentStateCursorPayload): string {
+  return utf8ToBase64Url(JSON.stringify(input));
+}
+
+function decodeAttachmentStateCursor(cursor: string): AttachmentStateCursorPayload | null {
+  try {
+    const parsed = JSON.parse(base64UrlToUtf8(cursor)) as Partial<AttachmentStateCursorPayload>;
+    if (parsed.v !== 'attachments.cursor.v1' || typeof parsed.offset !== 'number') {
+      return null;
+    }
+    return {
+      v: 'attachments.cursor.v1',
+      offset: Math.max(0, Math.trunc(parsed.offset)),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function buildSyncSnapshotDigest(entries: Array<Record<string, unknown>>): string {
   return sha256Base64Url(JSON.stringify(entries));
 }
@@ -1415,6 +1495,205 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     options.runtimeMode === 'production' && resolveServerUrlProtocol(options.serverUrl) === 'https:';
   SECURITY_HEADERS_INCLUDE_HSTS = includeHsts;
   const configuredServerOrigin = canonicalizeServerOrigin(options.serverUrl) ?? options.serverUrl;
+  const realtimeConfig = options.realtime ?? {
+    enabled: false,
+    wsBaseUrl: '',
+    webAllowedOrigins: [configuredServerOrigin],
+    connectTokenSecret: '',
+    connectTokenTtlSeconds: 45,
+    authLeaseSeconds: 600,
+    heartbeatIntervalMs: 25_000,
+    flags: {
+      realtime_ws_v1: false,
+      realtime_delta_vault_v1: false,
+      realtime_delta_icons_v1: false,
+      realtime_delta_history_v1: false,
+      realtime_delta_attachments_v1: false,
+      realtime_apply_web_v1: false,
+      realtime_apply_extension_v1: false,
+    },
+    hubNamespace: null,
+  };
+  const allowedWebSocketWebOrigins = new Set(
+    normalizeAllowedWebOrigins(realtimeConfig.webAllowedOrigins ?? [configuredServerOrigin]),
+  );
+
+  function isRealtimeOperational(): boolean {
+    return realtimeConfig.enabled && realtimeConfig.flags.realtime_ws_v1 && Boolean(realtimeConfig.hubNamespace);
+  }
+
+  function getRealtimeHubStub(userId: string) {
+    if (!realtimeConfig.hubNamespace) {
+      return null;
+    }
+    const id = realtimeConfig.hubNamespace.idFromName(`${options.deploymentFingerprint}:${userId}`);
+    return realtimeConfig.hubNamespace.get(id);
+  }
+
+  function isRealtimeTopicEnabled(topic: RealtimeTopic): boolean {
+    if (!isRealtimeOperational()) {
+      return false;
+    }
+    if (topic.startsWith('vault.item.')) {
+      return realtimeConfig.flags.realtime_delta_vault_v1;
+    }
+    if (topic.startsWith('icons.')) {
+      return realtimeConfig.flags.realtime_delta_icons_v1;
+    }
+    if (topic.startsWith('password_history.')) {
+      return realtimeConfig.flags.realtime_delta_history_v1;
+    }
+    if (topic.startsWith('vault.attachment.')) {
+      return realtimeConfig.flags.realtime_delta_attachments_v1;
+    }
+    return false;
+  }
+
+  function resolveRealtimeAggregateId(topic: RealtimeTopic, payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const record = payload as Record<string, unknown>;
+    if (topic.startsWith('vault.item.')) {
+      return typeof record.itemId === 'string' ? record.itemId : null;
+    }
+    if (topic.startsWith('icons.manual.')) {
+      return typeof record.domain === 'string' ? record.domain : null;
+    }
+    if (topic.startsWith('password_history.')) {
+      return typeof record.entryId === 'string' ? record.entryId : null;
+    }
+    if (topic.startsWith('vault.attachment.')) {
+      return typeof record.uploadId === 'string' ? record.uploadId : null;
+    }
+    return null;
+  }
+
+  async function dispatchRealtimeOutboxForUser(userId: string): Promise<void> {
+    if (!isRealtimeOperational()) {
+      return;
+    }
+    const stub = getRealtimeHubStub(userId);
+    if (!stub) {
+      return;
+    }
+
+    for (let iteration = 0; iteration < 10; iteration += 1) {
+      const pending = await options.storage.realtimeOutbox.listPendingByUserId(
+        userId,
+        REALTIME_OUTBOX_DISPATCH_BATCH_SIZE,
+      );
+      if (pending.length === 0) {
+        break;
+      }
+      for (const entry of pending) {
+        try {
+          const response = await stub.fetch('https://vaultlite.realtime.internal/publish', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              eventId: entry.eventId,
+              occurredAt: entry.occurredAt,
+              deploymentFingerprint: options.deploymentFingerprint,
+              topic: entry.topic,
+              sourceDeviceId: entry.sourceDeviceId,
+              payload: JSON.parse(entry.payloadJson),
+            }),
+          });
+          if (response.status >= 400) {
+            throw new Error(`realtime_publish_failed_${response.status}`);
+          }
+          await options.storage.realtimeOutbox.markPublished({
+            id: entry.id,
+            publishedAt: isoNow(options.clock),
+          });
+        } catch (error) {
+          await options.storage.realtimeOutbox.markFailed({
+            id: entry.id,
+            failedAt: isoNow(options.clock),
+            lastError: error instanceof Error ? error.message : 'publish_failed',
+          });
+          return;
+        }
+      }
+    }
+
+    const cutoffIso = new Date(
+      options.clock.now().getTime() - REALTIME_OUTBOX_PUBLISHED_RETENTION_HOURS * 60 * 60 * 1000,
+    ).toISOString();
+    await options.storage.realtimeOutbox.deletePublishedBefore({
+      cutoffIso,
+      limit: REALTIME_OUTBOX_PRUNE_LIMIT,
+    });
+  }
+
+  async function publishRealtimeEvent(input: {
+    userId: string;
+    topic: RealtimeTopic;
+    payload: unknown;
+    sourceDeviceId: string | null;
+    occurredAt?: string;
+    eventId?: string;
+  }): Promise<void> {
+    if (!isRealtimeTopicEnabled(input.topic)) {
+      return;
+    }
+
+    const occurredAt = input.occurredAt ?? isoNow(options.clock);
+    const eventId = input.eventId ?? options.idGenerator.nextId('realtime_event');
+    const aggregateId = resolveRealtimeAggregateId(input.topic, input.payload);
+    const idempotencyKey = `${input.userId}:${input.topic}:${aggregateId ?? 'none'}:${eventId}`;
+    try {
+      await options.storage.realtimeOutbox.enqueue({
+        id: options.idGenerator.nextId('realtime_outbox'),
+        userId: input.userId,
+        topic: input.topic,
+        aggregateId,
+        idempotencyKey,
+        eventId,
+        occurredAt,
+        sourceDeviceId: input.sourceDeviceId,
+        payloadJson: JSON.stringify(input.payload),
+        createdAt: isoNow(options.clock),
+        publishedAt: null,
+        attemptCount: 0,
+        lastError: null,
+      });
+      await dispatchRealtimeOutboxForUser(input.userId);
+    } catch {
+      // Keep mutation path resilient. Replay fallback will recover state.
+    }
+  }
+
+  async function invalidateRealtimeConnections(input: {
+    userId: string;
+    code: keyof typeof REALTIME_CLOSE_CODES;
+    message: string;
+  }): Promise<void> {
+    if (!isRealtimeOperational()) {
+      return;
+    }
+    const stub = getRealtimeHubStub(input.userId);
+    if (!stub) {
+      return;
+    }
+    try {
+      await stub.fetch('https://vaultlite.realtime.internal/invalidate', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          code: input.code,
+          message: input.message,
+        }),
+      });
+    } catch {
+      // best effort
+    }
+  }
 
   app.use('*', async (c, next) => {
     await next();
@@ -1678,9 +1957,200 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       RuntimeMetadataSchema.parse({
         serverUrl: options.serverUrl,
         deploymentFingerprint: options.deploymentFingerprint,
+        ...(options.realtime
+          ? {
+              realtime: {
+                enabled: isRealtimeOperational(),
+                wsBaseUrl: realtimeConfig.wsBaseUrl,
+                authLeaseSeconds: realtimeConfig.authLeaseSeconds,
+                heartbeatIntervalMs: realtimeConfig.heartbeatIntervalMs,
+                flags: realtimeConfig.flags,
+              },
+            }
+          : {}),
       }),
     ),
   );
+
+  app.post('/api/realtime/connect-token', async (c) => {
+    if (!isRealtimeOperational()) {
+      return jsonResponse(404, { ok: false, code: 'realtime_disabled' });
+    }
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+
+    const ip = resolveRequestIp(c.req.raw);
+    const connectTokenRate = await options.storage.authRateLimits.increment({
+      key: `realtime-connect-token:${ip}:${sessionContext.user.userId}:${sessionContext.device.deviceId}`,
+      nowIso: isoNow(options.clock),
+      windowSeconds: REALTIME_CONNECT_TOKEN_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    if (connectTokenRate.attemptCount > REALTIME_CONNECT_TOKEN_RATE_LIMIT_ATTEMPTS) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
+
+    let bodyCursor = 0;
+    try {
+      const parsed = (await c.req.json()) as { cursor?: number };
+      if (typeof parsed?.cursor === 'number' && Number.isFinite(parsed.cursor)) {
+        bodyCursor = Math.max(0, Math.trunc(parsed.cursor));
+      }
+    } catch {
+      // optional body
+    }
+
+    const now = options.clock.now();
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    const expiresAtSeconds = nowSeconds + realtimeConfig.connectTokenTtlSeconds;
+    const authLeaseExpiresAt = new Date(now.getTime() + realtimeConfig.authLeaseSeconds * 1000).toISOString();
+    const jti = options.idGenerator.nextId('realtime_jti');
+    const token = createRealtimeConnectToken({
+      claims: {
+        userId: sessionContext.user.userId,
+        sessionId: sessionContext.session.sessionId,
+        deviceId: sessionContext.device.deviceId,
+        surface: sessionContext.authMode === 'extension_bearer' ? 'extension' : 'web',
+        deploymentFingerprint: options.deploymentFingerprint,
+        jti,
+        issuedAtUnixSeconds: nowSeconds,
+        expiresAtUnixSeconds: expiresAtSeconds,
+      },
+      deploymentFingerprint: options.deploymentFingerprint,
+      secret: realtimeConfig.connectTokenSecret,
+    });
+    const wsBase = realtimeConfig.wsBaseUrl.replace(/\/+$/u, '');
+    return jsonResponse(
+      200,
+      RealtimeConnectTokenOutputSchema.parse({
+        wsUrl: `${wsBase}/api/realtime/ws`,
+        connectToken: token,
+        expiresAt: new Date(expiresAtSeconds * 1000).toISOString(),
+        resumeCursor: bodyCursor,
+        authLeaseExpiresAt,
+        heartbeatIntervalMs: realtimeConfig.heartbeatIntervalMs,
+      }),
+    );
+  });
+
+  app.get('/api/realtime/ws', async (c) => {
+    if (!isRealtimeOperational()) {
+      return jsonResponse(404, { ok: false, code: 'realtime_disabled' });
+    }
+    if (c.req.raw.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+      return jsonResponse(426, { ok: false, code: 'websocket_upgrade_required' });
+    }
+
+    const token = c.req.query('token')?.trim() ?? '';
+    if (!token) {
+      return jsonResponse(401, { ok: false, code: 'invalid_connect_token' });
+    }
+    const verified = verifyRealtimeConnectToken({
+      token,
+      deploymentFingerprint: options.deploymentFingerprint,
+      secret: realtimeConfig.connectTokenSecret,
+      nowUnixSeconds: Math.floor(options.clock.now().getTime() / 1000),
+    });
+    if (!verified.ok) {
+      return jsonResponse(401, { ok: false, code: 'invalid_connect_token' });
+    }
+
+    const requestIp = resolveRequestIp(c.req.raw);
+    const nowIso = isoNow(options.clock);
+    const initialGlobalRate = await options.storage.authRateLimits.increment({
+      key: 'realtime-ws-upgrade-initial:global',
+      nowIso,
+      windowSeconds: REALTIME_WS_UPGRADE_INITIAL_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    const initialIpRate = await options.storage.authRateLimits.increment({
+      key: `realtime-ws-upgrade-initial:${requestIp}`,
+      nowIso,
+      windowSeconds: REALTIME_WS_UPGRADE_INITIAL_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    if (
+      initialGlobalRate.attemptCount > REALTIME_WS_UPGRADE_INITIAL_GLOBAL_RATE_LIMIT_ATTEMPTS ||
+      initialIpRate.attemptCount > REALTIME_WS_UPGRADE_INITIAL_IP_RATE_LIMIT_ATTEMPTS
+    ) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
+
+    const resolved = await resolveAuthenticatedSession({
+      storage: options.storage,
+      clock: options.clock,
+      sessionId: verified.claims.sid,
+    });
+    if (!resolved) {
+      return jsonResponse(401, { ok: false, code: 'session_invalid' });
+    }
+    if (resolved.user.userId !== verified.claims.sub || resolved.device.deviceId !== verified.claims.did) {
+      return jsonResponse(401, { ok: false, code: 'session_context_mismatch' });
+    }
+    if (verified.claims.surface === 'web') {
+      const originHeader = c.req.raw.headers.get('origin');
+      const requestOrigin = originHeader ? canonicalizeServerOrigin(originHeader) ?? '' : '';
+      if (!requestOrigin || !allowedWebSocketWebOrigins.has(requestOrigin)) {
+        return jsonResponse(403, { ok: false, code: 'origin_not_allowed' });
+      }
+      if (resolved.device.platform !== 'web') {
+        return jsonResponse(403, { ok: false, code: 'surface_mismatch' });
+      }
+    } else if (resolved.device.platform !== 'extension') {
+      return jsonResponse(403, { ok: false, code: 'surface_mismatch' });
+    }
+
+    const jtiConsume = await options.storage.realtimeOneTimeTokens.consume({
+      tokenKey: `realtime-connect-jti:${verified.claims.jti}`,
+      consumedAt: nowIso,
+      expiresAt: addSeconds(nowIso, REALTIME_JTI_CONSUME_WINDOW_SECONDS),
+    });
+    if (!jtiConsume.consumed) {
+      return jsonResponse(401, { ok: false, code: 'connect_token_replayed' });
+    }
+
+    const upgradeRate = await options.storage.authRateLimits.increment({
+      key: `realtime-ws-upgrade:${requestIp}:${verified.claims.sub}`,
+      nowIso,
+      windowSeconds: REALTIME_WS_UPGRADE_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    if (upgradeRate.attemptCount > REALTIME_WS_UPGRADE_RATE_LIMIT_ATTEMPTS) {
+      return jsonResponse(429, { ok: false, code: 'rate_limited' });
+    }
+
+    const stub = getRealtimeHubStub(resolved.user.userId);
+    if (!stub) {
+      return jsonResponse(503, { ok: false, code: 'realtime_unavailable' });
+    }
+    void dispatchRealtimeOutboxForUser(resolved.user.userId).catch(() => undefined);
+    const queryCursor = Math.max(0, Math.trunc(Number(c.req.query('cursor') ?? '0')));
+    const cursor = Number.isFinite(queryCursor) ? queryCursor : 0;
+    const now = options.clock.now();
+    const authLeaseExpiresAt = new Date(now.getTime() + realtimeConfig.authLeaseSeconds * 1000).toISOString();
+    const headers = new Headers(c.req.raw.headers);
+    headers.set('x-vl-user-id', resolved.user.userId);
+    headers.set('x-vl-device-id', resolved.device.deviceId);
+    headers.set('x-vl-surface', verified.claims.surface);
+    headers.set('x-vl-cursor', String(cursor));
+    headers.set('x-vl-auth-lease-expires-at', authLeaseExpiresAt);
+    headers.set('x-vl-heartbeat-interval-ms', String(realtimeConfig.heartbeatIntervalMs));
+    headers.delete('cookie');
+    headers.delete('authorization');
+    const response = await stub.fetch(
+      new Request('https://vaultlite.realtime.internal/ws', {
+        method: 'GET',
+        headers,
+      }),
+    );
+    if (response.status >= 400) {
+      return jsonResponse(503, { ok: false, code: 'realtime_upgrade_failed' });
+    }
+    return response;
+  });
 
   app.get('/api/bootstrap/state', async () => {
     const state = await options.storage.deploymentState.get();
@@ -2664,6 +3134,13 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
 
     const updatedUser = (await options.storage.users.findByUserId(targetUser.userId)) ?? targetUser;
     const trustedDevicesCount = await options.storage.devices.countActiveByUserId(updatedUser.userId);
+    if (result === 'success_changed' && updatedUser.lifecycleState !== 'active') {
+      await invalidateRealtimeConnections({
+        userId: updatedUser.userId,
+        code: 'lifecycle_not_active',
+        message: `User lifecycle transitioned to ${updatedUser.lifecycleState}.`,
+      });
+    }
     const body = AdminUserLifecycleMutationOutputSchema.parse({
       ok: true,
       result: toCanonicalResult(result),
@@ -4497,6 +4974,18 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     });
     const unresolved = discovery.unresolved.filter((domain) => !existingAutomaticByDomain.has(domain));
 
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'icons.discover.resolved',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        icons: merged,
+        unresolved,
+        updatedAt: nowIso,
+      },
+    });
+
     return jsonResponse(
       200,
       SiteIconDiscoverBatchOutputSchema.parse({
@@ -4566,6 +5055,20 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       updatedAt: nowIso,
     });
     const noChanges = previous?.dataUrl === input.dataUrl && previous.source === input.source;
+    if (!noChanges) {
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'icons.manual.upserted',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: nowIso,
+        payload: {
+          domain: input.domain,
+          dataUrl: input.dataUrl,
+          source: input.source,
+          updatedAt: nowIso,
+        },
+      });
+    }
     return jsonResponse(
       200,
       SiteIconManualActionOutputSchema.parse({
@@ -4600,6 +5103,17 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       sessionContext.user.userId,
       input.domain,
     );
+    if (changed) {
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'icons.manual.removed',
+        sourceDeviceId: sessionContext.device.deviceId,
+        payload: {
+          domain: input.domain,
+          updatedAt: isoNow(options.clock),
+        },
+      });
+    }
     return jsonResponse(
       200,
       SiteIconManualActionOutputSchema.parse({
@@ -4653,6 +5167,10 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return parsedBody.response;
     }
     const input = PasswordGeneratorHistoryUpsertInputSchema.parse(parsedBody.body);
+    const beforeEntries = await options.storage.passwordGeneratorHistory.listByUserId(
+      sessionContext.user.userId,
+      PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES + 1,
+    );
     const nowIso = isoNow(options.clock);
     await options.storage.passwordGeneratorHistory.upsert({
       userId: sessionContext.user.userId,
@@ -4665,6 +5183,36 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       sessionContext.user.userId,
       PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES,
     );
+    const afterEntries = await options.storage.passwordGeneratorHistory.listByUserId(
+      sessionContext.user.userId,
+      PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES + 1,
+    );
+    const afterById = new Set(afterEntries.map((entry) => entry.entryId));
+    const removedEntries = beforeEntries.filter((entry) => !afterById.has(entry.entryId));
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'password_history.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        entryId: input.entryId,
+        encryptedPayload: input.encryptedPayload,
+        createdAt: input.createdAt,
+        updatedAt: nowIso,
+      },
+    });
+    for (const removedEntry of removedEntries) {
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'password_history.removed',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: nowIso,
+        payload: {
+          entryId: removedEntry.entryId,
+          removedAt: nowIso,
+        },
+      });
+    }
     return jsonResponse(
       200,
       PasswordGeneratorHistoryActionOutputSchema.parse({
@@ -4781,6 +5329,11 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       targetId: sessionContext.device.deviceId,
       result: 'success_changed',
       reasonCode: input.reasonCode ?? null,
+    });
+    await invalidateRealtimeConnections({
+      userId: sessionContext.user.userId,
+      code: 'lock_revision_advanced',
+      message: 'Lock revision advanced for linked surface pair.',
     });
     return jsonResponse(
       200,
@@ -5001,6 +5554,11 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         userId: sessionContext.user.userId,
         deviceId: targetDevice.deviceId,
         revokedAtIso: nowIso,
+      });
+      await invalidateRealtimeConnections({
+        userId: sessionContext.user.userId,
+        code: 'session_revoked',
+        message: 'A trusted device/session was revoked.',
       });
     }
 
@@ -5700,6 +6258,19 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       createdAt: nowIso,
       updatedAt: nowIso,
     });
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.item.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        itemId: item.itemId,
+        itemType: item.itemType,
+        revision: item.revision,
+        updatedAt: item.updatedAt,
+        encryptedPayload: item.encryptedPayload,
+      },
+    });
 
     return jsonResponse(
       201,
@@ -5748,6 +6319,19 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         encryptedPayload: input.encryptedPayload,
         expectedRevision: input.expectedRevision,
         updatedAt: isoNow(options.clock),
+      });
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.item.upserted',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: item.updatedAt,
+        payload: {
+          itemId: item.itemId,
+          itemType: item.itemType,
+          revision: item.revision,
+          updatedAt: item.updatedAt,
+          encryptedPayload: item.encryptedPayload,
+        },
       });
 
       return jsonResponse(
@@ -5804,6 +6388,25 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(404, { ok: false, code: 'not_found' });
     }
 
+    const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+      sessionContext.user.userId,
+    );
+    const deletedTombstone = tombstones.find((entry) => entry.itemId === c.req.param('itemId'));
+    if (deletedTombstone) {
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.item.tombstoned',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: deletedTombstone.deletedAt,
+        payload: {
+          itemId: deletedTombstone.itemId,
+          itemType: deletedTombstone.itemType,
+          revision: deletedTombstone.revision,
+          deletedAt: deletedTombstone.deletedAt,
+        },
+      });
+    }
+
     return emptyResponse(204);
   });
 
@@ -5838,6 +6441,19 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (!restoreResult.item) {
       return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
     }
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.item.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: restoreResult.item.updatedAt,
+      payload: {
+        itemId: restoreResult.item.itemId,
+        itemType: restoreResult.item.itemType,
+        revision: restoreResult.item.revision,
+        updatedAt: restoreResult.item.updatedAt,
+        encryptedPayload: restoreResult.item.encryptedPayload,
+      },
+    });
 
     return jsonResponse(
       200,
@@ -6057,6 +6673,22 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         updatedAt: nowIso,
         attachedAt: nowIso,
       });
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.attachment.state_changed',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: attached.updatedAt,
+        payload: {
+          uploadId: attached.key,
+          itemId: attached.itemId,
+          lifecycleState: 'attached',
+          contentType: attached.contentType,
+          size: attached.size,
+          uploadedAt: attached.uploadedAt,
+          attachedAt: attached.attachedAt,
+          updatedAt: attached.updatedAt,
+        },
+      });
 
       return jsonResponse(
         200,
@@ -6136,6 +6768,74 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       200,
       AttachmentUploadListOutputSchema.parse({
         uploads: uploads.map((upload) => toAttachmentUploadRecord(upload)),
+      }),
+    );
+  });
+
+  app.get('/api/attachments/state', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+
+    const requestedPageSize = Number(c.req.query('pageSize') ?? '100');
+    const pageSize = Number.isFinite(requestedPageSize)
+      ? Math.max(1, Math.min(200, Math.trunc(requestedPageSize)))
+      : 100;
+    const cursor = c.req.query('cursor');
+    const decodedCursor = cursor ? decodeAttachmentStateCursor(cursor) : { v: 'attachments.cursor.v1' as const, offset: 0 };
+    if (!decodedCursor) {
+      return jsonResponse(409, { ok: false, code: 'invalid_snapshot_context' });
+    }
+    const offset = Math.max(0, Math.trunc(decodedCursor.offset));
+    const uploads = await options.storage.attachmentBlobs.listByOwner(sessionContext.user.userId);
+    const stateEntries = uploads
+      .flatMap<AttachmentStateEntry>((upload) => {
+        if (upload.lifecycleState === 'attached' && upload.itemId && upload.uploadedAt && upload.attachedAt) {
+          return [
+            {
+              entryType: 'state_changed' as const,
+              uploadId: upload.key,
+              itemId: upload.itemId,
+              lifecycleState: 'attached' as const,
+              contentType: upload.contentType,
+              size: upload.size,
+              uploadedAt: upload.uploadedAt,
+              attachedAt: upload.attachedAt,
+              updatedAt: upload.updatedAt,
+            },
+          ];
+        }
+        if ((upload.lifecycleState === 'deleted' || upload.lifecycleState === 'orphaned') && upload.itemId) {
+          return [
+            {
+              entryType: 'removed' as const,
+              uploadId: upload.key,
+              itemId: upload.itemId,
+              removedAt: upload.updatedAt,
+              reason: upload.lifecycleState,
+            },
+          ];
+        }
+        return [];
+      });
+    const page = stateEntries.slice(offset, offset + pageSize);
+    const nextCursor =
+      offset + page.length < stateEntries.length
+        ? encodeAttachmentStateCursor({
+            v: 'attachments.cursor.v1',
+            offset: offset + page.length,
+          })
+        : null;
+
+    return jsonResponse(
+      200,
+      AttachmentStateOutputSchema.parse({
+        cursor: nextCursor,
+        pageSize,
+        entries: page,
       }),
     );
   });

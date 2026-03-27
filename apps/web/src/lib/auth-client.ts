@@ -37,6 +37,7 @@ import type {
   PasswordGeneratorHistoryActionOutput,
   PasswordGeneratorHistoryListOutput,
   PasswordGeneratorHistoryUpsertInput,
+  RealtimeConnectTokenOutput,
   RecentReauthInput,
   RecentReauthOutput,
   RemoteAuthenticationChallengeOutput,
@@ -82,6 +83,7 @@ export interface VaultLiteAuthClient {
   ): Promise<BootstrapCheckpointCompleteOutput>;
   getRuntimeMetadata(): Promise<RuntimeMetadata>;
   restoreSession(): Promise<SessionRestoreResponse>;
+  getRealtimeConnectToken(input?: { cursor?: number }): Promise<RealtimeConnectTokenOutput>;
   requestRemoteAuthenticationChallenge(username: string): Promise<RemoteAuthenticationChallengeOutput>;
   completeRemoteAuthentication(input: {
     username: string;
@@ -281,6 +283,18 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
     },
     restoreSession() {
       return requestJson<SessionRestoreResponse>(`${baseUrl}/api/auth/session/restore`);
+    },
+    getRealtimeConnectToken(input) {
+      return requestJson<RealtimeConnectTokenOutput>(
+        `${baseUrl}/api/realtime/connect-token`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            cursor: typeof input?.cursor === 'number' ? input.cursor : 0,
+          }),
+        },
+        { emitUnauthorizedEvent: true },
+      );
     },
     requestRemoteAuthenticationChallenge(username) {
       return requestJson<RemoteAuthenticationChallengeOutput>(

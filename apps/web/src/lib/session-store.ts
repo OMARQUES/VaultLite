@@ -166,9 +166,15 @@ const ENABLE_LOCAL_KDF_CALIBRATION_V1 = true;
 interface WebUnlockCacheRecord {
   username: string;
   deviceId: string;
-  accountKey: string;
+  algorithm: 'AES-GCM';
+  iv: string;
+  ciphertext: string;
   expiresAt: number;
   lockRevision: number;
+}
+
+interface WebUnlockCachePayload {
+  accountKey: string;
 }
 
 function asErrorMessage(error: unknown): string {
@@ -227,8 +233,11 @@ function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecor
     if (
       typeof parsed?.username !== 'string' ||
       typeof parsed?.deviceId !== 'string' ||
-      typeof parsed?.accountKey !== 'string' ||
-      parsed.accountKey.length < 20 ||
+      parsed.algorithm !== 'AES-GCM' ||
+      typeof parsed?.iv !== 'string' ||
+      parsed.iv.length < 8 ||
+      typeof parsed?.ciphertext !== 'string' ||
+      parsed.ciphertext.length < 16 ||
       typeof parsed?.expiresAt !== 'number' ||
       typeof parsed?.lockRevision !== 'number'
     ) {
@@ -237,7 +246,9 @@ function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecor
     return {
       username: parsed.username,
       deviceId: parsed.deviceId,
-      accountKey: parsed.accountKey,
+      algorithm: 'AES-GCM',
+      iv: parsed.iv,
+      ciphertext: parsed.ciphertext,
       expiresAt: parsed.expiresAt,
       lockRevision: Math.max(0, Math.trunc(parsed.lockRevision)),
     };
@@ -246,9 +257,142 @@ function parseWebUnlockCacheRecord(rawValue: string | null): WebUnlockCacheRecor
   }
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (const value of bytes) {
+    binary += String.fromCharCode(value);
+  }
+  return btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const normalized = value.replace(/-/gu, '+').replace(/_/gu, '/');
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  const padded = normalized + '='.repeat(padLength);
+  const binary = atob(padded);
+  const output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    output[index] = binary.charCodeAt(index);
+  }
+  return output;
+}
+
+function toStrictUint8Array(bytes: Uint8Array): Uint8Array {
+  return Uint8Array.from(bytes);
+}
+
 function loadWebUnlockCache(): WebUnlockCacheRecord | null {
   try {
     return parseWebUnlockCacheRecord(globalThis.sessionStorage?.getItem(WEB_UNLOCK_CACHE_STORAGE_KEY) ?? null);
+  } catch {
+    return null;
+  }
+}
+
+async function ensureWebUnlockCacheKey(existing: CryptoKey | null): Promise<CryptoKey | null> {
+  if (existing) {
+    return existing;
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof globalThis.crypto?.getRandomValues !== 'function') {
+    return null;
+  }
+  try {
+    return await subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  } catch {
+    return null;
+  }
+}
+
+function buildWebUnlockCacheAad(record: {
+  username: string;
+  deviceId: string;
+  expiresAt: number;
+  lockRevision: number;
+}): Uint8Array {
+  return new TextEncoder().encode(
+    `${record.username}|${record.deviceId}|${Math.trunc(record.expiresAt)}|${Math.trunc(record.lockRevision)}`,
+  );
+}
+
+async function encryptWebUnlockCacheRecord(input: {
+  username: string;
+  deviceId: string;
+  accountKey: string;
+  expiresAt: number;
+  lockRevision: number;
+  key: CryptoKey;
+}): Promise<WebUnlockCacheRecord | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof globalThis.crypto?.getRandomValues !== 'function') {
+    return null;
+  }
+  try {
+    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(
+      JSON.stringify({
+        accountKey: input.accountKey,
+      } satisfies WebUnlockCachePayload),
+    );
+    const ciphertext = await subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: toStrictUint8Array(iv) as unknown as BufferSource,
+        additionalData: toStrictUint8Array(buildWebUnlockCacheAad({
+          username: input.username,
+          deviceId: input.deviceId,
+          expiresAt: input.expiresAt,
+          lockRevision: input.lockRevision,
+        })) as unknown as BufferSource,
+      },
+      input.key,
+      plaintext,
+    );
+    return {
+      username: input.username,
+      deviceId: input.deviceId,
+      algorithm: 'AES-GCM',
+      iv: bytesToBase64Url(iv),
+      ciphertext: bytesToBase64Url(new Uint8Array(ciphertext)),
+      expiresAt: input.expiresAt,
+      lockRevision: Math.max(0, Math.trunc(input.lockRevision)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function decryptWebUnlockCacheAccountKey(
+  record: WebUnlockCacheRecord,
+  key: CryptoKey | null,
+): Promise<string | null> {
+  if (!key) {
+    return null;
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    return null;
+  }
+  try {
+    const decrypted = await subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: toStrictUint8Array(base64UrlToBytes(record.iv)) as unknown as BufferSource,
+        additionalData: toStrictUint8Array(buildWebUnlockCacheAad({
+          username: record.username,
+          deviceId: record.deviceId,
+          expiresAt: record.expiresAt,
+          lockRevision: record.lockRevision,
+        })) as unknown as BufferSource,
+      },
+      key,
+      toStrictUint8Array(base64UrlToBytes(record.ciphertext)) as unknown as BufferSource,
+    );
+    const parsed = JSON.parse(new TextDecoder().decode(decrypted)) as Partial<WebUnlockCachePayload>;
+    if (typeof parsed?.accountKey !== 'string' || parsed.accountKey.length < 20) {
+      return null;
+    }
+    return parsed.accountKey;
   } catch {
     return null;
   }
@@ -324,6 +468,7 @@ export function createSessionStore(input: {
   let readyState: ReadyState | null = null;
   let pendingOnboarding: PendingOnboardingState | null = null;
   let runtimeMetadata: RuntimeMetadata | null = null;
+  let webUnlockCacheKey: CryptoKey | null = null;
 
   function transition(patch: Partial<SessionState>) {
     Object.assign(state, patch);
@@ -331,6 +476,7 @@ export function createSessionStore(input: {
 
   function clearReadyState() {
     readyState = null;
+    webUnlockCacheKey = null;
     clearWebUnlockCache();
   }
 
@@ -395,7 +541,7 @@ export function createSessionStore(input: {
     persistAutoLockAfterMs(parsed);
   }
 
-  function tryRestoreReadyStateFromCache(inputValue: {
+  async function tryRestoreReadyStateFromCache(inputValue: {
     username: string;
     userId: string;
     role: 'owner' | 'user';
@@ -405,7 +551,7 @@ export function createSessionStore(input: {
     bundleVersion: number | null;
     trustedLocalEncryptedBundle: string;
     lockRevision: number;
-  }): boolean {
+  }): Promise<boolean> {
     const cached = loadWebUnlockCache();
     if (!cached) {
       return false;
@@ -424,8 +570,13 @@ export function createSessionStore(input: {
       clearWebUnlockCache();
       return false;
     }
+    const decryptedAccountKey = await decryptWebUnlockCacheAccountKey(cached, webUnlockCacheKey);
+    if (!decryptedAccountKey) {
+      clearWebUnlockCache();
+      return false;
+    }
     readyState = {
-      accountKey: cached.accountKey,
+      accountKey: decryptedAccountKey,
       encryptedAccountBundle: inputValue.trustedLocalEncryptedBundle,
     };
     transition({
@@ -445,18 +596,40 @@ export function createSessionStore(input: {
     return true;
   }
 
-  function persistReadyStateUnlockCache() {
+  async function persistReadyStateUnlockCache() {
     if (!readyState || !state.username || !state.deviceId || state.phase !== 'ready') {
       return;
     }
+    const readySnapshot = readyState;
+    const usernameSnapshot = state.username;
+    const deviceIdSnapshot = state.deviceId;
+    const lockRevisionSnapshot = Math.max(0, Math.trunc(state.lockRevision));
     const expiresAt = Date.now() + state.autoLockAfterMs;
-    persistWebUnlockCache({
-      username: state.username,
-      deviceId: state.deviceId,
-      accountKey: readyState.accountKey,
+    const resolvedKey = await ensureWebUnlockCacheKey(webUnlockCacheKey);
+    if (!resolvedKey) {
+      return;
+    }
+    if (
+      readyState !== readySnapshot ||
+      state.phase !== 'ready' ||
+      state.username !== usernameSnapshot ||
+      state.deviceId !== deviceIdSnapshot
+    ) {
+      return;
+    }
+    webUnlockCacheKey = resolvedKey;
+    const encryptedRecord = await encryptWebUnlockCacheRecord({
+      username: usernameSnapshot,
+      deviceId: deviceIdSnapshot,
+      accountKey: readySnapshot.accountKey,
       expiresAt,
-      lockRevision: Math.max(0, Math.trunc(state.lockRevision)),
+      lockRevision: lockRevisionSnapshot,
+      key: resolvedKey,
     });
+    if (!encryptedRecord) {
+      return;
+    }
+    persistWebUnlockCache(encryptedRecord);
   }
 
   return {
@@ -474,7 +647,7 @@ export function createSessionStore(input: {
       });
       applyUnlockPolicy(response.policy.unlockIdleTimeoutMs);
       if (state.phase === 'ready') {
-        persistReadyStateUnlockCache();
+        await persistReadyStateUnlockCache();
       }
     },
     async restoreSession() {
@@ -556,7 +729,7 @@ export function createSessionStore(input: {
       }
 
       if (
-        tryRestoreReadyStateFromCache({
+        await tryRestoreReadyStateFromCache({
           username: restored.user.username,
           userId: restored.user.userId,
           role: restored.user.role,
@@ -952,7 +1125,7 @@ export function createSessionStore(input: {
         lastError: null,
         lastActivityAt: Date.now(),
       });
-      persistReadyStateUnlockCache();
+      await persistReadyStateUnlockCache();
       // Best-effort: unlocking with current password should satisfy recent reauth-sensitive actions.
       // Never block local unlock UX if network or session refresh temporarily fails.
       void unlockAuthProofPromise
@@ -1170,7 +1343,7 @@ export function createSessionStore(input: {
       });
       persistAutoLockAfterMs(value);
       if (state.phase === 'ready') {
-        persistReadyStateUnlockCache();
+        void persistReadyStateUnlockCache();
       }
     },
     lock() {
@@ -1185,7 +1358,7 @@ export function createSessionStore(input: {
         transition({
           lastActivityAt: now,
         });
-        persistReadyStateUnlockCache();
+        void persistReadyStateUnlockCache();
       }
     },
     enforceAutoLock(now = Date.now()) {

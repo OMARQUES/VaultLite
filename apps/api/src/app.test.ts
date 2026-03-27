@@ -931,6 +931,273 @@ describe('createVaultLiteApi', () => {
     }
   });
 
+  test('queues realtime outbox on publish failure and drains on next mutation', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+    let failNextPublish = true;
+    const publishedEvents: unknown[] = [];
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: true,
+          realtime_delta_vault_v1: true,
+          realtime_delta_icons_v1: true,
+          realtime_delta_history_v1: true,
+          realtime_delta_attachments_v1: true,
+          realtime_apply_web_v1: true,
+          realtime_apply_extension_v1: true,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch(input: RequestInfo | URL, init?: RequestInit) {
+                const request = input instanceof Request ? input : new Request(input, init);
+                const url = new URL(request.url);
+                if (url.pathname === '/publish') {
+                  if (failNextPublish) {
+                    failNextPublish = false;
+                    throw new Error('simulated_publish_failure');
+                  }
+                  publishedEvents.push(await request.json());
+                }
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_1',
+      username: 'alice',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      updatedAt: '2026-03-24T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_1',
+      userId: 'user_1',
+      deviceName: 'Alice Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_1',
+      userId: 'user_1',
+      deviceId: 'device_1',
+      csrfToken: 'csrf_1',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      expiresAt: '2026-03-24T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    const first = await app.request('/api/icons/manual/upsert', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_1; vl_csrf=csrf_1',
+        'x-csrf-token': 'csrf_1',
+      },
+      body: JSON.stringify({
+        domain: 'portal.example.com',
+        dataUrl: 'data:image/png;base64,AAAAAAAAAAAA',
+        source: 'file',
+      }),
+    });
+    expect(first.status).toBe(200);
+    await expect(storage.realtimeOutbox.listPendingByUserId('user_1', 20)).resolves.toHaveLength(1);
+
+    const second = await app.request('/api/icons/manual/upsert', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_1; vl_csrf=csrf_1',
+        'x-csrf-token': 'csrf_1',
+      },
+      body: JSON.stringify({
+        domain: 'app.example.com',
+        dataUrl: 'data:image/png;base64,BBBBBBBBBBBB',
+        source: 'file',
+      }),
+    });
+    expect(second.status).toBe(200);
+    await expect(storage.realtimeOutbox.listPendingByUserId('user_1', 20)).resolves.toEqual([]);
+    expect(publishedEvents).toHaveLength(2);
+  });
+
+  test('does not consume connect token when origin is invalid and consumes atomically on first valid upgrade', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-27T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        webAllowedOrigins: ['http://127.0.0.1:5173'],
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: true,
+          realtime_delta_vault_v1: true,
+          realtime_delta_icons_v1: true,
+          realtime_delta_history_v1: true,
+          realtime_delta_attachments_v1: true,
+          realtime_apply_web_v1: true,
+          realtime_apply_extension_v1: true,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch() {
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_ws_1',
+      username: 'ws-user',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-27T10:00:00.000Z',
+      updatedAt: '2026-03-27T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_ws_1',
+      userId: 'user_ws_1',
+      deviceName: 'WS Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-27T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_ws_1',
+      userId: 'user_ws_1',
+      deviceId: 'device_ws_1',
+      csrfToken: 'csrf_ws_1',
+      createdAt: '2026-03-27T10:00:00.000Z',
+      expiresAt: '2026-03-27T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    const tokenResponse = await app.request('/api/realtime/connect-token', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_ws_1; vl_csrf=csrf_ws_1',
+        'x-csrf-token': 'csrf_ws_1',
+      },
+      body: JSON.stringify({ cursor: 0 }),
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenPayload = (await tokenResponse.json()) as { connectToken: string };
+
+    const invalidOriginAttempt = await app.request(
+      `/api/realtime/ws?token=${encodeURIComponent(tokenPayload.connectToken)}&cursor=0`,
+      {
+        method: 'GET',
+        headers: {
+          upgrade: 'websocket',
+          origin: 'http://evil.local',
+        },
+      },
+    );
+    expect(invalidOriginAttempt.status).toBe(403);
+    expect(await invalidOriginAttempt.json()).toEqual({ ok: false, code: 'origin_not_allowed' });
+
+    const validAttempt = await app.request(
+      `/api/realtime/ws?token=${encodeURIComponent(tokenPayload.connectToken)}&cursor=0`,
+      {
+        method: 'GET',
+        headers: {
+          upgrade: 'websocket',
+          origin: 'http://127.0.0.1:5173',
+        },
+      },
+    );
+    expect(validAttempt.status).toBe(200);
+
+    const replayAttempt = await app.request(
+      `/api/realtime/ws?token=${encodeURIComponent(tokenPayload.connectToken)}&cursor=0`,
+      {
+        method: 'GET',
+        headers: {
+          upgrade: 'websocket',
+          origin: 'http://127.0.0.1:5173',
+        },
+      },
+    );
+    expect(replayAttempt.status).toBe(401);
+    expect(await replayAttempt.json()).toEqual({ ok: false, code: 'connect_token_replayed' });
+  });
+
   test('applies security header baseline on 2xx/4xx/5xx and only applies HSTS in production over https', async () => {
     const { app, storage, clock } = await createAppFixture();
 

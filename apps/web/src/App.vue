@@ -198,6 +198,7 @@ async function handleUnauthorizedEvent(event: Event) {
 }
 
 let autoLockInterval: number | undefined;
+let sessionRefreshInterval: number | undefined;
 function handleVisibilityChange() {
   if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
     void refreshSessionBestEffort();
@@ -232,6 +233,9 @@ onMounted(() => {
   autoLockInterval = window.setInterval(() => {
     sessionStore.enforceAutoLock();
   }, 15000);
+  sessionRefreshInterval = window.setInterval(() => {
+    void refreshSessionBestEffort();
+  }, 10 * 60 * 1000);
 });
 
 watch(
@@ -254,6 +258,9 @@ watch(
 onUnmounted(() => {
   if (autoLockInterval !== undefined) {
     window.clearInterval(autoLockInterval);
+  }
+  if (sessionRefreshInterval !== undefined) {
+    window.clearInterval(sessionRefreshInterval);
   }
   window.removeEventListener('pointerdown', handleActivity);
   window.removeEventListener('keydown', handleActivity);

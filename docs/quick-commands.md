@@ -7,6 +7,7 @@
 npm install
 
 # limpa estado local do wrangler (D1/R2 local)
+Get-Process workerd -ErrorAction SilentlyContinue | Stop-Process -Force
 npm run reset:local-state
 
 # sobe API + Web no mesmo terminal
@@ -137,4 +138,22 @@ npx wrangler deploy --env production
 ```bash
 curl https://vaultlite-api-prod.otavio-marques20.workers.dev/api/runtime/metadata
 curl https://vaultlite-web.pages.dev/api/bootstrap/state
+```
+
+## 9) QA WS local - lock endpoint (PowerShell)
+
+```powershell
+$Api = "http://127.0.0.1:8787"
+$Cookie = "vl_session=<VL_SESSION>; vl_csrf=<VL_CSRF>"
+$VlCsrf = "<VL_CSRF>"
+
+$LockBody = @{
+  reasonCode = "qa_lock_test"
+} | ConvertTo-Json -Compress
+
+curl.exe -i -s -X POST "$Api/api/auth/session/lock" `
+  -H "content-type: application/json" `
+  -H "cookie: $Cookie" `
+  -H "x-csrf-token: $VlCsrf" `
+  -d $LockBody
 ```

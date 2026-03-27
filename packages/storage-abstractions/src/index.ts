@@ -201,11 +201,33 @@ export interface PasswordGeneratorHistoryRecord {
   updatedAt: string;
 }
 
+export interface RealtimeOutboxRecord {
+  id: string;
+  userId: string;
+  topic: string;
+  aggregateId: string | null;
+  idempotencyKey: string;
+  eventId: string;
+  occurredAt: string;
+  sourceDeviceId: string | null;
+  payloadJson: string;
+  createdAt: string;
+  publishedAt: string | null;
+  attemptCount: number;
+  lastError: string | null;
+}
+
 export interface AuthRateLimitRecord {
   key: string;
   attemptCount: number;
   windowStartedAt: string;
   windowEndsAt: string;
+}
+
+export interface RealtimeOneTimeTokenRecord {
+  tokenKey: string;
+  consumedAt: string;
+  expiresAt: string;
 }
 
 export interface AttachmentBlobRecord {
@@ -467,6 +489,18 @@ export interface AuthRateLimitRepository {
   reset(key: string): Promise<void>;
 }
 
+export interface RealtimeOneTimeTokenRepository {
+  consume(input: {
+    tokenKey: string;
+    consumedAt: string;
+    expiresAt: string;
+  }): Promise<{ consumed: boolean }>;
+  pruneExpired(input: {
+    nowIso: string;
+    limit: number;
+  }): Promise<number>;
+}
+
 export interface SiteIconCacheRepository {
   listByDomains(domains: string[]): Promise<SiteIconCacheRecord[]>;
   findByDomain(domain: string): Promise<SiteIconCacheRecord | null>;
@@ -487,9 +521,28 @@ export interface PasswordGeneratorHistoryRepository {
   pruneByUserId(userId: string, limit: number): Promise<void>;
 }
 
+export interface RealtimeOutboxRepository {
+  enqueue(record: RealtimeOutboxRecord): Promise<RealtimeOutboxRecord>;
+  listPendingByUserId(userId: string, limit: number): Promise<RealtimeOutboxRecord[]>;
+  markPublished(input: {
+    id: string;
+    publishedAt: string;
+  }): Promise<void>;
+  markFailed(input: {
+    id: string;
+    failedAt: string;
+    lastError: string;
+  }): Promise<void>;
+  deletePublishedBefore(input: {
+    cutoffIso: string;
+    limit: number;
+  }): Promise<number>;
+}
+
 export interface AttachmentBlobRepository {
   put(record: AttachmentBlobRecord): Promise<AttachmentBlobRecord>;
   get(key: string): Promise<AttachmentBlobRecord | null>;
+  listByOwner(ownerUserId: string): Promise<AttachmentBlobRecord[]>;
   listByOwnerAndItem(ownerUserId: string, itemId: string): Promise<AttachmentBlobRecord[]>;
   findByOwnerItemAndIdempotency(
     ownerUserId: string,
@@ -621,6 +674,8 @@ export interface VaultLiteStorage {
   siteIconCache: SiteIconCacheRepository;
   manualSiteIconOverrides: ManualSiteIconOverrideRepository;
   passwordGeneratorHistory: PasswordGeneratorHistoryRepository;
+  realtimeOutbox: RealtimeOutboxRepository;
+  realtimeOneTimeTokens: RealtimeOneTimeTokenRepository;
   authRateLimits: AuthRateLimitRepository;
   idempotency: IdempotencyRepository;
   auditEvents: AuditEventRepository;
@@ -653,6 +708,8 @@ export function createInMemoryVaultLiteStorage(input: {
   const siteIconCache = new Map<string, SiteIconCacheRecord>();
   const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
   const passwordGeneratorHistory = new Map<string, PasswordGeneratorHistoryRecord>();
+  const realtimeOutbox = new Map<string, RealtimeOutboxRecord>();
+  const realtimeOneTimeTokens = new Map<string, RealtimeOneTimeTokenRecord>();
   const rateLimits = new Map<string, AuthRateLimitRecord>();
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
@@ -1402,6 +1459,103 @@ export function createInMemoryVaultLiteStorage(input: {
         });
       },
     },
+    realtimeOutbox: {
+      async enqueue(record) {
+        const normalized: RealtimeOutboxRecord = {
+          ...record,
+          attemptCount: Math.max(0, Math.trunc(record.attemptCount)),
+        };
+        realtimeOutbox.set(normalized.id, normalized);
+        return { ...normalized };
+      },
+      async listPendingByUserId(userId, limit) {
+        const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.trunc(limit))) : 100;
+        return Array.from(realtimeOutbox.values())
+          .filter((record) => record.userId === userId && record.publishedAt === null)
+          .sort((left, right) => {
+            const byCreatedAt = left.createdAt.localeCompare(right.createdAt);
+            if (byCreatedAt !== 0) {
+              return byCreatedAt;
+            }
+            return left.id.localeCompare(right.id);
+          })
+          .slice(0, safeLimit)
+          .map((record) => ({ ...record }));
+      },
+      async markPublished(inputRecord) {
+        const record = realtimeOutbox.get(inputRecord.id);
+        if (!record) {
+          return;
+        }
+        realtimeOutbox.set(inputRecord.id, {
+          ...record,
+          publishedAt: inputRecord.publishedAt,
+          lastError: null,
+        });
+      },
+      async markFailed(inputRecord) {
+        const record = realtimeOutbox.get(inputRecord.id);
+        if (!record) {
+          return;
+        }
+        realtimeOutbox.set(inputRecord.id, {
+          ...record,
+          attemptCount: record.attemptCount + 1,
+          lastError: inputRecord.lastError,
+          createdAt: record.createdAt,
+        });
+      },
+      async deletePublishedBefore(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(1_000, Math.trunc(inputRecord.limit)))
+          : 500;
+        const candidates = Array.from(realtimeOutbox.values())
+          .filter(
+            (record) =>
+              record.publishedAt !== null && record.publishedAt <= inputRecord.cutoffIso,
+          )
+          .sort((left, right) => (left.publishedAt ?? '').localeCompare(right.publishedAt ?? ''))
+          .slice(0, safeLimit);
+        for (const candidate of candidates) {
+          realtimeOutbox.delete(candidate.id);
+        }
+        return candidates.length;
+      },
+    },
+    realtimeOneTimeTokens: {
+      async consume(inputRecord) {
+        for (const [tokenKey, record] of realtimeOneTimeTokens.entries()) {
+          if (record.expiresAt <= inputRecord.consumedAt) {
+            realtimeOneTimeTokens.delete(tokenKey);
+          }
+        }
+        if (realtimeOneTimeTokens.has(inputRecord.tokenKey)) {
+          return { consumed: false };
+        }
+        realtimeOneTimeTokens.set(inputRecord.tokenKey, {
+          tokenKey: inputRecord.tokenKey,
+          consumedAt: inputRecord.consumedAt,
+          expiresAt: inputRecord.expiresAt,
+        });
+        return { consumed: true };
+      },
+      async pruneExpired(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(1_000, Math.trunc(inputRecord.limit)))
+          : 500;
+        let deletedCount = 0;
+        for (const [tokenKey, record] of realtimeOneTimeTokens.entries()) {
+          if (deletedCount >= safeLimit) {
+            break;
+          }
+          if (record.expiresAt <= inputRecord.nowIso) {
+            realtimeOneTimeTokens.delete(tokenKey);
+            deletedCount += 1;
+          }
+        }
+        return deletedCount;
+      },
+    },
     authRateLimits: {
       async increment(input) {
         const current = rateLimits.get(input.key);
@@ -1467,6 +1621,12 @@ export function createInMemoryVaultLiteStorage(input: {
       async get(key) {
         const record = attachmentBlobs.get(key);
         return record ? { ...record } : null;
+      },
+      async listByOwner(ownerUserId) {
+        return Array.from(attachmentBlobs.values())
+          .filter((record) => record.ownerUserId === ownerUserId)
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          .map((record) => ({ ...record }));
       },
       async listByOwnerAndItem(ownerUserId, itemId) {
         return Array.from(attachmentBlobs.values())

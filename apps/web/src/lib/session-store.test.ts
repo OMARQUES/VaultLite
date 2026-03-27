@@ -168,14 +168,16 @@ describe('createSessionStore', () => {
     expect(store.state.username).toBe('alice');
   });
 
-  test('restores ready state from per-tab sessionStorage unlock cache', async () => {
+  test('does not restore ready state from encrypted cache without ephemeral key', async () => {
     const dependencies = createMockDependencies();
     globalThis.sessionStorage?.setItem(
       'vaultlite:web-unlock-cache.v1',
       JSON.stringify({
         username: 'alice',
         deviceId: 'device_1',
-        accountKey: 'A'.repeat(43),
+        algorithm: 'AES-GCM',
+        iv: 'AAAAAAAAAAAAAAAA',
+        ciphertext: 'BBBBBBBBBBBBBBBBBBBBBBBB',
         expiresAt: Date.now() + 60_000,
         lockRevision: 0,
       }),
@@ -184,17 +186,44 @@ describe('createSessionStore', () => {
 
     await store.restoreSession();
 
-    expect(store.state.phase).toBe('ready');
+    expect(store.state.phase).toBe('local_unlock_required');
+    expect(store.state.username).toBe('alice');
+    expect(globalThis.sessionStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeNull();
+  });
+
+  test('stores encrypted unlock cache without plaintext secret and falls back to local unlock', async () => {
+    const dependencies = createMockDependencies();
+    const store = createSessionStore(dependencies as never);
+
+    await store.localUnlock({
+      username: 'alice',
+      password: 'correct-password',
+    });
+
+    const persistedCache = globalThis.sessionStorage?.getItem('vaultlite:web-unlock-cache.v1');
+    expect(persistedCache).toContain('"ciphertext"');
+    expect(persistedCache).not.toContain('account-key');
+
+    await store.restoreSession();
+
+    expect(store.state.phase).toBe('local_unlock_required');
     expect(store.state.username).toBe('alice');
     expect(dependencies.authClient.requestUnlockGrant).not.toHaveBeenCalled();
   });
 
-  test('keeps ready unlock cache when backend lock revision is lower after link removal', async () => {
+  test('drops encrypted unlock cache when backend lock revision advances', async () => {
     const dependencies = createMockDependencies();
+    const store = createSessionStore(dependencies as never);
+
+    await store.localUnlock({
+      username: 'alice',
+      password: 'correct-password',
+    });
+
     dependencies.authClient.restoreSession.mockResolvedValueOnce({
       ok: true,
       sessionState: 'local_unlock_required',
-      lockRevision: 0,
+      lockRevision: 6,
       user: {
         userId: 'user_1',
         username: 'alice',
@@ -207,22 +236,11 @@ describe('createSessionStore', () => {
         platform: 'web',
       },
     });
-    globalThis.sessionStorage?.setItem(
-      'vaultlite:web-unlock-cache.v1',
-      JSON.stringify({
-        username: 'alice',
-        deviceId: 'device_1',
-        accountKey: 'A'.repeat(43),
-        expiresAt: Date.now() + 60_000,
-        lockRevision: 5,
-      }),
-    );
-    const store = createSessionStore(dependencies as never);
 
     await store.restoreSession();
 
-    expect(store.state.phase).toBe('ready');
-    expect(store.state.lastUnlockedLockRevision).toBe(0);
+    expect(store.state.phase).toBe('local_unlock_required');
+    expect(globalThis.sessionStorage?.getItem('vaultlite:web-unlock-cache.v1')).toBeNull();
   });
 
   test('cleans legacy unlock cache from localStorage on boot', async () => {

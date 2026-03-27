@@ -29,7 +29,7 @@
     "vitest": "^4.1.0",
     "vue": "^3.5.30",
     "vue-tsc": "^3.2.5",
-    "wrangler": "^4.35.0"
+    "wrangler": "^4.77.0"
   },
   "description": "VaultLite monorepo scaffold",
   "private": true,

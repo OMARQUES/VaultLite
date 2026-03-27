@@ -213,6 +213,8 @@ let passwordGeneratorHistory = [];
 let passwordGeneratorHistoryLastSyncedAt = 0;
 let passwordGeneratorHistorySyncInFlight = null;
 const passwordGeneratorVisibleHistoryIds = new Set();
+let realtimeRefreshDebounceTimer = null;
+const pendingRealtimeDomains = new Set();
 let trustedIdentitySignature = null;
 const detailSecretState = {
   itemId: null,
@@ -227,6 +229,9 @@ const PASSWORD_GENERATOR_HISTORY_STORAGE_KEY = 'vaultlite.popup.password.generat
 const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.popup.password.generator.history.synced_at.v1';
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 80;
 const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 90 * 1000;
+const BACKGROUND_REALTIME_UPDATE_MESSAGE_TYPE = 'vaultlite.background.realtime_update';
+const REALTIME_POPUP_REFRESH_DEBOUNCE_MS = 250;
+const REALTIME_POPUP_SIGNAL_STORAGE_KEY = 'vaultlite.realtime.popup.signal.v1';
 const PASSWORD_RETRY_MESSAGE = 'Check your password and try again.';
 const FALLBACK_PAIRING_STATE = {
   phase: 'pairing_required',
@@ -1375,6 +1380,36 @@ function scheduleSearchRefresh(delayMs = 120) {
   searchDebounceTimer = window.setTimeout(() => {
     void refreshCredentialListForCurrentQuery();
   }, delayMs);
+}
+
+function scheduleRealtimePopupRefresh(domains) {
+  if (!Array.isArray(domains)) {
+    return;
+  }
+  for (const domain of domains) {
+    if (typeof domain === 'string' && domain.length > 0) {
+      pendingRealtimeDomains.add(domain);
+    }
+  }
+  if (pendingRealtimeDomains.size === 0) {
+    return;
+  }
+  if (realtimeRefreshDebounceTimer !== null) {
+    return;
+  }
+  realtimeRefreshDebounceTimer = window.setTimeout(() => {
+    realtimeRefreshDebounceTimer = null;
+    const domainsToApply = Array.from(pendingRealtimeDomains);
+    pendingRealtimeDomains.clear();
+    const shouldRefreshList = domainsToApply.some((domain) => domain === 'vault' || domain === 'icons_manual');
+    if (!shouldRefreshList || resolvePopupPhase(currentState) !== 'ready') {
+      return;
+    }
+    void refreshStateAndMaybeList({
+      fetchList: true,
+      showLoading: false,
+    });
+  }, REALTIME_POPUP_REFRESH_DEBOUNCE_MS);
 }
 
 function getSelectedCredential() {
@@ -3479,6 +3514,36 @@ function scheduleRefresh() {
       showLoading: false,
     });
   }, refreshIntervalMs);
+}
+
+if (chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    if (message.type !== BACKGROUND_REALTIME_UPDATE_MESSAGE_TYPE) {
+      return;
+    }
+    scheduleRealtimePopupRefresh(message.domains);
+  });
+}
+
+if (chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (!changes || typeof changes !== 'object') {
+      return;
+    }
+    if (areaName !== 'session' && areaName !== 'local') {
+      return;
+    }
+    const signalChange = changes[REALTIME_POPUP_SIGNAL_STORAGE_KEY];
+    const signalValue = signalChange?.newValue;
+    const domains = Array.isArray(signalValue?.domains) ? signalValue.domains : null;
+    if (!domains || domains.length === 0) {
+      return;
+    }
+    scheduleRealtimePopupRefresh(domains);
+  });
 }
 
 wireEvents();

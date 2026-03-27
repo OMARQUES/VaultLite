@@ -104,6 +104,7 @@ function createVaultClientStub(): VaultLiteVaultClient {
     finalizeAttachmentUpload: vi.fn(),
     getAttachmentEnvelope: vi.fn(),
     listAttachmentUploads: vi.fn(async () => ({ uploads: [] })),
+    listAttachmentState: vi.fn(async () => ({ cursor: null, pageSize: 100, entries: [] })),
   };
 }
 

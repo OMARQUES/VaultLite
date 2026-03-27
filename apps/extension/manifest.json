@@ -3,6 +3,7 @@
   "name": "VaultLite",
   "version": "0.1.0",
   "description": "VaultLite extension",
+  "minimum_chrome_version": "116",
   "action": {
     "default_title": "VaultLite",
     "default_popup": "popup.html"

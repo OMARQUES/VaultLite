@@ -1,4 +1,5 @@
 import type {
+  AttachmentStateOutput,
   AttachmentUploadContentInput,
   AttachmentUploadEnvelopeOutput,
   AttachmentUploadFinalizeOutput,
@@ -121,6 +122,7 @@ export interface VaultLiteVaultClient {
   finalizeAttachmentUpload(uploadId: string, itemId: string): Promise<AttachmentUploadFinalizeOutput>;
   getAttachmentEnvelope(uploadId: string): Promise<AttachmentUploadEnvelopeOutput>;
   listAttachmentUploads(itemId: string): Promise<AttachmentUploadListOutput>;
+  listAttachmentState(input?: { cursor?: string; pageSize?: number }): Promise<AttachmentStateOutput>;
 }
 
 export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
@@ -271,6 +273,20 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
     listAttachmentUploads(itemId) {
       return requestJson<AttachmentUploadListOutput>(
         `${baseUrl}/api/attachments?itemId=${encodeURIComponent(itemId)}`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listAttachmentState(input) {
+      const query = new URLSearchParams();
+      if (typeof input?.cursor === 'string' && input.cursor.length > 0) {
+        query.set('cursor', input.cursor);
+      }
+      if (typeof input?.pageSize === 'number' && Number.isFinite(input.pageSize)) {
+        query.set('pageSize', String(Math.max(1, Math.trunc(input.pageSize))));
+      }
+      return requestJson<AttachmentStateOutput>(
+        `${baseUrl}/api/attachments/state${query.size > 0 ? `?${query.toString()}` : ''}`,
         undefined,
         { emitUnauthorizedEvent: true },
       );

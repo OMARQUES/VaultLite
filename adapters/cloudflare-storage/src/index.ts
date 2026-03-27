@@ -17,6 +17,9 @@ import type {
   ManualSiteIconOverrideRepository,
   PasswordGeneratorHistoryRecord,
   PasswordGeneratorHistoryRepository,
+  RealtimeOutboxRecord,
+  RealtimeOutboxRepository,
+  RealtimeOneTimeTokenRepository,
   ExtensionLinkRequestRecord,
   ExtensionLinkRequestRepository,
   ExtensionLinkRequestStatus,
@@ -497,6 +500,43 @@ CREATE INDEX IF NOT EXISTS idx_password_generator_history_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_password_generator_history_user_created
   ON password_generator_history (user_id, created_at);`,
+  },
+  {
+    id: '0015_realtime_outbox',
+    filename: '0015_realtime_outbox.sql',
+    sql: `CREATE TABLE IF NOT EXISTS realtime_outbox (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  aggregate_id TEXT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  event_id TEXT NOT NULL UNIQUE,
+  occurred_at TEXT NOT NULL,
+  source_device_id TEXT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  published_at TEXT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_realtime_outbox_user_pending_created
+  ON realtime_outbox (user_id, published_at, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_realtime_outbox_published_at
+  ON realtime_outbox (published_at);`,
+  },
+  {
+    id: '0016_realtime_one_time_tokens',
+    filename: '0016_realtime_one_time_tokens.sql',
+    sql: `CREATE TABLE IF NOT EXISTS realtime_one_time_tokens (
+  token_key TEXT PRIMARY KEY,
+  consumed_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_realtime_one_time_tokens_expires_at
+  ON realtime_one_time_tokens (expires_at);`,
   },
 ];
 
@@ -2214,6 +2254,163 @@ class CloudflarePasswordGeneratorHistoryRepository implements PasswordGeneratorH
   }
 }
 
+class CloudflareRealtimeOutboxRepository implements RealtimeOutboxRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async enqueue(record: RealtimeOutboxRecord): Promise<RealtimeOutboxRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO realtime_outbox (
+          id, user_id, topic, aggregate_id, idempotency_key, event_id, occurred_at,
+          source_device_id, payload_json, created_at, published_at, attempt_count, last_error
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(idempotency_key)
+       DO NOTHING`,
+      [
+        record.id,
+        record.userId,
+        record.topic,
+        record.aggregateId,
+        record.idempotencyKey,
+        record.eventId,
+        record.occurredAt,
+        record.sourceDeviceId,
+        record.payloadJson,
+        record.createdAt,
+        record.publishedAt,
+        Math.max(0, Math.trunc(record.attemptCount)),
+        record.lastError,
+      ],
+    );
+    const persisted = await selectOne<RealtimeOutboxRecord>(
+      this.db,
+      `SELECT id, user_id AS userId, topic, aggregate_id AS aggregateId, idempotency_key AS idempotencyKey,
+              event_id AS eventId, occurred_at AS occurredAt, source_device_id AS sourceDeviceId,
+              payload_json AS payloadJson, created_at AS createdAt, published_at AS publishedAt,
+              attempt_count AS attemptCount, last_error AS lastError
+       FROM realtime_outbox
+       WHERE idempotency_key = ?`,
+      [record.idempotencyKey],
+    );
+    if (!persisted) {
+      throw new Error('realtime_outbox_enqueue_failed');
+    }
+    return persisted;
+  }
+
+  async listPendingByUserId(userId: string, limit: number): Promise<RealtimeOutboxRecord[]> {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.trunc(limit))) : 100;
+    return selectMany<RealtimeOutboxRecord>(
+      this.db,
+      `SELECT id, user_id AS userId, topic, aggregate_id AS aggregateId, idempotency_key AS idempotencyKey,
+              event_id AS eventId, occurred_at AS occurredAt, source_device_id AS sourceDeviceId,
+              payload_json AS payloadJson, created_at AS createdAt, published_at AS publishedAt,
+              attempt_count AS attemptCount, last_error AS lastError
+       FROM realtime_outbox
+       WHERE user_id = ? AND published_at IS NULL
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`,
+      [userId, safeLimit],
+    );
+  }
+
+  async markPublished(input: {
+    id: string;
+    publishedAt: string;
+  }): Promise<void> {
+    await executeOne(
+      this.db,
+      `UPDATE realtime_outbox
+       SET published_at = ?, last_error = NULL
+       WHERE id = ?`,
+      [input.publishedAt, input.id],
+    );
+  }
+
+  async markFailed(input: {
+    id: string;
+    failedAt: string;
+    lastError: string;
+  }): Promise<void> {
+    await executeOne(
+      this.db,
+      `UPDATE realtime_outbox
+       SET attempt_count = attempt_count + 1,
+           last_error = ?
+       WHERE id = ?`,
+      [input.lastError, input.id],
+    );
+  }
+
+  async deletePublishedBefore(input: {
+    cutoffIso: string;
+    limit: number;
+  }): Promise<number> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(1_000, Math.trunc(input.limit))) : 500;
+    return executeOneWithChanges(
+      this.db,
+      `DELETE FROM realtime_outbox
+       WHERE id IN (
+         SELECT id
+         FROM realtime_outbox
+         WHERE published_at IS NOT NULL AND published_at <= ?
+         ORDER BY published_at ASC, id ASC
+         LIMIT ?
+       )`,
+      [input.cutoffIso, safeLimit],
+    );
+  }
+}
+
+class CloudflareRealtimeOneTimeTokenRepository implements RealtimeOneTimeTokenRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async consume(input: {
+    tokenKey: string;
+    consumedAt: string;
+    expiresAt: string;
+  }): Promise<{ consumed: boolean }> {
+    await this.pruneExpired({
+      nowIso: input.consumedAt,
+      limit: 500,
+    });
+    try {
+      await executeOne(
+        this.db,
+        `INSERT INTO realtime_one_time_tokens (token_key, consumed_at, expires_at)
+         VALUES (?, ?, ?)`,
+        [input.tokenKey, input.consumedAt, input.expiresAt],
+      );
+      return { consumed: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (message.includes('unique constraint failed') || message.includes('constraint failed')) {
+        return { consumed: false };
+      }
+      throw error;
+    }
+  }
+
+  async pruneExpired(input: {
+    nowIso: string;
+    limit: number;
+  }): Promise<number> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(1_000, Math.trunc(input.limit))) : 500;
+    return executeOneWithChanges(
+      this.db,
+      `DELETE FROM realtime_one_time_tokens
+       WHERE token_key IN (
+         SELECT token_key
+         FROM realtime_one_time_tokens
+         WHERE expires_at <= ?
+         ORDER BY expires_at ASC, token_key ASC
+         LIMIT ?
+       )`,
+      [input.nowIso, safeLimit],
+    );
+  }
+}
+
 class CloudflareAuthRateLimitRepository implements AuthRateLimitRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -2546,6 +2743,22 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
       return null;
     }
     return metadata;
+  }
+
+  async listByOwner(ownerUserId: string): Promise<AttachmentBlobRecord[]> {
+    return selectMany<AttachmentBlobRecord>(
+      this.db,
+      `SELECT blob_key AS key, owner_user_id AS ownerUserId, item_id AS itemId,
+              file_name AS fileName,
+              lifecycle_state AS lifecycleState, envelope, content_type AS contentType,
+              size, idempotency_key AS idempotencyKey, upload_token AS uploadToken,
+              expires_at AS expiresAt, uploaded_at AS uploadedAt, attached_at AS attachedAt,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM attachment_blobs
+       WHERE owner_user_id = ?
+       ORDER BY updated_at DESC, created_at DESC`,
+      [ownerUserId],
+    );
   }
 
   async listByOwnerAndItem(ownerUserId: string, itemId: string): Promise<AttachmentBlobRecord[]> {
@@ -3024,6 +3237,8 @@ export function createCloudflareVaultLiteStorage(input: {
   const siteIconCache = new CloudflareSiteIconCacheRepository(input.db);
   const manualSiteIconOverrides = new CloudflareManualSiteIconOverrideRepository(input.db);
   const passwordGeneratorHistory = new CloudflarePasswordGeneratorHistoryRepository(input.db);
+  const realtimeOutbox = new CloudflareRealtimeOutboxRepository(input.db);
+  const realtimeOneTimeTokens = new CloudflareRealtimeOneTimeTokenRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
 
   return {
@@ -3042,6 +3257,8 @@ export function createCloudflareVaultLiteStorage(input: {
     siteIconCache,
     manualSiteIconOverrides,
     passwordGeneratorHistory,
+    realtimeOutbox,
+    realtimeOneTimeTokens,
     authRateLimits: new CloudflareAuthRateLimitRepository(input.db),
     idempotency: new CloudflareIdempotencyRepository(input.db),
     auditEvents: new CloudflareAuditEventRepository(input.db),

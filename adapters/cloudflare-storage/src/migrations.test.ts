@@ -30,6 +30,12 @@ describe('cloudflare migration loading', () => {
       '0008_attachment_filename_attached_at',
       '0009_extension_pairings',
       '0010_extension_link_requests',
+      '0011_site_icons',
+      '0012_session_policy_unlock_grants',
+      '0013_lock_revision_web_bootstrap_grants',
+      '0014_password_generator_history',
+      '0015_realtime_outbox',
+      '0016_realtime_one_time_tokens',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

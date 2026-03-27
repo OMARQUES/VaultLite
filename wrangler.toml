@@ -8,6 +8,16 @@ VAULTLITE_RUNTIME_MODE = "development"
 VAULTLITE_SERVER_URL = "http://127.0.0.1:8787"
 VAULTLITE_DEPLOYMENT_FINGERPRINT = "development_deployment"
 VAULTLITE_BOOTSTRAP_ADMIN_TOKEN = "development-bootstrap-admin-token"
+VAULTLITE_REALTIME_ENABLED = "true"
+VAULTLITE_REALTIME_WS_BASE_URL = "ws://127.0.0.1:8787"
+VAULTLITE_REALTIME_CONNECT_TOKEN_SECRET = "development_realtime_connect_token_secret"
+VAULTLITE_REALTIME_AUTH_LEASE_SECONDS = "600"
+VAULTLITE_REALTIME_HEARTBEAT_INTERVAL_MS = "25000"
+VAULTLITE_WS_WEB_ALLOWED_ORIGINS = "http://127.0.0.1:5173,http://localhost:5173"
+
+[[durable_objects.bindings]]
+name = "VAULTLITE_REALTIME_HUB"
+class_name = "VaultLiteRealtimeHub"
 
 [[d1_databases]]
 binding = "VAULTLITE_DB"
@@ -30,6 +40,15 @@ name = "vaultlite-api-prod"
 VAULTLITE_RUNTIME_MODE = "production"
 VAULTLITE_SERVER_URL = "https://vaultlite-web.pages.dev"
 VAULTLITE_DEPLOYMENT_FINGERPRINT = "vaultlite_prod_001"
+VAULTLITE_REALTIME_ENABLED = "true"
+VAULTLITE_REALTIME_WS_BASE_URL = "wss://vaultlite-api-prod.sigfarm.workers.dev"
+VAULTLITE_REALTIME_AUTH_LEASE_SECONDS = "600"
+VAULTLITE_REALTIME_HEARTBEAT_INTERVAL_MS = "25000"
+VAULTLITE_WS_WEB_ALLOWED_ORIGINS = "https://vaultlite-web.pages.dev"
+
+[[env.production.durable_objects.bindings]]
+name = "VAULTLITE_REALTIME_HUB"
+class_name = "VaultLiteRealtimeHub"
 
 [[env.production.d1_databases]]
 binding = "VAULTLITE_DB"
@@ -39,3 +58,7 @@ database_id = "7868f682-0288-4766-8acf-d780cf03a3ad"
 [[env.production.r2_buckets]]
 binding = "VAULTLITE_BLOBS"
 bucket_name = "vaultlite-prod-blobs"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VaultLiteRealtimeHub"]

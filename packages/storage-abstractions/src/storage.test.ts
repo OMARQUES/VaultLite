@@ -305,6 +305,41 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(postCooldown.windowStartedAt).toBe('2026-03-15T12:06:01.000Z');
   });
 
+  test('consumes realtime one-time tokens exactly once and prunes expired records', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+
+    await expect(
+      storage.realtimeOneTimeTokens.consume({
+        tokenKey: 'realtime-connect-jti:abc',
+        consumedAt: '2026-03-15T12:00:00.000Z',
+        expiresAt: '2026-03-15T12:02:00.000Z',
+      }),
+    ).resolves.toEqual({ consumed: true });
+
+    await expect(
+      storage.realtimeOneTimeTokens.consume({
+        tokenKey: 'realtime-connect-jti:abc',
+        consumedAt: '2026-03-15T12:00:01.000Z',
+        expiresAt: '2026-03-15T12:02:01.000Z',
+      }),
+    ).resolves.toEqual({ consumed: false });
+
+    await expect(
+      storage.realtimeOneTimeTokens.pruneExpired({
+        nowIso: '2026-03-15T12:03:00.000Z',
+        limit: 10,
+      }),
+    ).resolves.toBe(1);
+
+    await expect(
+      storage.realtimeOneTimeTokens.consume({
+        tokenKey: 'realtime-connect-jti:abc',
+        consumedAt: '2026-03-15T12:03:01.000Z',
+        expiresAt: '2026-03-15T12:05:00.000Z',
+      }),
+    ).resolves.toEqual({ consumed: true });
+  });
+
   test('stores and resolves canonical site icons by normalized domain', async () => {
     const storage = createInMemoryVaultLiteStorage();
     await storage.siteIconCache.upsert({
@@ -365,5 +400,50 @@ describe('createInMemoryVaultLiteStorage', () => {
     await expect(
       storage.manualSiteIconOverrides.findByUserIdAndDomain('user_1', 'portal.example.com'),
     ).resolves.toBeNull();
+  });
+
+  test('persists realtime outbox entries and marks publish/failure state', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.realtimeOutbox.enqueue({
+      id: 'outbox_1',
+      userId: 'user_1',
+      topic: 'vault.item.upserted',
+      aggregateId: 'item_1',
+      idempotencyKey: 'idem_1',
+      eventId: 'evt_1',
+      occurredAt: '2026-03-22T12:00:00.000Z',
+      sourceDeviceId: 'device_1',
+      payloadJson: '{"itemId":"item_1"}',
+      createdAt: '2026-03-22T12:00:00.000Z',
+      publishedAt: null,
+      attemptCount: 0,
+      lastError: null,
+    });
+
+    await expect(storage.realtimeOutbox.listPendingByUserId('user_1', 10)).resolves.toEqual([
+      expect.objectContaining({
+        id: 'outbox_1',
+        publishedAt: null,
+      }),
+    ]);
+
+    await storage.realtimeOutbox.markFailed({
+      id: 'outbox_1',
+      failedAt: '2026-03-22T12:00:30.000Z',
+      lastError: 'network_timeout',
+    });
+    await expect(storage.realtimeOutbox.listPendingByUserId('user_1', 10)).resolves.toEqual([
+      expect.objectContaining({
+        id: 'outbox_1',
+        attemptCount: 1,
+        lastError: 'network_timeout',
+      }),
+    ]);
+
+    await storage.realtimeOutbox.markPublished({
+      id: 'outbox_1',
+      publishedAt: '2026-03-22T12:01:00.000Z',
+    });
+    await expect(storage.realtimeOutbox.listPendingByUserId('user_1', 10)).resolves.toEqual([]);
   });
 });

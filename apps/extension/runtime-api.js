@@ -73,6 +73,15 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken }),
       });
     },
+    async getRealtimeConnectToken(input = {}) {
+      return requestJson(`${base}/api/realtime/connect-token`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          cursor: Number.isFinite(input?.cursor) ? Math.max(0, Math.trunc(input.cursor)) : 0,
+        }),
+      });
+    },
     async getSessionPolicy(bearerToken) {
       return requestJson(`${base}/api/auth/session-policy`, {
         method: 'GET',
@@ -258,6 +267,20 @@ export function createExtensionApiClient(serverOrigin) {
     },
     async listPasswordGeneratorHistory(input = {}) {
       return requestJson(`${base}/api/password-generator/history`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async listAttachmentState(input = {}) {
+      const query = new URLSearchParams();
+      if (typeof input?.cursor === 'string' && input.cursor.length > 0) {
+        query.set('cursor', input.cursor);
+      }
+      if (Number.isFinite(input?.pageSize)) {
+        query.set('pageSize', String(Math.max(1, Math.trunc(input.pageSize))));
+      }
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return requestJson(`${base}/api/attachments/state${suffix}`, {
         method: 'GET',
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
       });

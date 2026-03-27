@@ -117,8 +117,235 @@ export const RuntimeMetadataSchema = z
   .object({
     serverUrl: z.string().url(),
     deploymentFingerprint: z.string().min(1),
+    realtime: z
+      .object({
+        enabled: z.boolean(),
+        wsBaseUrl: z.string().url(),
+        authLeaseSeconds: z.number().int().positive(),
+        heartbeatIntervalMs: z.number().int().positive(),
+        flags: z
+          .object({
+            realtime_ws_v1: z.boolean(),
+            realtime_delta_vault_v1: z.boolean(),
+            realtime_delta_icons_v1: z.boolean(),
+            realtime_delta_history_v1: z.boolean(),
+            realtime_delta_attachments_v1: z.boolean(),
+            realtime_apply_web_v1: z.boolean(),
+            realtime_apply_extension_v1: z.boolean(),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
+
+export const RealtimeConnectTokenOutputSchema = z
+  .object({
+    wsUrl: z.string().url(),
+    connectToken: z.string().min(1),
+    expiresAt: isoDatetimeSchema,
+    resumeCursor: z.number().int().nonnegative(),
+    authLeaseExpiresAt: isoDatetimeSchema,
+    heartbeatIntervalMs: z.number().int().positive(),
+  })
+  .strict();
+
+export const RealtimeTopicSchema = z.enum([
+  'vault.item.upserted',
+  'vault.item.tombstoned',
+  'icons.manual.upserted',
+  'icons.manual.removed',
+  'icons.discover.resolved',
+  'password_history.upserted',
+  'password_history.removed',
+  'vault.attachment.state_changed',
+  'vault.attachment.removed',
+]);
+
+export const RealtimeVaultItemUpsertedPayloadSchema = z
+  .object({
+    itemId: z.string().min(1),
+    itemType: z.enum(VAULT_ITEM_TYPES),
+    revision: z.number().int().positive(),
+    updatedAt: isoDatetimeSchema,
+    encryptedPayload: encryptedPayloadSchema,
+  })
+  .strict();
+
+export const RealtimeVaultItemTombstonedPayloadSchema = z
+  .object({
+    itemId: z.string().min(1),
+    itemType: z.enum(VAULT_ITEM_TYPES),
+    revision: z.number().int().positive(),
+    deletedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeIconsManualUpsertedPayloadSchema = z
+  .object({
+    domain: z.string().trim().min(1),
+    dataUrl: z.string().min(1),
+    source: z.enum(['automatic', 'manual', 'url', 'file']),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeIconsManualRemovedPayloadSchema = z
+  .object({
+    domain: z.string().trim().min(1),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeIconsDiscoverResolvedPayloadSchema = z
+  .object({
+    icons: z.array(
+      z
+        .object({
+          domain: z.string().trim().min(1),
+          dataUrl: z.string().min(1),
+          source: z.enum(['automatic', 'manual', 'url', 'file']),
+          sourceUrl: z.string().url().nullable(),
+          updatedAt: isoDatetimeSchema,
+        })
+        .strict(),
+    ),
+    unresolved: z.array(z.string().trim().min(1)),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimePasswordHistoryUpsertedPayloadSchema = z
+  .object({
+    entryId: z.string().min(1),
+    encryptedPayload: encryptedPayloadSchema,
+    createdAt: isoDatetimeSchema,
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimePasswordHistoryRemovedPayloadSchema = z
+  .object({
+    entryId: z.string().min(1),
+    removedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeAttachmentStateChangedPayloadSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    itemId: z.string().min(1),
+    lifecycleState: z.literal('attached'),
+    contentType: z.string().min(1),
+    size: z.number().int().nonnegative(),
+    uploadedAt: isoDatetimeSchema,
+    attachedAt: isoDatetimeSchema,
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeAttachmentRemovedPayloadSchema = z
+  .object({
+    uploadId: z.string().min(1),
+    itemId: z.string().min(1),
+    removedAt: isoDatetimeSchema,
+    reason: z.enum(['deleted', 'orphaned']),
+  })
+  .strict();
+
+export const RealtimeEventEnvelopeSchema = z
+  .object({
+    seq: z.number().int().nonnegative(),
+    eventId: z.string().min(1),
+    occurredAt: isoDatetimeSchema,
+    deploymentFingerprint: z.string().min(1),
+    topic: RealtimeTopicSchema,
+    sourceDeviceId: z.string().min(1).nullable(),
+    payload: z.unknown(),
+  })
+  .strict();
+
+export const RealtimeServerMessageSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('hello'),
+      cursor: z.number().int().nonnegative(),
+      authLeaseExpiresAt: isoDatetimeSchema,
+      heartbeatIntervalMs: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('event'),
+      event: RealtimeEventEnvelopeSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('resync_required'),
+      domains: z.array(
+        z.enum([
+          'vault',
+          'icons_manual',
+          'password_history',
+          'attachments',
+        ]),
+      ),
+      reason: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('invalidated'),
+      code: z.enum([
+        'session_revoked',
+        'lifecycle_not_active',
+        'trusted_state_invalid',
+        'lock_revision_advanced',
+        'auth_lease_expired_revalidate',
+        'deployment_fingerprint_mismatch',
+      ]),
+      message: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('error'),
+      code: z.string().min(1),
+      message: z.string().min(1),
+    })
+    .strict(),
+]);
+
+export const RealtimeClientMessageSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('hello'),
+      cursor: z.number().int().nonnegative().optional(),
+      deviceId: z.string().min(1).optional(),
+      surface: z.enum(['web', 'extension']).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('ack'),
+      seq: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('resume'),
+      cursor: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('ping'),
+      ts: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+]);
 
 export const CanonicalResultSchema = z.enum([
   'success_changed',
@@ -553,6 +780,39 @@ export const AttachmentUploadEnvelopeOutputSchema = z
       MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES,
       'Attachment upload envelope exceeds maximum size',
     ),
+  })
+  .strict();
+
+export const AttachmentStateEntrySchema = z.union([
+  z
+    .object({
+      entryType: z.literal('state_changed'),
+      uploadId: z.string().min(1),
+      itemId: z.string().min(1),
+      lifecycleState: z.literal('attached'),
+      contentType: z.string().min(1),
+      size: z.number().int().nonnegative(),
+      uploadedAt: isoDatetimeSchema,
+      attachedAt: isoDatetimeSchema,
+      updatedAt: isoDatetimeSchema,
+    })
+    .strict(),
+  z
+    .object({
+      entryType: z.literal('removed'),
+      uploadId: z.string().min(1),
+      itemId: z.string().min(1),
+      removedAt: isoDatetimeSchema,
+      reason: z.enum(['deleted', 'orphaned']),
+    })
+    .strict(),
+]);
+
+export const AttachmentStateOutputSchema = z
+  .object({
+    cursor: z.string().min(1).nullable(),
+    pageSize: z.number().int().positive(),
+    entries: z.array(AttachmentStateEntrySchema),
   })
   .strict();
 
@@ -1218,6 +1478,20 @@ export type NewDeviceBootstrapInput = z.infer<typeof NewDeviceBootstrapInputSche
 export type InviteCreateInput = z.infer<typeof InviteCreateInputSchema>;
 export type InviteCreateOutput = z.infer<typeof InviteCreateOutputSchema>;
 export type RuntimeMetadata = z.infer<typeof RuntimeMetadataSchema>;
+export type RealtimeConnectTokenOutput = z.infer<typeof RealtimeConnectTokenOutputSchema>;
+export type RealtimeTopic = z.infer<typeof RealtimeTopicSchema>;
+export type RealtimeVaultItemUpsertedPayload = z.infer<typeof RealtimeVaultItemUpsertedPayloadSchema>;
+export type RealtimeVaultItemTombstonedPayload = z.infer<typeof RealtimeVaultItemTombstonedPayloadSchema>;
+export type RealtimeIconsManualUpsertedPayload = z.infer<typeof RealtimeIconsManualUpsertedPayloadSchema>;
+export type RealtimeIconsManualRemovedPayload = z.infer<typeof RealtimeIconsManualRemovedPayloadSchema>;
+export type RealtimeIconsDiscoverResolvedPayload = z.infer<typeof RealtimeIconsDiscoverResolvedPayloadSchema>;
+export type RealtimePasswordHistoryUpsertedPayload = z.infer<typeof RealtimePasswordHistoryUpsertedPayloadSchema>;
+export type RealtimePasswordHistoryRemovedPayload = z.infer<typeof RealtimePasswordHistoryRemovedPayloadSchema>;
+export type RealtimeAttachmentStateChangedPayload = z.infer<typeof RealtimeAttachmentStateChangedPayloadSchema>;
+export type RealtimeAttachmentRemovedPayload = z.infer<typeof RealtimeAttachmentRemovedPayloadSchema>;
+export type RealtimeEventEnvelope = z.infer<typeof RealtimeEventEnvelopeSchema>;
+export type RealtimeServerMessage = z.infer<typeof RealtimeServerMessageSchema>;
+export type RealtimeClientMessage = z.infer<typeof RealtimeClientMessageSchema>;
 export type CanonicalResult = z.infer<typeof CanonicalResultSchema>;
 export type BootstrapStateOutput = z.infer<typeof BootstrapStateOutputSchema>;
 export type BootstrapVerifyInput = z.infer<typeof BootstrapVerifyInputSchema>;
@@ -1259,6 +1533,8 @@ export type AttachmentUploadInitOutput = z.infer<typeof AttachmentUploadInitOutp
 export type AttachmentUploadListOutput = z.infer<typeof AttachmentUploadListOutputSchema>;
 export type AttachmentUploadFinalizeOutput = z.infer<typeof AttachmentUploadFinalizeOutputSchema>;
 export type AttachmentUploadEnvelopeOutput = z.infer<typeof AttachmentUploadEnvelopeOutputSchema>;
+export type AttachmentStateEntry = z.infer<typeof AttachmentStateEntrySchema>;
+export type AttachmentStateOutput = z.infer<typeof AttachmentStateOutputSchema>;
 export type TrustedSessionResponse = z.infer<typeof TrustedSessionResponseSchema>;
 export type SessionRestoreResponse = z.infer<typeof SessionRestoreResponseSchema>;
 export type SessionLockInput = z.infer<typeof SessionLockInputSchema>;

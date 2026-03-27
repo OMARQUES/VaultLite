@@ -22,6 +22,11 @@ describe('createWorkerRuntimeConfig', () => {
     expect(config.bootstrapAdminToken).toBe(DEFAULT_LOCAL_BOOTSTRAP_ADMIN_TOKEN);
     expect(config.secureCookies).toBe(false);
     expect(config.runtimeMode).toBe('development');
+    expect(config.realtime.webAllowedOrigins).toEqual([
+      'http://127.0.0.1:5173',
+      'http://localhost:5173',
+      'http://127.0.0.1:8787',
+    ]);
   });
 
   test('accepts explicit environment overrides', () => {
@@ -37,6 +42,24 @@ describe('createWorkerRuntimeConfig', () => {
     expect(config.bootstrapAdminToken).toBe('bootstrap-secret');
     expect(config.secureCookies).toBe(true);
     expect(config.runtimeMode).toBe('test');
+    expect(config.realtime.webAllowedOrigins).toEqual([
+      'http://127.0.0.1:5173',
+      'http://localhost:5173',
+      'https://vaultlite.example',
+    ]);
+  });
+
+  test('supports explicit WS web allowed origins override', () => {
+    const config = createWorkerRuntimeConfig({
+      VAULTLITE_RUNTIME_MODE: 'development',
+      VAULTLITE_WS_WEB_ALLOWED_ORIGINS:
+        ' http://127.0.0.1:5173 , http://localhost:5173 , http://127.0.0.1:5173 ',
+    });
+
+    expect(config.realtime.webAllowedOrigins).toEqual([
+      'http://127.0.0.1:5173',
+      'http://localhost:5173',
+    ]);
   });
 
   test('rejects invalid runtime mode', () => {
@@ -87,10 +110,25 @@ describe('createWorkerRuntimeConfig', () => {
       VAULTLITE_BOOTSTRAP_ADMIN_TOKEN: 'very-strong-bootstrap-token-1234567890',
       VAULTLITE_ACCOUNT_KIT_PRIVATE_KEY: 'private-key-material',
       VAULTLITE_ACCOUNT_KIT_PUBLIC_KEY: 'public-key-material',
+      VAULTLITE_WS_WEB_ALLOWED_ORIGINS: 'https://vaultlite.example',
     });
 
     expect(config.runtimeMode).toBe('production');
     expect(config.accountKitPrivateKey).toBe('private-key-material');
     expect(config.accountKitPublicKey).toBe('public-key-material');
+    expect(config.realtime.webAllowedOrigins).toEqual(['https://vaultlite.example']);
+  });
+
+  test('requires explicit WS web allowed origins when realtime is enabled in production', () => {
+    expect(() =>
+      createWorkerRuntimeConfig({
+        VAULTLITE_RUNTIME_MODE: 'production',
+        VAULTLITE_SERVER_URL: 'https://vaultlite.example',
+        VAULTLITE_BOOTSTRAP_ADMIN_TOKEN: 'very-strong-bootstrap-token-1234567890',
+        VAULTLITE_ACCOUNT_KIT_PRIVATE_KEY: 'private-key-material',
+        VAULTLITE_ACCOUNT_KIT_PUBLIC_KEY: 'public-key-material',
+        VAULTLITE_REALTIME_ENABLED: 'true',
+      }),
+    ).toThrow('runtime_config_invalid:realtime_ws_web_allowed_origins_required');
   });
 });

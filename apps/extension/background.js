@@ -76,6 +76,18 @@ const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
 const MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY = 'vaultlite.manual_icon_sync_queue.v1';
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
+const REALTIME_CONNECT_INITIAL_JITTER_MAX_MS = 750;
+const REALTIME_RECONNECT_BASE_DELAY_MS = 500;
+const REALTIME_RECONNECT_MAX_DELAY_MS = 15_000;
+const REALTIME_RECONNECT_STABLE_RESET_MS = 60_000;
+const REALTIME_ACK_BATCH_SIZE = 20;
+const REALTIME_ACK_MAX_INTERVAL_MS = 1_000;
+const REALTIME_HEARTBEAT_IDLE_MS = 25_000;
+const REALTIME_HEARTBEAT_TIMEOUT_MS = 10_000;
+const REALTIME_KEEPALIVE_INTERVAL_MS = 20_000;
+const REALTIME_METADATA_REFRESH_INTERVAL_MS = 5 * 60_000;
+const REALTIME_POPUP_NOTIFY_DEBOUNCE_MS = 150;
+const REALTIME_POPUP_SIGNAL_STORAGE_KEY = 'vaultlite.realtime.popup.signal.v1';
 
 const state = {
   phase: 'anonymous',
@@ -164,6 +176,32 @@ let manualIconSyncQueueProcessInFlight = null;
 let runtimeInitializationPromise = null;
 let runtimeInitialized = false;
 let lastCredentialCacheSource = 'none';
+let realtimeMetadataLoadedAt = 0;
+const realtimeRuntime = {
+  enabled: false,
+  wsBaseUrl: null,
+  authLeaseSeconds: 600,
+  heartbeatIntervalMs: 25_000,
+  flags: null,
+};
+const realtimeConnection = {
+  socket: null,
+  reconnectTimer: null,
+  ackTimer: null,
+  heartbeatTimer: null,
+  heartbeatTimeout: null,
+  keepaliveTimer: null,
+  cursor: 0,
+  pendingAckSeq: 0,
+  ackBatchCount: 0,
+  reconnectAttempt: 0,
+  connecting: false,
+  intentionallyClosed: false,
+  lastConnectedAt: 0,
+  lastReceivedAt: 0,
+};
+let realtimePopupNotifyTimer = null;
+const realtimePopupNotifyDomains = new Set();
 
 function sessionStorageArea() {
   if (!chrome.storage || !chrome.storage.session) {
@@ -556,6 +594,478 @@ function delay(ms) {
   });
 }
 
+function applyRealtimeRuntimeMetadata(metadata) {
+  const realtime = metadata?.realtime;
+  const flags = realtime && typeof realtime === 'object' ? realtime.flags : null;
+  const wsFlagEnabled =
+    !flags || typeof flags.realtime_ws_v1 !== 'boolean' ? true : flags.realtime_ws_v1 === true;
+  const applyFlagEnabled =
+    !flags || typeof flags.realtime_apply_extension_v1 !== 'boolean'
+      ? true
+      : flags.realtime_apply_extension_v1 === true;
+  realtimeRuntime.enabled = Boolean(realtime?.enabled) && wsFlagEnabled && applyFlagEnabled;
+  realtimeRuntime.wsBaseUrl = typeof realtime?.wsBaseUrl === 'string' ? realtime.wsBaseUrl : null;
+  realtimeRuntime.authLeaseSeconds = Number.isFinite(realtime?.authLeaseSeconds)
+    ? Math.max(60, Math.trunc(realtime.authLeaseSeconds))
+    : 600;
+  realtimeRuntime.heartbeatIntervalMs = Number.isFinite(realtime?.heartbeatIntervalMs)
+    ? Math.max(5_000, Math.trunc(realtime.heartbeatIntervalMs))
+    : 25_000;
+  realtimeRuntime.flags = flags && typeof flags === 'object' ? { ...flags } : null;
+}
+
+async function ensureRealtimeRuntimeMetadata(apiClient, options = {}) {
+  const force = options?.force === true;
+  const now = Date.now();
+  if (!force && realtimeMetadataLoadedAt > 0 && now - realtimeMetadataLoadedAt < REALTIME_METADATA_REFRESH_INTERVAL_MS) {
+    return;
+  }
+  if (!apiClient) {
+    return;
+  }
+  try {
+    const metadata = await apiClient.getRuntimeMetadata();
+    applyRealtimeRuntimeMetadata(metadata);
+    if (typeof metadata?.deploymentFingerprint === 'string' && metadata.deploymentFingerprint.length > 0) {
+      state.deploymentFingerprint = metadata.deploymentFingerprint;
+    }
+    realtimeMetadataLoadedAt = Date.now();
+  } catch {
+    if (force) {
+      realtimeRuntime.enabled = false;
+    }
+  }
+}
+
+function shouldRunRealtimeSocket() {
+  return Boolean(
+    realtimeRuntime.enabled &&
+      state.phase === 'ready' &&
+      state.serverOrigin &&
+      sessionToken &&
+      trustedState &&
+      hasValidUnlockedContext(),
+  );
+}
+
+function clearRealtimeReconnectTimer() {
+  if (realtimeConnection.reconnectTimer !== null) {
+    clearTimeout(realtimeConnection.reconnectTimer);
+    realtimeConnection.reconnectTimer = null;
+  }
+}
+
+function clearRealtimeAckTimer() {
+  if (realtimeConnection.ackTimer !== null) {
+    clearTimeout(realtimeConnection.ackTimer);
+    realtimeConnection.ackTimer = null;
+  }
+}
+
+function clearRealtimeHeartbeatTimers() {
+  if (realtimeConnection.heartbeatTimer !== null) {
+    clearInterval(realtimeConnection.heartbeatTimer);
+    realtimeConnection.heartbeatTimer = null;
+  }
+  if (realtimeConnection.heartbeatTimeout !== null) {
+    clearTimeout(realtimeConnection.heartbeatTimeout);
+    realtimeConnection.heartbeatTimeout = null;
+  }
+  if (realtimeConnection.keepaliveTimer !== null) {
+    clearInterval(realtimeConnection.keepaliveTimer);
+    realtimeConnection.keepaliveTimer = null;
+  }
+}
+
+function closeRealtimeSocket(code = 1000, reason = 'client_stop', markIntentional = true) {
+  const socket = realtimeConnection.socket;
+  if (!socket) {
+    return;
+  }
+  realtimeConnection.intentionallyClosed = markIntentional;
+  try {
+    socket.close(code, reason);
+  } catch {
+    // Best effort close only.
+  } finally {
+    realtimeConnection.socket = null;
+  }
+}
+
+function flushRealtimeAck() {
+  const socket = realtimeConnection.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN || realtimeConnection.pendingAckSeq <= 0) {
+    return;
+  }
+  try {
+    socket.send(
+      JSON.stringify({
+        type: 'ack',
+        seq: realtimeConnection.pendingAckSeq,
+      }),
+    );
+    realtimeConnection.ackBatchCount = 0;
+    clearRealtimeAckTimer();
+  } catch {
+    // Best effort only.
+  }
+}
+
+function scheduleRealtimeAck() {
+  if (realtimeConnection.ackBatchCount >= REALTIME_ACK_BATCH_SIZE) {
+    flushRealtimeAck();
+    return;
+  }
+  if (realtimeConnection.ackTimer !== null) {
+    return;
+  }
+  realtimeConnection.ackTimer = setTimeout(() => {
+    realtimeConnection.ackTimer = null;
+    flushRealtimeAck();
+  }, REALTIME_ACK_MAX_INTERVAL_MS);
+}
+
+function scheduleRealtimeReconnect(initial = false) {
+  if (!shouldRunRealtimeSocket()) {
+    return;
+  }
+  clearRealtimeReconnectTimer();
+  const delayMs = initial
+    ? Math.round(Math.random() * REALTIME_CONNECT_INITIAL_JITTER_MAX_MS)
+    : Math.round(
+        Math.random() *
+          Math.min(
+            REALTIME_RECONNECT_BASE_DELAY_MS * 2 ** realtimeConnection.reconnectAttempt,
+            REALTIME_RECONNECT_MAX_DELAY_MS,
+          ),
+      );
+  realtimeConnection.reconnectTimer = setTimeout(() => {
+    realtimeConnection.reconnectTimer = null;
+    void connectRealtimeSocket();
+  }, Math.max(0, delayMs));
+}
+
+function schedulePopupRealtimeNotification(domains) {
+  if (!Array.isArray(domains)) {
+    return;
+  }
+  for (const domain of domains) {
+    if (typeof domain === 'string' && domain.length > 0) {
+      realtimePopupNotifyDomains.add(domain);
+    }
+  }
+  if (realtimePopupNotifyDomains.size === 0) {
+    return;
+  }
+  if (realtimePopupNotifyTimer !== null) {
+    return;
+  }
+  realtimePopupNotifyTimer = setTimeout(() => {
+    realtimePopupNotifyTimer = null;
+    const nextDomains = Array.from(realtimePopupNotifyDomains);
+    realtimePopupNotifyDomains.clear();
+    if (nextDomains.length === 0) {
+      return;
+    }
+    const signalPayload = {
+      domains: nextDomains,
+      emittedAt: nowIso(),
+      nonce: randomBase64Url(12),
+    };
+    const signalArea = sessionStorageArea() ?? chrome.storage?.local ?? null;
+    if (signalArea?.set) {
+      void signalArea
+        .set({
+          [REALTIME_POPUP_SIGNAL_STORAGE_KEY]: signalPayload,
+        })
+        .catch(() => {
+          // Best effort signal only.
+        });
+    }
+    if (!chrome.runtime?.sendMessage) {
+      return;
+    }
+    try {
+      const sendPromise = chrome.runtime.sendMessage({
+        type: 'vaultlite.background.realtime_update',
+        domains: nextDomains,
+        emittedAt: signalPayload.emittedAt,
+      });
+      if (sendPromise && typeof sendPromise.catch === 'function') {
+        sendPromise.catch(() => {
+          // Popup may not be open; ignore.
+        });
+      }
+    } catch {
+      // Popup receiver is best effort only.
+    }
+  }, REALTIME_POPUP_NOTIFY_DEBOUNCE_MS);
+}
+
+function refreshFromRealtimeDomains(domains) {
+  if (!Array.isArray(domains)) {
+    return;
+  }
+  if (domains.includes('vault')) {
+    void refreshCredentialCache({
+      force: true,
+      awaitCompletion: true,
+    })
+      .then((result) => {
+        if (result?.ok) {
+          schedulePopupRealtimeNotification(['vault']);
+        }
+      })
+      .catch(() => {});
+  }
+  if (domains.includes('icons_manual')) {
+    void hydrateManualIconsFromServerBestEffort()
+      .then(() => {
+        schedulePopupRealtimeNotification(['icons_manual']);
+      })
+      .catch(() => {});
+  }
+}
+
+function handleRealtimeServerEventTopic(topic) {
+  if (typeof topic !== 'string') {
+    return;
+  }
+  if (topic.startsWith('vault.item.')) {
+    void refreshCredentialCache({
+      force: true,
+      awaitCompletion: true,
+    })
+      .then((result) => {
+        if (result?.ok) {
+          schedulePopupRealtimeNotification(['vault']);
+        }
+      })
+      .catch(() => {});
+    return;
+  }
+  if (topic.startsWith('icons.')) {
+    void hydrateManualIconsFromServerBestEffort()
+      .then(() => {
+        schedulePopupRealtimeNotification(['icons_manual']);
+      })
+      .catch(() => {});
+    return;
+  }
+  if (topic.startsWith('password_history.') || topic.startsWith('vault.attachment.')) {
+    // Advisory in extension V1; existing APIs refresh lazily from popup actions.
+  }
+}
+
+function startRealtimeHeartbeat() {
+  clearRealtimeHeartbeatTimers();
+  realtimeConnection.heartbeatTimer = setInterval(() => {
+    const socket = realtimeConnection.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (Date.now() - realtimeConnection.lastReceivedAt < REALTIME_HEARTBEAT_IDLE_MS) {
+      return;
+    }
+    try {
+      socket.send(
+        JSON.stringify({
+          type: 'ping',
+          ts: Date.now(),
+        }),
+      );
+    } catch {
+      return;
+    }
+    if (realtimeConnection.heartbeatTimeout !== null) {
+      clearTimeout(realtimeConnection.heartbeatTimeout);
+    }
+    realtimeConnection.heartbeatTimeout = setTimeout(() => {
+      realtimeConnection.heartbeatTimeout = null;
+      if (realtimeConnection.socket && realtimeConnection.socket.readyState === WebSocket.OPEN) {
+        closeRealtimeSocket(1011, 'heartbeat_timeout', false);
+      }
+    }, REALTIME_HEARTBEAT_TIMEOUT_MS);
+  }, 5_000);
+  realtimeConnection.keepaliveTimer = setInterval(() => {
+    const socket = realtimeConnection.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      socket.send(
+        JSON.stringify({
+          type: 'ping',
+          ts: Date.now(),
+        }),
+      );
+    } catch {
+      // Ignore keepalive failures.
+    }
+  }, REALTIME_KEEPALIVE_INTERVAL_MS);
+}
+
+async function handleRealtimeCloseCode(code) {
+  if (code === 4405) {
+    await restoreSessionInternal(true);
+    if (shouldRunRealtimeSocket()) {
+      realtimeConnection.reconnectAttempt = 0;
+      scheduleRealtimeReconnect(true);
+    }
+    return;
+  }
+  if (code === 4401 || code === 4402 || code === 4403 || code === 4404 || code === 4406) {
+    await restoreSessionInternal(true);
+    return;
+  }
+  realtimeConnection.reconnectAttempt += 1;
+  scheduleRealtimeReconnect(false);
+}
+
+async function connectRealtimeSocket() {
+  if (typeof WebSocket === 'undefined') {
+    return;
+  }
+  if (realtimeConnection.connecting || realtimeConnection.socket || !shouldRunRealtimeSocket()) {
+    return;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return;
+  }
+  realtimeConnection.connecting = true;
+  try {
+    const tokenOutput = await apiClient.getRealtimeConnectToken({
+      bearerToken: sessionToken,
+      cursor: realtimeConnection.cursor,
+    });
+    if (!shouldRunRealtimeSocket()) {
+      return;
+    }
+    const wsUrl = new URL(String(tokenOutput.wsUrl));
+    wsUrl.searchParams.set('token', String(tokenOutput.connectToken));
+    wsUrl.searchParams.set('cursor', String(realtimeConnection.cursor));
+    const socket = new WebSocket(wsUrl.toString());
+    realtimeConnection.socket = socket;
+    socket.onopen = () => {
+      realtimeConnection.lastConnectedAt = Date.now();
+      realtimeConnection.lastReceivedAt = Date.now();
+      realtimeConnection.reconnectAttempt = 0;
+      startRealtimeHeartbeat();
+    };
+    socket.onmessage = (event) => {
+      realtimeConnection.lastReceivedAt = Date.now();
+      if (realtimeConnection.heartbeatTimeout !== null) {
+        clearTimeout(realtimeConnection.heartbeatTimeout);
+        realtimeConnection.heartbeatTimeout = null;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(String(event?.data ?? '{}'));
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== 'object' || typeof parsed.type !== 'string') {
+        return;
+      }
+      if (parsed.type === 'hello') {
+        if (Number.isFinite(parsed.cursor)) {
+          realtimeConnection.cursor = Math.max(realtimeConnection.cursor, Math.trunc(parsed.cursor));
+        }
+        return;
+      }
+      if (parsed.type === 'pong') {
+        return;
+      }
+      if (parsed.type === 'event' && parsed.event && Number.isFinite(parsed.event.seq)) {
+        const seq = Math.max(0, Math.trunc(parsed.event.seq));
+        realtimeConnection.cursor = Math.max(realtimeConnection.cursor, seq);
+        realtimeConnection.pendingAckSeq = Math.max(realtimeConnection.pendingAckSeq, seq);
+        realtimeConnection.ackBatchCount += 1;
+        scheduleRealtimeAck();
+        handleRealtimeServerEventTopic(parsed.event.topic);
+        return;
+      }
+      if (parsed.type === 'resync_required') {
+        refreshFromRealtimeDomains(parsed.domains);
+        return;
+      }
+      if (parsed.type === 'invalidated') {
+        const codeByMessage = {
+          session_revoked: 4401,
+          lifecycle_not_active: 4402,
+          trusted_state_invalid: 4403,
+          lock_revision_advanced: 4404,
+          auth_lease_expired_revalidate: 4405,
+          deployment_fingerprint_mismatch: 4406,
+        };
+        const mappedCode =
+          typeof parsed.code === 'string' && Number.isFinite(codeByMessage[parsed.code])
+            ? codeByMessage[parsed.code]
+            : 1000;
+        closeRealtimeSocket(mappedCode, typeof parsed.message === 'string' ? parsed.message : 'invalidated', false);
+      }
+    };
+    socket.onclose = (event) => {
+      const closedSocket = realtimeConnection.socket;
+      realtimeConnection.socket = null;
+      clearRealtimeHeartbeatTimers();
+      clearRealtimeAckTimer();
+      if (closedSocket !== socket) {
+        return;
+      }
+      if (realtimeConnection.intentionallyClosed) {
+        realtimeConnection.intentionallyClosed = false;
+        return;
+      }
+      if (Date.now() - realtimeConnection.lastConnectedAt >= REALTIME_RECONNECT_STABLE_RESET_MS) {
+        realtimeConnection.reconnectAttempt = 0;
+      }
+      void handleRealtimeCloseCode(event.code);
+    };
+    socket.onerror = () => {
+      // Let onclose drive reconnect decisions.
+    };
+  } catch (error) {
+    const described = describeError(error, 'realtime_connect_failed');
+    if (
+      described.code === 'request_failed_401' ||
+      described.code === 'request_failed_403' ||
+      described.code === 'unauthorized'
+    ) {
+      await restoreSessionInternal(true);
+      return;
+    }
+    realtimeConnection.reconnectAttempt += 1;
+    scheduleRealtimeReconnect(false);
+  } finally {
+    realtimeConnection.connecting = false;
+  }
+}
+
+function stopRealtimeSocket() {
+  clearRealtimeReconnectTimer();
+  clearRealtimeHeartbeatTimers();
+  clearRealtimeAckTimer();
+  flushRealtimeAck();
+  realtimeConnection.ackBatchCount = 0;
+  realtimeConnection.pendingAckSeq = 0;
+  realtimeConnection.reconnectAttempt = 0;
+  realtimeConnection.connecting = false;
+  closeRealtimeSocket(1000, 'client_stop', true);
+}
+
+function updateRealtimeLifecycle() {
+  if (!shouldRunRealtimeSocket()) {
+    stopRealtimeSocket();
+    return;
+  }
+  if (realtimeConnection.socket || realtimeConnection.connecting || realtimeConnection.reconnectTimer !== null) {
+    return;
+  }
+  scheduleRealtimeReconnect(true);
+}
+
 function setPhase(phase, errorMessage = null) {
   const previousPhase = state.phase;
   state.phase = phase;
@@ -574,6 +1084,7 @@ function setPhase(phase, errorMessage = null) {
     }
     void reconcileUnlockGrantApprovalAlarm();
   }
+  updateRealtimeLifecycle();
 }
 
 function hasValidUnlockedContext() {
@@ -758,12 +1269,14 @@ async function persistSessionToken() {
 
 async function clearExtensionSessionToken() {
   if (!sessionToken) {
+    updateRealtimeLifecycle();
     return;
   }
   sessionToken = null;
   state.sessionExpiresAt = null;
   await persistSessionToken();
   await reconcileUnlockGrantApprovalAlarm();
+  updateRealtimeLifecycle();
 }
 
 async function clearTrustedStateForReconnect(reasonMessage) {
@@ -1901,6 +2414,8 @@ async function setServerUrlInternal(rawServerUrl) {
     await revokeOriginPermissions([previousServerOrigin, previousWebOrigin]);
   }
   state.deploymentFingerprint = metadata?.deploymentFingerprint ?? state.deploymentFingerprint;
+  applyRealtimeRuntimeMetadata(metadata);
+  realtimeMetadataLoadedAt = Date.now();
   if (!trustedState) {
     await clearExtensionSessionToken();
   }
@@ -2009,6 +2524,7 @@ async function restoreSessionInternal(force = false) {
     if (!apiClient) {
       return;
     }
+    await ensureRealtimeRuntimeMetadata(apiClient, { force: false });
 
     if (!sessionToken && trustedState) {
       if (!force && Date.now() < recoverRetryState.nextAttemptAt) {

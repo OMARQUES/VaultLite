@@ -8,11 +8,20 @@ import { CryptoIdGenerator, SystemClock } from '@vaultlite/runtime-abstractions'
 import { createInMemoryVaultLiteStorage, type VaultLiteStorage } from '@vaultlite/storage-abstractions';
 
 import { createVaultLiteApi } from './app';
+import { VaultLiteRealtimeHub } from './realtime';
 import { createWorkerRuntimeConfig, type VaultLiteWorkerEnv } from './runtime-config';
+
+export interface DurableObjectNamespaceLike {
+  idFromName(name: string): unknown;
+  get(id: unknown): {
+    fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  };
+}
 
 export interface VaultLiteWorkerBindings extends VaultLiteWorkerEnv {
   VAULTLITE_DB?: D1DatabaseLike;
   VAULTLITE_BLOBS?: R2BucketLike;
+  VAULTLITE_REALTIME_HUB?: DurableObjectNamespaceLike;
 }
 
 export async function createWorkerStorage(input: {
@@ -53,6 +62,10 @@ async function createWorkerApp(env: Partial<VaultLiteWorkerBindings> = {}) {
     secureCookies: runtime.secureCookies,
     accountKitPrivateKey: runtime.accountKitPrivateKey,
     accountKitPublicKey: runtime.accountKitPublicKey,
+    realtime: {
+      ...runtime.realtime,
+      hubNamespace: env.VAULTLITE_REALTIME_HUB ?? null,
+    },
   });
 }
 
@@ -69,6 +82,8 @@ function getConfigSignature(env: Partial<VaultLiteWorkerBindings> = {}): string 
     env.VAULTLITE_ACCOUNT_KIT_PUBLIC_KEY ?? '',
     env.VAULTLITE_DB ? 'db' : 'no-db',
     env.VAULTLITE_BLOBS ? 'blobs' : 'no-blobs',
+    env.VAULTLITE_REALTIME_HUB ? 'realtime-hub' : 'no-realtime-hub',
+    env.VAULTLITE_WS_WEB_ALLOWED_ORIGINS ?? '',
   ].join('|');
 }
 
@@ -86,3 +101,4 @@ export default {
 };
 
 export { createVaultLiteApi, createWorkerApp };
+export { VaultLiteRealtimeHub };
