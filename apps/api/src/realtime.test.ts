@@ -38,9 +38,10 @@ describe('realtime helpers', () => {
 describe('VaultLiteRealtimeHub', () => {
   test('deduplicates publishes by eventId', async () => {
     const { hub, storageMap } = createHubFixture();
+    const nowIso = new Date().toISOString();
     const body = {
       eventId: 'evt_1',
-      occurredAt: '2026-03-27T12:00:00.000Z',
+      occurredAt: nowIso,
       deploymentFingerprint: 'fp_1',
       topic: 'vault.item.upserted',
       sourceDeviceId: 'device_1',
@@ -48,7 +49,7 @@ describe('VaultLiteRealtimeHub', () => {
         itemId: 'item_1',
         itemType: 'login',
         revision: 1,
-        updatedAt: '2026-03-27T12:00:00.000Z',
+        updatedAt: nowIso,
         encryptedPayload: 'payload_1',
       },
     };

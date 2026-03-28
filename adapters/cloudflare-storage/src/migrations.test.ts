@@ -36,6 +36,8 @@ describe('cloudflare migration loading', () => {
       '0014_password_generator_history',
       '0015_realtime_outbox',
       '0016_realtime_one_time_tokens',
+      '0017_icons_state_v43',
+      '0018_automatic_icon_registry',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

@@ -12,6 +12,7 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 export interface VaultLiteWorkerEnv {
   VAULTLITE_RUNTIME_MODE?: string;
   VAULTLITE_SERVER_URL?: string;
+  VAULTLITE_ICONS_ASSET_BASE_URL?: string;
   VAULTLITE_DEPLOYMENT_FINGERPRINT?: string;
   VAULTLITE_BOOTSTRAP_ADMIN_TOKEN?: string;
   VAULTLITE_ACCOUNT_KIT_PRIVATE_KEY?: string;
@@ -29,6 +30,20 @@ export interface VaultLiteWorkerEnv {
   VAULTLITE_REALTIME_FLAG_DELTA_ATTACHMENTS_V1?: string;
   VAULTLITE_REALTIME_FLAG_APPLY_WEB_V1?: string;
   VAULTLITE_REALTIME_FLAG_APPLY_EXTENSION_V1?: string;
+  VAULTLITE_ICONS_FLAG_STATE_SYNC_V1?: string;
+  VAULTLITE_ICONS_FLAG_WS_APPLY_WEB_V1?: string;
+  VAULTLITE_ICONS_FLAG_WS_APPLY_EXTENSION_V1?: string;
+  VAULTLITE_ICONS_FLAG_DISCOVERY_V2_V1?: string;
+  VAULTLITE_ICONS_FLAG_FAST_FIRST_V1?: string;
+  VAULTLITE_ICONS_FLAG_BEST_LATER_V1?: string;
+  VAULTLITE_ICONS_FLAG_HTTP_FALLBACK_V1?: string;
+  VAULTLITE_ICONS_FLAG_MANUAL_PRIVATE_TICKET_V1?: string;
+  VAULTLITE_ICONS_PROVIDER_FAVICON_VEMETRIC_ENABLED?: string;
+  VAULTLITE_ICONS_PROVIDER_GOOGLE_S2_ENABLED?: string;
+  VAULTLITE_ICONS_PROVIDER_ICON_HORSE_ENABLED?: string;
+  VAULTLITE_ICONS_PROVIDER_DUCKDUCKGO_IP3_ENABLED?: string;
+  VAULTLITE_ICONS_PROVIDER_FAVICONEXTRACTOR_ENABLED?: string;
+  VAULTLITE_INTERNAL_QUEUE_TOKEN?: string;
 }
 
 export interface WorkerRealtimeFlagsConfig {
@@ -39,6 +54,19 @@ export interface WorkerRealtimeFlagsConfig {
   realtime_delta_attachments_v1: boolean;
   realtime_apply_web_v1: boolean;
   realtime_apply_extension_v1: boolean;
+  icons_state_sync_v1: boolean;
+  icons_ws_apply_web_v1: boolean;
+  icons_ws_apply_extension_v1: boolean;
+  icons_discovery_v2_v1: boolean;
+  icons_fast_first_v1: boolean;
+  icons_best_later_v1: boolean;
+  icons_http_fallback_v1: boolean;
+  icons_manual_private_ticket_v1: boolean;
+  icons_provider_favicon_vemetric_enabled: boolean;
+  icons_provider_google_s2_enabled: boolean;
+  icons_provider_icon_horse_enabled: boolean;
+  icons_provider_duckduckgo_ip3_enabled: boolean;
+  icons_provider_faviconextractor_enabled: boolean;
 }
 
 export interface WorkerRealtimeConfig {
@@ -55,6 +83,7 @@ export interface WorkerRealtimeConfig {
 export interface WorkerRuntimeConfig {
   runtimeMode: RuntimeMode;
   serverUrl: string;
+  iconsAssetBaseUrl?: string;
   deploymentFingerprint: string;
   bootstrapAdminToken: string;
   secureCookies: boolean;
@@ -185,6 +214,7 @@ export function createWorkerRuntimeConfig(env: Partial<VaultLiteWorkerEnv>): Wor
   const providedPrivateKey = env.VAULTLITE_ACCOUNT_KIT_PRIVATE_KEY?.trim();
   const providedPublicKey = env.VAULTLITE_ACCOUNT_KIT_PUBLIC_KEY?.trim();
   const serverUrl = env.VAULTLITE_SERVER_URL?.trim() || DEFAULT_LOCAL_API_ORIGIN;
+  const iconsAssetBaseUrl = env.VAULTLITE_ICONS_ASSET_BASE_URL?.trim() || undefined;
   const deploymentFingerprint =
     env.VAULTLITE_DEPLOYMENT_FINGERPRINT?.trim() || DEFAULT_LOCAL_DEPLOYMENT_FINGERPRINT;
   const secureCookies = isSecureOrigin(serverUrl);
@@ -232,6 +262,37 @@ export function createWorkerRuntimeConfig(env: Partial<VaultLiteWorkerEnv>): Wor
       env.VAULTLITE_REALTIME_FLAG_APPLY_EXTENSION_V1,
       realtimeEnabled,
     ),
+    icons_state_sync_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_STATE_SYNC_V1, true),
+    icons_ws_apply_web_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_WS_APPLY_WEB_V1, true),
+    icons_ws_apply_extension_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_WS_APPLY_EXTENSION_V1, true),
+    icons_discovery_v2_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_DISCOVERY_V2_V1, true),
+    icons_fast_first_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_FAST_FIRST_V1, false),
+    icons_best_later_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_BEST_LATER_V1, false),
+    icons_http_fallback_v1: parseBooleanEnv(env.VAULTLITE_ICONS_FLAG_HTTP_FALLBACK_V1, false),
+    icons_manual_private_ticket_v1: parseBooleanEnv(
+      env.VAULTLITE_ICONS_FLAG_MANUAL_PRIVATE_TICKET_V1,
+      true,
+    ),
+    icons_provider_favicon_vemetric_enabled: parseBooleanEnv(
+      env.VAULTLITE_ICONS_PROVIDER_FAVICON_VEMETRIC_ENABLED,
+      true,
+    ),
+    icons_provider_google_s2_enabled: parseBooleanEnv(
+      env.VAULTLITE_ICONS_PROVIDER_GOOGLE_S2_ENABLED,
+      true,
+    ),
+    icons_provider_icon_horse_enabled: parseBooleanEnv(
+      env.VAULTLITE_ICONS_PROVIDER_ICON_HORSE_ENABLED,
+      true,
+    ),
+    icons_provider_duckduckgo_ip3_enabled: parseBooleanEnv(
+      env.VAULTLITE_ICONS_PROVIDER_DUCKDUCKGO_IP3_ENABLED,
+      true,
+    ),
+    icons_provider_faviconextractor_enabled: parseBooleanEnv(
+      env.VAULTLITE_ICONS_PROVIDER_FAVICONEXTRACTOR_ENABLED,
+      true,
+    ),
   };
 
   if (runtimeMode === 'production') {
@@ -261,6 +322,7 @@ export function createWorkerRuntimeConfig(env: Partial<VaultLiteWorkerEnv>): Wor
   return {
     runtimeMode,
     serverUrl,
+    iconsAssetBaseUrl,
     deploymentFingerprint,
     bootstrapAdminToken,
     secureCookies,

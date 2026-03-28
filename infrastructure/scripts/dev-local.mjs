@@ -1,12 +1,35 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdirSync, createWriteStream } from 'node:fs';
+import { join } from 'node:path';
 import process from 'node:process';
 
 function printHelp() {
-  process.stdout.write(`Usage: npm run dev:local\n\nStarts the local API and web dev servers in a single terminal.\n`);
+  process.stdout.write(
+    `Usage: npm run dev:local\n\nStarts the local API and web dev servers in a single terminal.\nWrites combined output to logs/dev-local-*.log by default.\n`,
+  );
 }
 
-function createRunner(command, args, name) {
+function formatLogTimestamp(date = new Date()) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  const second = String(date.getSeconds()).padStart(2, '0');
+  return `${year}${month}${day}-${hour}${minute}${second}`;
+}
+
+function resolveLogFilePath() {
+  const explicit = process.env.VAULTLITE_DEV_LOCAL_LOG_FILE;
+  if (typeof explicit === 'string' && explicit.trim().length > 0) {
+    return explicit.trim();
+  }
+  const timestamp = formatLogTimestamp();
+  return join(process.cwd(), 'logs', `dev-local-${timestamp}.log`);
+}
+
+function createRunner(command, args, name, logStream) {
   const child = spawn(command, args, {
     cwd: process.cwd(),
     env: process.env,
@@ -15,22 +38,30 @@ function createRunner(command, args, name) {
   });
 
   child.stdout.on('data', (chunk) => {
-    process.stdout.write(`[${name}] ${chunk}`);
+    const output = `[${name}] ${chunk}`;
+    process.stdout.write(output);
+    if (logStream) {
+      logStream.write(output);
+    }
   });
 
   child.stderr.on('data', (chunk) => {
-    process.stderr.write(`[${name}] ${chunk}`);
+    const output = `[${name}] ${chunk}`;
+    process.stderr.write(output);
+    if (logStream) {
+      logStream.write(output);
+    }
   });
 
   return child;
 }
 
-function createNpmRunner(args, name) {
+function createNpmRunner(args, name, logStream) {
   if (process.platform === 'win32') {
-    return createRunner('cmd.exe', ['/d', '/s', '/c', 'npm', ...args], name);
+    return createRunner('cmd.exe', ['/d', '/s', '/c', 'npm', ...args], name, logStream);
   }
 
-  return createRunner('npm', args, name);
+  return createRunner('npm', args, name, logStream);
 }
 
 async function stopRunner(child) {
@@ -64,8 +95,14 @@ async function main() {
     return;
   }
 
-  const api = createNpmRunner(['run', 'dev:api'], 'api');
-  const web = createNpmRunner(['run', 'dev:web'], 'web');
+  const logFilePath = resolveLogFilePath();
+  mkdirSync(join(process.cwd(), 'logs'), { recursive: true });
+  const logStream = createWriteStream(logFilePath, { flags: 'a' });
+  process.stdout.write(`[dev-local] Writing logs to ${logFilePath}\n`);
+  logStream.write(`[dev-local] started_at=${new Date().toISOString()}\n`);
+
+  const api = createNpmRunner(['run', 'dev:api'], 'api', logStream);
+  const web = createNpmRunner(['run', 'dev:web'], 'web', logStream);
   const runners = [api, web];
   let shuttingDown = false;
 
@@ -76,6 +113,8 @@ async function main() {
 
     shuttingDown = true;
     await Promise.allSettled(runners.map((runner) => stopRunner(runner)));
+    logStream.write(`[dev-local] stopped_at=${new Date().toISOString()} exit_code=${exitCode}\n`);
+    await new Promise((resolve) => logStream.end(resolve));
     process.exit(exitCode);
   }
 
@@ -99,9 +138,9 @@ async function main() {
   const firstExit = await Promise.race(exits);
   if (!shuttingDown) {
     const signalText = firstExit.signal ? ` (signal: ${String(firstExit.signal)})` : '';
-    process.stderr.write(
-      `[dev-local] ${firstExit.name} exited with code ${firstExit.code}${signalText}. Stopping remaining processes.\n`,
-    );
+    const output = `[dev-local] ${firstExit.name} exited with code ${firstExit.code}${signalText}. Stopping remaining processes.\n`;
+    process.stderr.write(output);
+    logStream.write(output);
     await shutdown(firstExit.code);
   }
 }

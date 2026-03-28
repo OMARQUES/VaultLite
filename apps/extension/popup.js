@@ -1401,7 +1401,9 @@ function scheduleRealtimePopupRefresh(domains) {
     realtimeRefreshDebounceTimer = null;
     const domainsToApply = Array.from(pendingRealtimeDomains);
     pendingRealtimeDomains.clear();
-    const shouldRefreshList = domainsToApply.some((domain) => domain === 'vault' || domain === 'icons_manual');
+    const shouldRefreshList = domainsToApply.some(
+      (domain) => domain === 'vault' || domain === 'icons_manual' || domain === 'icons_state',
+    );
     if (!shouldRefreshList || resolvePopupPhase(currentState) !== 'ready') {
       return;
     }

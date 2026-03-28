@@ -2,6 +2,7 @@ import { unzipSync } from 'fflate';
 
 import {
   EncryptedBackupPackageV1Schema,
+  type RuntimeMetadata,
   VaultJsonExportV1Schema,
   type BackupAttachmentEntryV1,
   type VaultItemType,
@@ -160,6 +161,8 @@ const LIMITS: VaultImportLimits = {
 };
 
 const IMPORT_CREATE_CONCURRENCY = 5;
+const IMPORT_ICON_DOMAIN_BATCH_SIZE = 120;
+const IMPORT_ICON_DOMAIN_SYNC_CONCURRENCY = 4;
 const ATTACHMENTS_PER_ITEM_CONCURRENCY = 2;
 const RETRY_ATTEMPTS = 2;
 const HISTORY_RETENTION_DAYS = 30;
@@ -202,6 +205,158 @@ function normalizeUrlForKey(value: string | null | undefined): string {
     return `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${path}${parsed.search}${parsed.hash}`;
   } catch {
     return normalizeForKey(raw);
+  }
+}
+
+function normalizeDomainForIconSync(rawUrl: string | null | undefined): string | null {
+  const raw = normalizeCell(rawUrl);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    const hostname = parsed.hostname.trim().toLowerCase().replace(/\.$/u, '');
+    if (!hostname || !/^[a-z0-9.-]{1,255}$/u.test(hostname)) {
+      return null;
+    }
+    return hostname;
+  } catch {
+    return null;
+  }
+}
+
+function collectIconSyncHostsFromUrls(urls: string[]): string[] {
+  const hosts = new Set<string>();
+  for (const url of urls) {
+    const domain = normalizeDomainForIconSync(url);
+    if (domain) {
+      hosts.add(domain);
+    }
+  }
+  return Array.from(hosts).sort((left, right) => left.localeCompare(right));
+}
+
+async function syncImportedIconDomainsBatch(input: {
+  sessionStore: SessionStore;
+  entries: Array<{ itemId: string; itemRevision: number; hosts: string[] }>;
+}) {
+  if (!Array.isArray(input.entries) || input.entries.length === 0) {
+    return;
+  }
+  let runtimeMetadata: RuntimeMetadata | null = null;
+  try {
+    runtimeMetadata = await input.sessionStore.getRuntimeMetadata();
+  } catch {
+    return;
+  }
+  if (runtimeMetadata?.realtime?.flags?.icons_state_sync_v1 !== true) {
+    return;
+  }
+
+  const isPayloadError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : '';
+    return (
+      message.includes('request_body_too_large') ||
+      message.includes('invalid_input') ||
+      message.includes('request_failed_400') ||
+      message.includes('request_failed_413')
+    );
+  };
+
+  const shouldBackoff = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : '';
+    return (
+      message.includes('request_timeout') ||
+      message.includes('rate_limited') ||
+      message.includes('request_failed_429') ||
+      message.includes('request_failed_500') ||
+      message.includes('request_failed_502') ||
+      message.includes('request_failed_503') ||
+      message.includes('request_failed_504')
+    );
+  };
+
+  let backoffAttempt = 0;
+  let backoffUntil = 0;
+
+  const nextBackoffMs = () => {
+    backoffAttempt = Math.max(1, backoffAttempt + 1);
+    const exponent = Math.min(backoffAttempt - 1, 6);
+    const baseMs = Math.min(3_000 * 2 ** exponent, 60_000);
+    const jitterMs = Math.round(Math.random() * Math.max(250, baseMs * 0.2));
+    return baseMs + jitterMs;
+  };
+
+  const fallbackPerItemSync = async (entries: Array<{ itemId: string; itemRevision: number; hosts: string[] }>) => {
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.max(1, Math.min(IMPORT_ICON_DOMAIN_SYNC_CONCURRENCY, entries.length)) },
+      async () => {
+        while (cursor < entries.length) {
+          const currentIndex = cursor;
+          cursor += 1;
+          const entry = entries[currentIndex];
+          if (!entry) {
+            continue;
+          }
+          try {
+            await input.sessionStore.putIconDomainsItem({
+              itemId: entry.itemId,
+              itemRevision: entry.itemRevision,
+              hosts: entry.hosts,
+            });
+          } catch {
+            // Best effort; vault import success must not depend on icon index sync.
+          }
+        }
+      },
+    );
+    await Promise.allSettled(workers);
+  };
+
+  const syncChunkAdaptive = async (entries: Array<{ itemId: string; itemRevision: number; hosts: string[] }>) => {
+    if (entries.length === 0) {
+      return;
+    }
+    try {
+      await input.sessionStore.putIconDomainsBatch({
+        entries: entries.map((entry) => ({
+          itemId: entry.itemId,
+          itemRevision: entry.itemRevision,
+          hosts: entry.hosts,
+        })),
+      });
+      backoffAttempt = 0;
+      backoffUntil = 0;
+      return;
+    } catch (error) {
+      if (!isPayloadError(error)) {
+        throw error;
+      }
+      if (entries.length <= 1) {
+        await fallbackPerItemSync(entries);
+        return;
+      }
+      const middle = Math.ceil(entries.length / 2);
+      await syncChunkAdaptive(entries.slice(0, middle));
+      await syncChunkAdaptive(entries.slice(middle));
+    }
+  };
+
+  for (let index = 0; index < input.entries.length; index += IMPORT_ICON_DOMAIN_BATCH_SIZE) {
+    if (Date.now() < backoffUntil) {
+      break;
+    }
+    const chunk = input.entries.slice(index, index + IMPORT_ICON_DOMAIN_BATCH_SIZE);
+    try {
+      await syncChunkAdaptive(chunk);
+    } catch (error) {
+      if (shouldBackoff(error)) {
+        backoffUntil = Date.now() + nextBackoffMs();
+        break;
+      }
+      await fallbackPerItemSync(chunk);
+    }
   }
 }
 
@@ -1513,6 +1668,7 @@ export async function executeVaultImport(input: {
   let processed = 0;
   const total = validRows.length;
   const createdUiStateRows: Array<{ itemId: string; favorite: boolean; folder: string | null }> = [];
+  const createdIconDomainEntries: Array<{ itemId: string; itemRevision: number; hosts: string[] }> = [];
   let cursor = 0;
 
   async function worker() {
@@ -1546,6 +1702,16 @@ export async function executeVaultImport(input: {
           favorite: candidate.favoriteHint,
           folder: candidate.folderHint,
         });
+        if (candidate.itemType === 'login') {
+          const hosts = collectIconSyncHostsFromUrls(candidate.urls);
+          if (hosts.length > 0) {
+            createdIconDomainEntries.push({
+              itemId: createdItem.itemId,
+              itemRevision: createdItem.revision,
+              hosts,
+            });
+          }
+        }
         records.push({
           rowIndex: candidate.rowIndex,
           sourceRef: candidate.sourceRef,
@@ -1584,6 +1750,11 @@ export async function executeVaultImport(input: {
   await Promise.all(
     Array.from({ length: Math.max(1, Math.min(IMPORT_CREATE_CONCURRENCY, validRows.length || 1)) }, () => worker()),
   );
+
+  await syncImportedIconDomainsBatch({
+    sessionStore: input.sessionStore,
+    entries: createdIconDomainEntries,
+  });
 
   for (const candidate of skippedRows) {
     if (candidate.status === 'possible_duplicate_requires_review') {

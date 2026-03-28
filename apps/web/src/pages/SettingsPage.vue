@@ -737,7 +737,10 @@ async function refreshManualIcons() {
   try {
     await migrateLegacyManualIconsToServerIfNeeded();
     const response = await sessionStore.listManualSiteIcons();
-    manualIcons.value = response.icons
+    if (response.status === 'not_modified') {
+      return;
+    }
+    manualIcons.value = response.payload.icons
       .map((entry) => ({
         host: entry.domain,
         dataUrl: entry.dataUrl,

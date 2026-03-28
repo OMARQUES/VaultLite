@@ -3,6 +3,17 @@ import type {
   DeviceRevokeOutput,
   ExtensionLinkActionOutput,
   ExtensionLinkPendingListOutput,
+  IconsDomainBatchPutInput,
+  IconsDomainBatchPutOutput,
+  IconsDomainItemPutInput,
+  IconsDomainItemPutOutput,
+  IconsDomainReindexChunkInput,
+  IconsDomainReindexCommitInput,
+  IconsDomainReindexOutput,
+  IconsDomainReindexStartInput,
+  IconsObjectTicketIssueInput,
+  IconsObjectTicketIssueOutput,
+  IconsStateOutput,
   PasswordRotationCompleteOutput,
   PasswordGeneratorHistoryActionOutput,
   PasswordGeneratorHistoryListOutput,
@@ -131,9 +142,22 @@ export interface SessionStore {
     currentPassword: string;
     nextPassword: string;
   }): Promise<PasswordRotationCompleteOutput>;
+  getIconsState(input?: { domains?: string[]; etag?: string }): Promise<
+    | { status: 'ok'; payload: IconsStateOutput; etag: string | null }
+    | { status: 'not_modified'; etag: string | null }
+  >;
+  putIconDomainsBatch(input: IconsDomainBatchPutInput): Promise<IconsDomainBatchPutOutput>;
+  putIconDomainsItem(input: IconsDomainItemPutInput): Promise<IconsDomainItemPutOutput>;
+  startIconDomainsReindex(input: IconsDomainReindexStartInput): Promise<IconsDomainReindexOutput>;
+  sendIconDomainsReindexChunk(input: IconsDomainReindexChunkInput): Promise<IconsDomainReindexOutput>;
+  commitIconDomainsReindex(input: IconsDomainReindexCommitInput): Promise<IconsDomainReindexOutput>;
+  issueIconObjectTickets(input: IconsObjectTicketIssueInput): Promise<IconsObjectTicketIssueOutput>;
   resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
   discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
-  listManualSiteIcons(): Promise<SiteIconManualListOutput>;
+  listManualSiteIcons(input?: { etag?: string }): Promise<
+    | { status: 'ok'; payload: SiteIconManualListOutput; etag: string | null }
+    | { status: 'not_modified'; etag: string | null }
+  >;
   upsertManualSiteIcon(input: SiteIconManualUpsertInput): Promise<SiteIconManualActionOutput>;
   removeManualSiteIcon(input: SiteIconManualRemoveInput): Promise<SiteIconManualActionOutput>;
   listPasswordGeneratorHistory(): Promise<PasswordGeneratorHistoryListOutput>;
@@ -1309,14 +1333,35 @@ export function createSessionStore(input: {
 
       return rotationResponse;
     },
+    getIconsState(inputData) {
+      return input.authClient.getIconsState(inputData);
+    },
+    putIconDomainsBatch(inputData) {
+      return input.authClient.putIconDomainsBatch(inputData);
+    },
+    putIconDomainsItem(inputData) {
+      return input.authClient.putIconDomainsItem(inputData);
+    },
+    startIconDomainsReindex(inputData) {
+      return input.authClient.startIconDomainsReindex(inputData);
+    },
+    sendIconDomainsReindexChunk(inputData) {
+      return input.authClient.sendIconDomainsReindexChunk(inputData);
+    },
+    commitIconDomainsReindex(inputData) {
+      return input.authClient.commitIconDomainsReindex(inputData);
+    },
+    issueIconObjectTickets(inputData) {
+      return input.authClient.issueIconObjectTickets(inputData);
+    },
     resolveSiteIcons(inputData) {
       return input.authClient.resolveSiteIcons(inputData);
     },
     discoverSiteIcons(inputData) {
       return input.authClient.discoverSiteIcons(inputData);
     },
-    listManualSiteIcons() {
-      return input.authClient.listManualSiteIcons();
+    listManualSiteIcons(inputData) {
+      return input.authClient.listManualSiteIcons(inputData);
     },
     upsertManualSiteIcon(inputData) {
       return input.authClient.upsertManualSiteIcon(inputData);

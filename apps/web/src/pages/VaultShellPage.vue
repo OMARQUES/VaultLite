@@ -7,6 +7,7 @@ import {
   useRoute,
   useRouter,
 } from 'vue-router';
+import { getDomain } from 'tldts';
 
 import DangerButton from '../components/ui/DangerButton.vue';
 import DialogModal from '../components/ui/DialogModal.vue';
@@ -128,14 +129,31 @@ const canonicalSiteIconsByHost = ref<
   Record<string, { dataUrl: string; source: 'manual' | 'automatic'; sourceUrl: string | null; updatedAt: string }>
 >({});
 const iconDiscoveryCooldownByHost = ref<Record<string, number>>({});
+const iconDomainsSyncedByItem = ref<Record<string, string>>({});
+const iconsStateSyncEnabled = ref(false);
+const iconsAssetBaseUrl = ref('');
+const iconsStateEtag = ref<string | null>(null);
+const manualIconsEtag = ref<string | null>(null);
+const iconObjectDataUrlByKey = ref<Record<string, string>>({});
 const detailIconUploadBusy = ref(false);
 const toolbarPasswordGeneratorOpen = ref(false);
 const loginPasswordGeneratorOpen = ref(false);
 const loginPasswordFieldFocused = ref(false);
 let iconHydrationNonce = 0;
+let iconStateHydrationInFlight: Promise<void> | null = null;
+const iconObjectFetchInFlightByKey = new Map<string, Promise<string | null>>();
+let lastIconsStateFailureAt = 0;
 let manualIconRemoteRefreshInFlight: Promise<void> | null = null;
 let lastManualIconRemoteRefreshAt = 0;
 const MANUAL_ICON_REMOTE_REFRESH_COOLDOWN_MS = 12_000;
+const ICONS_STATE_RETRY_COOLDOWN_MS = 10_000;
+const ICONS_STATE_QUERY_DOMAINS_MAX = 500;
+const ICONS_STATE_HYDRATION_DEBOUNCE_MS = 500;
+const ICONS_STATE_REVALIDATE_WINDOW_MS = 20_000;
+const ICON_DOMAIN_SYNC_CONCURRENCY = 6;
+const ICON_DOMAIN_SYNC_BATCH_SIZE = 120;
+const ICON_DOMAIN_SYNC_BACKOFF_BASE_MS = 3_000;
+const ICON_DOMAIN_SYNC_BACKOFF_MAX_MS = 60_000;
 const REALTIME_WATCHDOG_MS = 15 * 60_000;
 const attachmentObjectUrls = new Set<string>();
 const realtimeEnabled = ref(false);
@@ -143,6 +161,13 @@ const realtimeHealthy = ref(false);
 let realtimeClient: WebRealtimeClient | null = null;
 let realtimePollingPaused = false;
 let realtimeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let iconHydrationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let iconHydrationScheduledForce = false;
+let iconHydrationScheduledHosts: string[] = [];
+let lastIconHydrationHostsSignature = '';
+let lastIconHydrationHostsAt = 0;
+let iconDomainSyncBackoffUntil = 0;
+let iconDomainSyncBackoffAttempt = 0;
 
 const loginDraft = reactive<LoginVaultItemPayload>({
   title: '',
@@ -291,9 +316,17 @@ async function refreshManualSiteIconsFromServer(options: { force?: boolean } = {
 
   manualIconRemoteRefreshInFlight = (async () => {
     try {
-      const response = await sessionStore.listManualSiteIcons();
+      const response = await sessionStore.listManualSiteIcons({
+        etag: manualIconsEtag.value ?? undefined,
+      });
+      if (response.status === 'not_modified') {
+        manualIconsEtag.value = response.etag ?? manualIconsEtag.value;
+        lastManualIconRemoteRefreshAt = Date.now();
+        return;
+      }
+      manualIconsEtag.value = response.etag ?? null;
       const nextManualMap: ManualSiteIconMap = {};
-      for (const entry of response.icons ?? []) {
+      for (const entry of response.payload.icons ?? []) {
         const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
         const dataUrl = typeof entry.dataUrl === 'string' ? entry.dataUrl : '';
         if (!safeHost || !dataUrl) {
@@ -319,17 +352,59 @@ async function refreshManualSiteIconsFromServer(options: { force?: boolean } = {
   return manualIconRemoteRefreshInFlight;
 }
 
+function normalizeHydrationHosts(hosts: string[]): string[] {
+  return Array.from(
+    new Set(
+      hosts
+        .map((host) => normalizeUrlForFavicon(host))
+        .filter((host): host is string => Boolean(host)),
+    ),
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+function scheduleIconsStateHydration(
+  hosts: string[],
+  options: { force?: boolean } = {},
+) {
+  iconHydrationScheduledHosts = normalizeHydrationHosts(hosts);
+  iconHydrationScheduledForce = iconHydrationScheduledForce || options.force === true;
+  if (iconHydrationDebounceTimer) {
+    return;
+  }
+  iconHydrationDebounceTimer = setTimeout(() => {
+    iconHydrationDebounceTimer = null;
+    const nextHosts = iconHydrationScheduledHosts;
+    iconHydrationScheduledHosts = [];
+    const force = iconHydrationScheduledForce;
+    iconHydrationScheduledForce = false;
+    const signature = nextHosts.join(',');
+    const now = Date.now();
+    if (!force && signature === lastIconHydrationHostsSignature && now - lastIconHydrationHostsAt < ICONS_STATE_REVALIDATE_WINDOW_MS) {
+      return;
+    }
+    lastIconHydrationHostsSignature = signature;
+    lastIconHydrationHostsAt = now;
+    void hydrateCanonicalSiteIconsForHosts(nextHosts).catch(() => undefined);
+  }, ICONS_STATE_HYDRATION_DEBOUNCE_MS);
+}
+
 function handleManualIconRefreshOnFocus() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
     return;
   }
   void refreshManualSiteIconsFromServer({ force: true });
+  scheduleIconsStateHydration(iconHydrationHosts.value, {
+    force: !realtimeHealthy.value,
+  });
 }
 
 function handleManualIconRefreshOnVisibilityChange() {
   realtimeClient?.setVisibilityState(document.visibilityState);
   if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
     void refreshManualSiteIconsFromServer({ force: true });
+    scheduleIconsStateHydration(iconHydrationHosts.value, {
+      force: !realtimeHealthy.value,
+    });
   }
 }
 
@@ -373,12 +448,19 @@ function onRealtimeNetworkOnline() {
   realtimeClient?.start();
 }
 
-async function handleRealtimeDomainResync(domains: Array<'vault' | 'icons_manual' | 'password_history' | 'attachments'>) {
+async function handleRealtimeDomainResync(
+  domains: Array<'vault' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'>,
+) {
   if (domains.includes('vault')) {
     void workspace.triggerSync('realtime_vault_resync').catch(() => undefined);
   }
   if (domains.includes('icons_manual')) {
     void refreshManualSiteIconsFromServer({ force: true });
+  }
+  if (domains.includes('icons_state')) {
+    scheduleIconsStateHydration(iconHydrationHosts.value, {
+      force: true,
+    });
   }
   if (domains.includes('attachments')) {
     const itemId = selectedAttachmentItem.value?.itemId ?? null;
@@ -389,13 +471,17 @@ async function handleRealtimeDomainResync(domains: Array<'vault' | 'icons_manual
 }
 
 async function initializeRealtimeClient() {
+  let runtimeMetadata: Awaited<ReturnType<typeof sessionStore.getRuntimeMetadata>> | null = null;
   try {
-    const metadata = await sessionStore.getRuntimeMetadata();
-    if (!metadata.realtime?.enabled || metadata.realtime.flags?.realtime_apply_web_v1 !== true) {
+    runtimeMetadata = await sessionStore.getRuntimeMetadata();
+    iconsStateSyncEnabled.value = runtimeMetadata.realtime?.flags?.icons_state_sync_v1 === true;
+    iconsAssetBaseUrl.value = resolveIconsAssetBaseUrlFromMetadata(runtimeMetadata);
+    if (!runtimeMetadata.realtime?.enabled || runtimeMetadata.realtime.flags?.realtime_apply_web_v1 !== true) {
       realtimeEnabled.value = false;
       return;
     }
   } catch {
+    iconsStateSyncEnabled.value = false;
     realtimeEnabled.value = false;
     return;
   }
@@ -418,6 +504,9 @@ async function initializeRealtimeClient() {
   if (typeof document !== 'undefined') {
     realtimeClient.setVisibilityState(document.visibilityState);
   }
+  scheduleIconsStateHydration(iconHydrationHosts.value, {
+    force: true,
+  });
   if (sessionStore.state.phase === 'ready') {
     realtimeClient.start();
   }
@@ -668,7 +757,7 @@ const editorHeaderFaviconUrl = computed(() => {
   }
 
   if (isCreateLogin.value) {
-    const candidates = loginFaviconCandidates(loginDraft.urls[0]);
+    const candidates = loginFaviconCandidatesFromUrls(loginDraft.urls);
     return candidates[0] ?? null;
   }
 
@@ -1372,6 +1461,10 @@ watch(
   () => {
     refreshUiState();
     refreshManualSiteIcons();
+    iconsStateEtag.value = null;
+    manualIconsEtag.value = null;
+    iconObjectDataUrlByKey.value = {};
+    iconDomainsSyncedByItem.value = {};
   },
   { immediate: true },
 );
@@ -1400,7 +1493,7 @@ watch(
 watch(
   () => iconHydrationHosts.value,
   (hosts) => {
-    void hydrateCanonicalSiteIconsForHosts(hosts);
+    scheduleIconsStateHydration(hosts);
   },
   { immediate: true },
 );
@@ -1811,10 +1904,264 @@ function normalizeUrlForFavicon(url: string): string | null {
     if (!parsed.hostname) {
       return null;
     }
-    return parsed.hostname;
+    const normalizedHost = sanitizeIconHost(parsed.hostname);
+    if (!normalizedHost || !/^[a-z0-9.-]{1,255}$/u.test(normalizedHost)) {
+      return null;
+    }
+    return normalizedHost;
   } catch {
     return null;
   }
+}
+
+function iconDomainAliases(hostname: string): string[] {
+  const safeHost = normalizeUrlForFavicon(hostname);
+  if (!safeHost) {
+    return [];
+  }
+  const aliases = [safeHost];
+  const apex = getDomain(safeHost, { allowPrivateDomains: false });
+  if (typeof apex === 'string' && apex.length > 0 && apex !== safeHost) {
+    aliases.push(apex);
+  }
+  return Array.from(new Set(aliases));
+}
+
+function resolveIconsAssetBaseUrlFromMetadata(metadata: { serverUrl: string; iconsAssetBaseUrl?: string }): string {
+  const candidate = typeof metadata.iconsAssetBaseUrl === 'string' ? metadata.iconsAssetBaseUrl.trim() : '';
+  if (candidate.length > 0) {
+    return candidate.replace(/\/+$/u, '');
+  }
+  return metadata.serverUrl.replace(/\/+$/u, '');
+}
+
+function iconObjectCacheKey(record: {
+  objectClass: 'automatic_public' | 'manual_private' | null;
+  objectId: string | null;
+  objectSha256: string | null;
+}): string | null {
+  if (record.objectClass === 'automatic_public' && record.objectSha256) {
+    return `a:${record.objectSha256}`;
+  }
+  if (record.objectClass === 'manual_private' && record.objectId) {
+    return `m:${record.objectId}`;
+  }
+  return null;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : null;
+      if (!result) {
+        reject(new Error('icon_blob_decode_failed'));
+        return;
+      }
+      resolve(result);
+    };
+    reader.onerror = () => reject(new Error('icon_blob_decode_failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchIconDataUrlFromObjectUrl(input: {
+  url: string;
+  objectClass: 'automatic_public' | 'manual_private';
+}): Promise<string | null> {
+  try {
+    const response = await fetch(input.url, {
+      method: 'GET',
+      credentials: 'omit',
+      cache: input.objectClass === 'automatic_public' ? 'force-cache' : 'no-store',
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const blob = await response.blob();
+    if (!blob.type.startsWith('image/')) {
+      return null;
+    }
+    const dataUrl = await blobToDataUrl(blob);
+    if (!dataUrl.startsWith('data:image/')) {
+      return null;
+    }
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
+function loginHostsForItem(item: VaultWorkspaceItem): string[] {
+  if (item.itemType !== 'login') {
+    return [];
+  }
+  const hosts = new Set<string>();
+  for (const rawUrl of item.payload.urls ?? []) {
+    const host = normalizeUrlForFavicon(rawUrl ?? '');
+    if (host) {
+      hosts.add(host);
+    }
+  }
+  return Array.from(hosts).sort((left, right) => left.localeCompare(right));
+}
+
+async function runWithConcurrency(
+  tasks: Array<() => Promise<unknown>>,
+  concurrency: number,
+): Promise<void> {
+  if (tasks.length === 0) {
+    return;
+  }
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, tasks.length)) }, async (_, workerIndex) => {
+    for (let index = workerIndex; index < tasks.length; index += Math.max(1, concurrency)) {
+      const task = tasks[index];
+      if (!task) {
+        continue;
+      }
+      await task();
+    }
+  });
+  await Promise.allSettled(workers);
+}
+
+function isIconDomainSyncPayloadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : '';
+  return (
+    message.includes('request_body_too_large') ||
+    message.includes('request_failed_400') ||
+    message.includes('request_failed_413') ||
+    message.includes('invalid_input')
+  );
+}
+
+function shouldBackoffIconDomainSync(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : '';
+  return (
+    message.includes('request_timeout') ||
+    message.includes('rate_limited') ||
+    message.includes('request_failed_429') ||
+    message.includes('request_failed_500') ||
+    message.includes('request_failed_502') ||
+    message.includes('request_failed_503') ||
+    message.includes('request_failed_504')
+  );
+}
+
+function nextIconDomainSyncBackoffMs(): number {
+  iconDomainSyncBackoffAttempt = Math.max(1, iconDomainSyncBackoffAttempt + 1);
+  const exponent = Math.min(iconDomainSyncBackoffAttempt - 1, 6);
+  const baseMs = Math.min(ICON_DOMAIN_SYNC_BACKOFF_BASE_MS * 2 ** exponent, ICON_DOMAIN_SYNC_BACKOFF_MAX_MS);
+  const jitterMs = Math.round(Math.random() * Math.max(250, baseMs * 0.2));
+  return baseMs + jitterMs;
+}
+
+async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
+  if (!iconsStateSyncEnabled.value) {
+    return;
+  }
+  if (Date.now() < iconDomainSyncBackoffUntil) {
+    return;
+  }
+  const nextSignatures: Record<string, string> = { ...iconDomainsSyncedByItem.value };
+  const pendingEntries: Array<{
+    itemId: string;
+    itemRevision: number;
+    hosts: string[];
+    signature: string;
+  }> = [];
+  for (const item of items) {
+    if (item.itemType !== 'login') {
+      continue;
+    }
+    const hosts = loginHostsForItem(item);
+    if (hosts.length === 0) {
+      continue;
+    }
+    const signature = `${item.revision}:${hosts.join(',')}`;
+    if (nextSignatures[item.itemId] === signature) {
+      continue;
+    }
+    pendingEntries.push({
+      itemId: item.itemId,
+      itemRevision: item.revision,
+      hosts,
+      signature,
+    });
+  }
+  if (pendingEntries.length === 0) {
+    return;
+  }
+
+  const fallbackPerItemSync = async (entries: Array<(typeof pendingEntries)[number]>) => {
+    const updateTasks = entries.map((entry) => async () => {
+      try {
+        await sessionStore.putIconDomainsItem({
+          itemId: entry.itemId,
+          itemRevision: entry.itemRevision,
+          hosts: entry.hosts,
+        });
+        nextSignatures[entry.itemId] = entry.signature;
+      } catch {
+        // Keep previous signature and retry later.
+      }
+    });
+    await runWithConcurrency(updateTasks, ICON_DOMAIN_SYNC_CONCURRENCY);
+  };
+
+  const syncChunkWithAdaptiveBatch = async (entries: Array<(typeof pendingEntries)[number]>) => {
+    if (entries.length === 0) {
+      return;
+    }
+    try {
+      const response = await sessionStore.putIconDomainsBatch({
+        entries: entries.map((entry) => ({
+          itemId: entry.itemId,
+          itemRevision: entry.itemRevision,
+          hosts: entry.hosts,
+        })),
+      });
+      const staleItemIds = new Set(
+        (response.entries ?? [])
+          .filter((entry) => entry.result === 'success_no_op_stale_revision')
+          .map((entry) => entry.itemId),
+      );
+      for (const entry of entries) {
+        if (staleItemIds.has(entry.itemId)) {
+          continue;
+        }
+        nextSignatures[entry.itemId] = entry.signature;
+      }
+      return;
+    } catch (error) {
+      if (!isIconDomainSyncPayloadError(error)) {
+        throw error;
+      }
+      if (entries.length <= 1) {
+        await fallbackPerItemSync(entries);
+        return;
+      }
+      const middle = Math.ceil(entries.length / 2);
+      await syncChunkWithAdaptiveBatch(entries.slice(0, middle));
+      await syncChunkWithAdaptiveBatch(entries.slice(middle));
+    }
+  };
+
+  for (let index = 0; index < pendingEntries.length; index += ICON_DOMAIN_SYNC_BATCH_SIZE) {
+    const chunk = pendingEntries.slice(index, index + ICON_DOMAIN_SYNC_BATCH_SIZE);
+    try {
+      await syncChunkWithAdaptiveBatch(chunk);
+      iconDomainSyncBackoffAttempt = 0;
+      iconDomainSyncBackoffUntil = 0;
+    } catch (error) {
+      if (shouldBackoffIconDomainSync(error)) {
+        iconDomainSyncBackoffUntil = Date.now() + nextIconDomainSyncBackoffMs();
+        break;
+      }
+      await fallbackPerItemSync(chunk);
+    }
+  }
+  iconDomainsSyncedByItem.value = nextSignatures;
 }
 
 function setCanonicalSiteIcons(
@@ -1853,7 +2200,7 @@ function loginHostsForItems(items: VaultWorkspaceItem[]): string[] {
   return Array.from(hosts).sort((left, right) => left.localeCompare(right));
 }
 
-async function hydrateCanonicalSiteIconsForHosts(hosts: string[]) {
+async function hydrateCanonicalSiteIconsLegacyForHosts(hosts: string[]) {
   if (hosts.length === 0) {
     return;
   }
@@ -1897,40 +2244,260 @@ async function hydrateCanonicalSiteIconsForHosts(hosts: string[]) {
   }
 }
 
-function loginFaviconCandidates(url: string | undefined): string[] {
-  const hostname = normalizeUrlForFavicon(url ?? '');
-  if (!hostname) {
-    return [];
-  }
-  const canonicalIcon = canonicalSiteIconsByHost.value[hostname]?.dataUrl ?? null;
-  if (canonicalIcon) {
-    return [canonicalIcon];
-  }
-  const manualIcon = manualSiteIconsByHost.value[hostname]?.dataUrl ?? null;
-  return manualIcon ? [manualIcon] : [];
+function shouldFallbackToLegacyIconsState(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+  return message.includes('feature_disabled') || message.includes('request_failed_404');
 }
 
-function faviconKey(itemId: string, url: string | undefined): string | null {
-  const hostname = normalizeUrlForFavicon(url ?? '');
-  if (!hostname) {
-    return null;
+function selectDomainsForIconsState(hosts: string[]): string[] {
+  const unique = Array.from(
+    new Set(
+      hosts
+        .map((host) => normalizeUrlForFavicon(host))
+        .filter((host): host is string => Boolean(host)),
+    ),
+  );
+  if (unique.length <= ICONS_STATE_QUERY_DOMAINS_MAX) {
+    return unique;
+  }
+  const missing: string[] = [];
+  const known: string[] = [];
+  for (const host of unique) {
+    const hasKnownIcon = iconDomainAliases(host).some(
+      (alias) => Boolean(canonicalSiteIconsByHost.value[alias]?.dataUrl),
+    );
+    if (hasKnownIcon) {
+      known.push(host);
+    } else {
+      missing.push(host);
+    }
+  }
+  return [...missing, ...known].slice(0, ICONS_STATE_QUERY_DOMAINS_MAX);
+}
+
+async function hydrateCanonicalSiteIconsFromState(hosts: string[]) {
+  if (hosts.length === 0) {
+    return;
+  }
+  if (!iconsStateSyncEnabled.value) {
+    return;
+  }
+  if (Date.now() - lastIconsStateFailureAt < ICONS_STATE_RETRY_COOLDOWN_MS) {
+    return;
+  }
+  if (!iconsAssetBaseUrl.value) {
+    try {
+      const metadata = await sessionStore.getRuntimeMetadata();
+      iconsAssetBaseUrl.value = resolveIconsAssetBaseUrlFromMetadata(metadata);
+    } catch {
+      return;
+    }
+  }
+  const stateDomains = selectDomainsForIconsState(hosts);
+  if (stateDomains.length === 0) {
+    return;
+  }
+  await syncIconDomainIndexForItems(iconHydrationItems.value);
+  const response = await sessionStore.getIconsState({
+    domains: stateDomains,
+    etag: iconsStateEtag.value ?? undefined,
+  });
+  if (response.status === 'not_modified') {
+    if (response.etag) {
+      iconsStateEtag.value = response.etag;
+    }
+    return;
+  }
+  const payload = response.payload;
+  iconsStateEtag.value = response.etag ?? payload.etag ?? null;
+  const records = payload.records ?? [];
+  const missingManualObjectIds = Array.from(
+    new Set(
+      records
+        .filter(
+          (record) =>
+            record.status === 'ready' &&
+            record.objectClass === 'manual_private' &&
+            typeof record.objectId === 'string' &&
+            record.objectId.length > 0,
+        )
+        .map((record) => record.objectId as string)
+        .filter((objectId) => !iconObjectDataUrlByKey.value[`m:${objectId}`]),
+    ),
+  );
+  const manualTicketByObjectId = new Map<string, string>();
+  if (missingManualObjectIds.length > 0) {
+    try {
+      const ticketResponse = await sessionStore.issueIconObjectTickets({
+        objectIds: missingManualObjectIds,
+        ttlSeconds: 300,
+      });
+      for (const entry of ticketResponse.tickets ?? []) {
+        if (entry?.objectId && entry?.ticket) {
+          manualTicketByObjectId.set(entry.objectId, entry.ticket);
+        }
+      }
+    } catch {
+      // Manual-private icons fall back to previous cached value.
+    }
   }
 
-  return `${itemId}:${hostname}`;
+  const nextByKey = { ...iconObjectDataUrlByKey.value };
+  const nextByHost = { ...canonicalSiteIconsByHost.value };
+  let changed = false;
+
+  for (const record of records) {
+    const domain = normalizeUrlForFavicon(record.domain);
+    if (!domain) {
+      continue;
+    }
+    if (record.status === 'removed' || record.status === 'absent') {
+      for (const alias of iconDomainAliases(domain)) {
+        if (nextByHost[alias]) {
+          delete nextByHost[alias];
+          changed = true;
+        }
+      }
+      continue;
+    }
+    if (record.status !== 'ready') {
+      continue;
+    }
+    const key = iconObjectCacheKey({
+      objectClass: record.objectClass,
+      objectId: record.objectId,
+      objectSha256: record.objectSha256,
+    });
+    if (!key) {
+      continue;
+    }
+    let dataUrl: string | null = nextByKey[key] ?? null;
+    if (!dataUrl) {
+      let objectUrl: string | null = null;
+      if (record.objectClass === 'automatic_public' && record.objectSha256) {
+        objectUrl = `${iconsAssetBaseUrl.value}/icons/a/${record.objectSha256}`;
+      } else if (record.objectClass === 'manual_private' && record.objectId) {
+        const ticket = manualTicketByObjectId.get(record.objectId);
+        if (ticket) {
+          objectUrl = `${iconsAssetBaseUrl.value}/icons/m/${record.objectId}?ticket=${encodeURIComponent(ticket)}`;
+        }
+      }
+      if (typeof objectUrl === 'string') {
+        const existingInFlight = iconObjectFetchInFlightByKey.get(key);
+        if (existingInFlight) {
+          dataUrl = await existingInFlight;
+        } else {
+          const fetchPromise = fetchIconDataUrlFromObjectUrl({
+            url: objectUrl,
+            objectClass: record.objectClass === 'manual_private' ? 'manual_private' : 'automatic_public',
+          });
+          iconObjectFetchInFlightByKey.set(key, fetchPromise);
+          try {
+            dataUrl = await fetchPromise;
+          } finally {
+            if (iconObjectFetchInFlightByKey.get(key) === fetchPromise) {
+              iconObjectFetchInFlightByKey.delete(key);
+            }
+          }
+        }
+        if (dataUrl) {
+          nextByKey[key] = dataUrl;
+        }
+      }
+    }
+    if (!dataUrl) {
+      continue;
+    }
+    for (const alias of iconDomainAliases(domain)) {
+      const previous = nextByHost[alias];
+      if (previous?.dataUrl === dataUrl && previous.updatedAt === record.updatedAt) {
+        continue;
+      }
+      nextByHost[alias] = {
+        dataUrl,
+        source: record.objectClass === 'manual_private' ? 'manual' : 'automatic',
+        sourceUrl: null,
+        updatedAt: record.updatedAt,
+      };
+      changed = true;
+    }
+  }
+
+  iconObjectDataUrlByKey.value = nextByKey;
+  if (changed) {
+    canonicalSiteIconsByHost.value = nextByHost;
+    faviconSourceIndexByItemAndHost.value = {};
+  }
+  lastIconsStateFailureAt = 0;
+}
+
+async function hydrateCanonicalSiteIconsForHosts(hosts: string[]) {
+  if (iconStateHydrationInFlight) {
+    return iconStateHydrationInFlight;
+  }
+  iconStateHydrationInFlight = (async () => {
+    try {
+      await hydrateCanonicalSiteIconsFromState(hosts);
+    } catch (error) {
+      lastIconsStateFailureAt = Date.now();
+      void error;
+    } finally {
+      iconStateHydrationInFlight = null;
+    }
+  })();
+  return iconStateHydrationInFlight;
+}
+
+function loginFaviconCandidatesFromUrls(urls: Array<string | null | undefined>): string[] {
+  const aliases = new Set<string>();
+  for (const rawUrl of urls) {
+    const hostname = normalizeUrlForFavicon(rawUrl ?? '');
+    if (!hostname) {
+      continue;
+    }
+    for (const alias of iconDomainAliases(hostname)) {
+      aliases.add(alias);
+    }
+  }
+  const candidates: string[] = [];
+  for (const alias of aliases) {
+    const canonicalIcon = canonicalSiteIconsByHost.value[alias]?.dataUrl ?? null;
+    if (canonicalIcon) {
+      candidates.push(canonicalIcon);
+    }
+    const manualIcon = manualSiteIconsByHost.value[alias]?.dataUrl ?? null;
+    if (manualIcon) {
+      candidates.push(manualIcon);
+    }
+  }
+  return Array.from(new Set(candidates));
+}
+
+function loginFaviconCandidates(item: VaultWorkspaceItem | null | undefined): string[] {
+  if (!item || item.itemType !== 'login') {
+    return [];
+  }
+  return loginFaviconCandidatesFromUrls(item.payload.urls ?? []);
+}
+
+function faviconKey(itemId: string): string {
+  return itemId;
 }
 
 function itemFaviconUrl(item: VaultWorkspaceItem): string | null {
   if (item.itemType !== 'login') {
     return null;
   }
-  const candidates = loginFaviconCandidates(item.payload.urls[0]);
+  const candidates = loginFaviconCandidates(item);
   if (candidates.length === 0) {
     return null;
   }
-  const key = faviconKey(item.itemId, item.payload.urls[0]);
-  if (!key) {
-    return null;
-  }
+  const key = faviconKey(item.itemId);
 
   const currentIndex = faviconSourceIndexByItemAndHost.value[key] ?? 0;
   if (currentIndex >= candidates.length) {
@@ -1944,10 +2511,7 @@ function markFaviconError(item: VaultWorkspaceItem) {
     return;
   }
 
-  const key = faviconKey(item.itemId, item.payload.urls[0]);
-  if (!key) {
-    return;
-  }
+  const key = faviconKey(item.itemId);
 
   faviconSourceIndexByItemAndHost.value = {
     ...faviconSourceIndexByItemAndHost.value,
@@ -2396,6 +2960,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('focus', handleManualIconRefreshOnFocus);
   window.removeEventListener('online', onRealtimeNetworkOnline);
   document.removeEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
+  if (iconHydrationDebounceTimer) {
+    clearTimeout(iconHydrationDebounceTimer);
+    iconHydrationDebounceTimer = null;
+  }
+  iconObjectFetchInFlightByKey.clear();
   for (const objectUrl of attachmentObjectUrls) {
     URL.revokeObjectURL(objectUrl);
   }

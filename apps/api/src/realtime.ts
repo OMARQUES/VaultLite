@@ -523,7 +523,7 @@ export class VaultLiteRealtimeHub {
         socket,
         RealtimeServerMessageSchema.parse({
           type: 'resync_required',
-          domains: ['vault', 'icons_manual', 'password_history', 'attachments'],
+          domains: ['vault', 'icons_manual', 'icons_state', 'password_history', 'attachments'],
           reason: 'cursor_out_of_retention',
         }),
       );

@@ -3,6 +3,7 @@
     "@material-symbols/font-400": "^0.40.2",
     "@noble/hashes": "^2.0.1",
     "fflate": "^0.8.2",
+    "tldts": "^7.0.17",
     "vue": "^3.5.30",
     "vue-router": "^5.0.3"
   },

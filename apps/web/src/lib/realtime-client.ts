@@ -12,7 +12,7 @@ const HEARTBEAT_IDLE_MS = 25_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const HIDDEN_CLOSE_AFTER_MS = 5 * 60_000;
 
-type RealtimeDomains = Array<'vault' | 'icons_manual' | 'password_history' | 'attachments'>;
+type RealtimeDomains = Array<'vault' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'>;
 
 export interface WebRealtimeClient {
   start(): void;
@@ -207,6 +207,16 @@ export function createWebRealtimeClient(input: {
     pendingAckSeq = Math.max(pendingAckSeq, message.event.seq);
     ackBatchCount += 1;
     scheduleAck();
+    const localDeviceId = input.sessionStore.state.deviceId ?? null;
+    if (
+      typeof message.event.sourceDeviceId === 'string' &&
+      message.event.sourceDeviceId.length > 0 &&
+      typeof localDeviceId === 'string' &&
+      localDeviceId.length > 0 &&
+      message.event.sourceDeviceId === localDeviceId
+    ) {
+      return;
+    }
     if (message.event.topic.startsWith('vault.item.')) {
       input.onVaultDelta();
       return;
@@ -216,7 +226,7 @@ export function createWebRealtimeClient(input: {
       message.event.topic.startsWith('password_history.') ||
       message.event.topic.startsWith('vault.attachment.')
     ) {
-      input.onDomainResync(['icons_manual', 'password_history', 'attachments']);
+      input.onDomainResync(['icons_manual', 'icons_state', 'password_history', 'attachments']);
     }
   }
 

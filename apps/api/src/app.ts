@@ -23,6 +23,17 @@ import {
   ExtensionSessionRecoverOutputSchema,
   SiteIconDiscoverBatchInputSchema,
   SiteIconDiscoverBatchOutputSchema,
+  IconsDomainBatchPutInputSchema,
+  IconsDomainBatchPutOutputSchema,
+  IconsDomainItemPutInputSchema,
+  IconsDomainItemPutOutputSchema,
+  IconsDomainReindexChunkInputSchema,
+  IconsDomainReindexCommitInputSchema,
+  IconsDomainReindexOutputSchema,
+  IconsDomainReindexStartInputSchema,
+  IconsObjectTicketIssueInputSchema,
+  IconsObjectTicketIssueOutputSchema,
+  IconsStateOutputSchema,
   SiteIconManualActionOutputSchema,
   SiteIconManualListOutputSchema,
   SiteIconManualRemoveInputSchema,
@@ -123,7 +134,7 @@ import {
 import { Hono } from 'hono';
 import { createHash, createHmac, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { ZodError } from 'zod';
-import { discoverSiteIcon, normalizeDomainCandidate } from './site-icons';
+import { discoverSiteIcon, normalizeDomainCandidate, registrableDomain } from './site-icons';
 import {
   REALTIME_CLOSE_CODES,
   createRealtimeConnectToken,
@@ -147,7 +158,34 @@ interface VaultLiteApiOptions {
   secureCookies: boolean;
   accountKitPrivateKey: KeyObject | string;
   accountKitPublicKey: KeyObject | string;
+  iconBlobBucket?: {
+    put(
+      key: string,
+      value: ArrayBuffer | ArrayBufferView | string,
+      options?: {
+        httpMetadata?: {
+          contentType?: string;
+        };
+      },
+    ): Promise<unknown>;
+    get(key: string): Promise<
+      | null
+      | {
+          arrayBuffer(): Promise<ArrayBuffer>;
+          httpMetadata?: {
+            contentType?: string;
+          };
+        }
+    >;
+    delete(key: string): Promise<void>;
+  };
+  iconsAssetBaseUrl?: string;
+  iconsTicketSecret?: string;
   csrfValidator?: MutableRequestCsrfValidator;
+  iconsDiscoveryQueue?: {
+    send(message: unknown): Promise<void>;
+  } | null;
+  iconsDiscoveryInternalToken?: string;
   realtime?: {
     enabled: boolean;
     wsBaseUrl: string;
@@ -164,6 +202,19 @@ interface VaultLiteApiOptions {
       realtime_delta_attachments_v1: boolean;
       realtime_apply_web_v1: boolean;
       realtime_apply_extension_v1: boolean;
+      icons_state_sync_v1: boolean;
+      icons_ws_apply_web_v1: boolean;
+      icons_ws_apply_extension_v1: boolean;
+      icons_discovery_v2_v1: boolean;
+      icons_fast_first_v1: boolean;
+      icons_best_later_v1: boolean;
+      icons_http_fallback_v1: boolean;
+      icons_manual_private_ticket_v1: boolean;
+      icons_provider_favicon_vemetric_enabled: boolean;
+      icons_provider_google_s2_enabled: boolean;
+      icons_provider_icon_horse_enabled: boolean;
+      icons_provider_duckduckgo_ip3_enabled: boolean;
+      icons_provider_faviconextractor_enabled: boolean;
     };
     hubNamespace: {
       idFromName(name: string): unknown;
@@ -173,6 +224,14 @@ interface VaultLiteApiOptions {
     } | null;
   };
 }
+
+type IconDiscoveryQueueMessage = {
+  domain: string;
+  userId: string;
+  sourceDeviceId: string | null;
+  trigger: 'domains_item' | 'domains_batch' | 'internal_requeue';
+  requestedAt: string;
+};
 
 type CanonicalResult = 'success_changed' | 'success_no_op' | 'conflict' | 'denied';
 
@@ -244,6 +303,16 @@ const REALTIME_JTI_CONSUME_WINDOW_SECONDS = 120;
 const REALTIME_OUTBOX_DISPATCH_BATCH_SIZE = 100;
 const REALTIME_OUTBOX_PUBLISHED_RETENTION_HOURS = 24;
 const REALTIME_OUTBOX_PRUNE_LIMIT = 500;
+const ICONS_OBJECT_TICKET_TTL_SECONDS_DEFAULT = 60;
+const ICONS_OBJECT_TICKET_TTL_SECONDS_MAX = 300;
+const ICONS_STATE_INCLUDE_DOMAINS_MAX = 500;
+const ICONS_DISCOVERY_RETRY_COOLDOWN_MS = 60_000;
+const ICONS_DISCOVERY_SUCCESS_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const ICONS_DISCOVERY_NEGATIVE_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const ICONS_DISCOVERY_NEGATIVE_BASE_TTL_MS = 60 * 60 * 1_000;
+const ICONS_DOMAINS_WRITE_RATE_LIMIT_WINDOW_SECONDS = 60;
+const ICONS_DOMAINS_WRITE_RATE_LIMIT_PER_DEVICE = 240;
+const ICONS_DOMAINS_WRITE_RATE_LIMIT_PER_USER = 800;
 
 function isoNow(clock: Clock): string {
   return clock.now().toISOString();
@@ -260,6 +329,14 @@ function normalizeIsoTimestamp(value: string): string {
 
 function addMinutes(value: Date, minutes: number): string {
   return new Date(value.getTime() + minutes * 60 * 1000).toISOString();
+}
+
+function addMillisecondsIso(baseIso: string, deltaMs: number): string {
+  const base = Date.parse(baseIso);
+  if (!Number.isFinite(base)) {
+    return new Date(Date.now() + Math.max(0, Math.trunc(deltaMs))).toISOString();
+  }
+  return new Date(base + Math.max(0, Math.trunc(deltaMs))).toISOString();
 }
 
 function isWithinRestoreRetentionWindow(input: {
@@ -447,6 +524,177 @@ function isSafeIconDataUrl(value: string): boolean {
     return false;
   }
   return /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/iu.test(value);
+}
+
+function parseIconDataUrl(value: string): {
+  contentType: string;
+  bytes: Uint8Array;
+} | null {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/iu.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const contentType = match[1]?.toLowerCase() ?? '';
+  const base64Payload = match[2] ?? '';
+  if (!contentType.startsWith('image/')) {
+    return null;
+  }
+  try {
+    const binary = atob(base64Payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index) & 0xff;
+    }
+    return { contentType, bytes };
+  } catch {
+    return null;
+  }
+}
+
+function sha256Hex(input: Uint8Array): string {
+  return createHash('sha256').update(Buffer.from(input)).digest('hex');
+}
+
+function normalizeHostEntries(hosts: string[]): string[] {
+  const normalized = new Set<string>();
+  for (const rawHost of hosts) {
+    const next = normalizeDomainCandidate(rawHost);
+    if (!next) {
+      continue;
+    }
+    normalized.add(next);
+    const apex = registrableDomain(next);
+    if (apex && apex !== next) {
+      normalized.add(apex);
+    }
+  }
+  return Array.from(normalized).sort();
+}
+
+function stableIconsStateEtag(input: {
+  userId: string;
+  iconsVersion: number;
+  records: Array<{
+    domain: string;
+    status: string;
+    objectId: string | null;
+    objectClass: string | null;
+    objectSha256: string | null;
+    contentType: string | null;
+    updatedAt: string;
+  }>;
+}): string {
+  const payload = JSON.stringify({
+    userId: input.userId,
+    iconsVersion: input.iconsVersion,
+    records: [...input.records].sort((left, right) => left.domain.localeCompare(right.domain)),
+  });
+  return `"${createHash('sha256').update(payload).digest('hex')}"`;
+}
+
+function stableManualIconsEtag(input: {
+  userId: string;
+  icons: Array<{ domain: string; dataUrl: string; source: string; updatedAt: string }>;
+}): string {
+  const payload = JSON.stringify({
+    userId: input.userId,
+    icons: [...input.icons].sort((left, right) => left.domain.localeCompare(right.domain)),
+  });
+  return `"${createHash('sha256').update(payload).digest('hex')}"`;
+}
+
+function shouldQueueIconDiscovery(input: {
+  status: 'pending' | 'ready' | 'absent' | 'removed';
+  updatedAt: string;
+  domainsChanged: boolean;
+  nowIso: string;
+}): boolean {
+  if (input.status === 'ready') {
+    return false;
+  }
+  if (input.domainsChanged) {
+    return true;
+  }
+  const nowMillis = Date.parse(input.nowIso);
+  const updatedMillis = Date.parse(input.updatedAt);
+  if (!Number.isFinite(nowMillis) || !Number.isFinite(updatedMillis)) {
+    return true;
+  }
+  return nowMillis - updatedMillis >= ICONS_DISCOVERY_RETRY_COOLDOWN_MS;
+}
+
+function resolveExecutionWaitUntil(
+  context: unknown,
+): ((promise: Promise<unknown>) => void) | null {
+  try {
+    const executionCtx = (context as { executionCtx?: { waitUntil?: (promise: Promise<unknown>) => void } })
+      .executionCtx;
+    if (executionCtx && typeof executionCtx.waitUntil === 'function') {
+      return executionCtx.waitUntil.bind(executionCtx);
+    }
+  } catch {
+    // Hono throws when executionCtx is not available in this runtime/test.
+  }
+  return null;
+}
+
+function createIconObjectTicket(input: {
+  userId: string;
+  objectId: string;
+  expUnixSeconds: number;
+  secret: string;
+}): string {
+  const headerPayload = JSON.stringify({
+    sub: input.userId,
+    oid: input.objectId,
+    exp: input.expUnixSeconds,
+  });
+  const payloadB64 = toBase64Url(new TextEncoder().encode(headerPayload));
+  const signatureB64 = toBase64Url(
+    createHmac('sha256', input.secret).update(payloadB64).digest(),
+  );
+  return `${payloadB64}.${signatureB64}`;
+}
+
+function verifyIconObjectTicket(input: {
+  ticket: string;
+  nowUnixSeconds: number;
+  secret: string;
+}): { ok: true; userId: string; objectId: string } | { ok: false; reason: string } {
+  const [payloadB64, signatureB64] = input.ticket.split('.');
+  if (!payloadB64 || !signatureB64) {
+    return { ok: false, reason: 'ticket_malformed' };
+  }
+  const expectedSignature = toBase64Url(
+    createHmac('sha256', input.secret).update(payloadB64).digest(),
+  );
+  try {
+    if (!timingSafeEqual(fromBase64Url(signatureB64), fromBase64Url(expectedSignature))) {
+      return { ok: false, reason: 'ticket_signature_invalid' };
+    }
+  } catch {
+    return { ok: false, reason: 'ticket_signature_invalid' };
+  }
+  try {
+    const payload = JSON.parse(base64UrlToUtf8(payloadB64)) as {
+      sub?: string;
+      oid?: string;
+      exp?: number;
+    };
+    if (
+      typeof payload.sub !== 'string' ||
+      payload.sub.length === 0 ||
+      typeof payload.oid !== 'string' ||
+      payload.oid.length === 0 ||
+      typeof payload.exp !== 'number' ||
+      input.nowUnixSeconds >= payload.exp
+    ) {
+      return { ok: false, reason: 'ticket_invalid' };
+    }
+    return { ok: true, userId: payload.sub, objectId: payload.oid };
+  } catch {
+    return { ok: false, reason: 'ticket_invalid' };
+  }
 }
 
 async function discoverAndPersistSiteIcons(input: {
@@ -1511,12 +1759,42 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       realtime_delta_attachments_v1: false,
       realtime_apply_web_v1: false,
       realtime_apply_extension_v1: false,
+      icons_state_sync_v1: false,
+      icons_ws_apply_web_v1: false,
+      icons_ws_apply_extension_v1: false,
+      icons_discovery_v2_v1: false,
+      icons_fast_first_v1: false,
+      icons_best_later_v1: false,
+      icons_http_fallback_v1: false,
+      icons_manual_private_ticket_v1: false,
+      icons_provider_favicon_vemetric_enabled: false,
+      icons_provider_google_s2_enabled: false,
+      icons_provider_icon_horse_enabled: false,
+      icons_provider_duckduckgo_ip3_enabled: false,
+      icons_provider_faviconextractor_enabled: false,
     },
     hubNamespace: null,
   };
   const allowedWebSocketWebOrigins = new Set(
     normalizeAllowedWebOrigins(realtimeConfig.webAllowedOrigins ?? [configuredServerOrigin]),
   );
+  const iconsDiscoveryQueue = options.iconsDiscoveryQueue ?? null;
+  const internalIconsDiscoveryToken = options.iconsDiscoveryInternalToken?.trim() ?? '';
+
+  function resolveAllowedIconCorsOrigin(request: Request): string | null {
+    const originHeader = request.headers.get('origin');
+    if (!originHeader) {
+      return null;
+    }
+    const requestOrigin = canonicalizeServerOrigin(originHeader);
+    if (!requestOrigin) {
+      return null;
+    }
+    if (requestOrigin === configuredServerOrigin || allowedWebSocketWebOrigins.has(requestOrigin)) {
+      return requestOrigin;
+    }
+    return null;
+  }
 
   function isRealtimeOperational(): boolean {
     return realtimeConfig.enabled && realtimeConfig.flags.realtime_ws_v1 && Boolean(realtimeConfig.hubNamespace);
@@ -1559,6 +1837,16 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
     if (topic.startsWith('icons.manual.')) {
       return typeof record.domain === 'string' ? record.domain : null;
+    }
+    if (topic.startsWith('icons.state.')) {
+      if (typeof record.domain === 'string') {
+        return record.domain;
+      }
+      if (record.record && typeof record.record === 'object') {
+        const nested = record.record as Record<string, unknown>;
+        return typeof nested.domain === 'string' ? nested.domain : null;
+      }
+      return null;
     }
     if (topic.startsWith('password_history.')) {
       return typeof record.entryId === 'string' ? record.entryId : null;
@@ -1695,6 +1983,488 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
   }
 
+  const iconBlobBucket = options.iconBlobBucket ?? null;
+  const iconsAssetBaseUrl = (options.iconsAssetBaseUrl?.trim() || configuredServerOrigin).replace(/\/+$/u, '');
+  const iconsTicketSecret =
+    options.iconsTicketSecret?.trim() ||
+    realtimeConfig.connectTokenSecret ||
+    `${options.deploymentFingerprint}_icons_ticket_secret_dev`;
+
+  async function buildUserIconsState(input: {
+    userId: string;
+    includeDomains?: string[];
+  }): Promise<{
+    iconsVersion: number;
+    etag: string;
+    records: Array<{
+      domain: string;
+      status: 'pending' | 'ready' | 'absent' | 'removed';
+      objectId: string | null;
+      objectClass: 'automatic_public' | 'manual_private' | null;
+      objectSha256: string | null;
+      contentType: string | null;
+      updatedAt: string;
+    }>;
+  }> {
+    const normalizedDomains =
+      input.includeDomains && input.includeDomains.length > 0
+        ? normalizeHostEntries(input.includeDomains)
+        : null;
+    const stateRows = normalizedDomains
+      ? await options.storage.userIconState.listByUserIdAndDomains(input.userId, normalizedDomains)
+      : await options.storage.userIconState.listByUserId(input.userId);
+    const objectIds = Array.from(
+      new Set(
+        stateRows
+          .map((row) => row.objectId)
+          .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ),
+    );
+    const objectById = new Map<
+      string,
+      {
+        objectClass: 'automatic_public' | 'manual_private';
+        sha256: string;
+        contentType: string;
+      }
+    >();
+    for (const objectId of objectIds) {
+      const objectRecord = await options.storage.iconObjects.findByObjectId(objectId);
+      if (!objectRecord) {
+        continue;
+      }
+      objectById.set(objectId, {
+        objectClass: objectRecord.objectClass,
+        sha256: objectRecord.sha256,
+        contentType: objectRecord.contentType,
+      });
+    }
+    const records = stateRows.map((row) => {
+      const object = row.objectId ? objectById.get(row.objectId) : null;
+      return {
+        domain: row.domain,
+        status: row.status,
+        objectId: row.objectId,
+        objectClass: object?.objectClass ?? null,
+        objectSha256: object?.sha256 ?? null,
+        contentType: object?.contentType ?? null,
+        updatedAt: row.updatedAt,
+      };
+    });
+    const iconsVersion = await options.storage.userIconState.getVersion(input.userId);
+    const etag = stableIconsStateEtag({
+      userId: input.userId,
+      iconsVersion,
+      records,
+    });
+    return {
+      iconsVersion,
+      etag,
+      records,
+    };
+  }
+
+  async function persistIconObjectFromDataUrl(input: {
+    userId: string;
+    objectClass: 'automatic_public' | 'manual_private';
+    dataUrl: string;
+    nowIso: string;
+  }) {
+    if (!iconBlobBucket) {
+      throw new Error('icon_blob_bucket_unavailable');
+    }
+    const parsed = parseIconDataUrl(input.dataUrl);
+    if (!parsed) {
+      throw new Error('icon_data_invalid');
+    }
+    const sha256 = sha256Hex(parsed.bytes);
+    const existing = await options.storage.iconObjects.findByClassAndSha256({
+      objectClass: input.objectClass,
+      sha256,
+      ownerUserId: input.objectClass === 'manual_private' ? input.userId : null,
+    });
+    if (existing) {
+      return existing;
+    }
+
+    const objectId = options.idGenerator.nextId('icon_object');
+    const r2Key =
+      input.objectClass === 'automatic_public'
+        ? `icons/automatic/${sha256}`
+        : `icons/manual/${input.userId}/${sha256}`;
+    const ingestJobId = options.idGenerator.nextId('icon_ingest');
+    await options.storage.iconIngestJobs.create({
+      jobId: ingestJobId,
+      userId: input.userId,
+      domain: '',
+      objectClass: input.objectClass,
+      status: 'staged',
+      sha256,
+      r2Key,
+      objectId: null,
+      errorCode: null,
+      createdAt: input.nowIso,
+      updatedAt: input.nowIso,
+    });
+    try {
+      await options.storage.iconIngestJobs.updateStatus({
+        jobId: ingestJobId,
+        status: 'uploading',
+        updatedAt: input.nowIso,
+      });
+      await iconBlobBucket.put(r2Key, parsed.bytes, {
+        httpMetadata: {
+          contentType: parsed.contentType,
+        },
+      });
+      await options.storage.iconIngestJobs.updateStatus({
+        jobId: ingestJobId,
+        status: 'uploaded_uncommitted',
+        updatedAt: input.nowIso,
+      });
+      const created = await options.storage.iconObjects.create({
+        objectId,
+        objectClass: input.objectClass,
+        ownerUserId: input.objectClass === 'manual_private' ? input.userId : null,
+        sha256,
+        r2Key,
+        contentType: parsed.contentType,
+        byteLength: parsed.bytes.byteLength,
+        createdAt: input.nowIso,
+        updatedAt: input.nowIso,
+      });
+      await options.storage.iconIngestJobs.updateStatus({
+        jobId: ingestJobId,
+        status: 'committed',
+        objectId: created.objectId,
+        updatedAt: input.nowIso,
+      });
+      return created;
+    } catch (error) {
+      await options.storage.iconIngestJobs.updateStatus({
+        jobId: ingestJobId,
+        status: 'upload_failed',
+        errorCode: error instanceof Error ? error.message : 'icon_upload_failed',
+        updatedAt: input.nowIso,
+      });
+      throw error;
+    }
+  }
+
+  async function upsertIconStateAndPublish(input: {
+    userId: string;
+    sourceDeviceId: string | null;
+    domain: string;
+    status: 'pending' | 'ready' | 'absent' | 'removed';
+    objectId: string | null;
+    occurredAt: string;
+  }): Promise<void> {
+    const domain = normalizeDomainCandidate(input.domain);
+    if (!domain) {
+      return;
+    }
+    const upsert = await options.storage.userIconState.upsert({
+      userId: input.userId,
+      domain,
+      status: input.status,
+      objectId: input.objectId,
+      updatedAt: input.occurredAt,
+    });
+    if (!upsert.changed) {
+      return;
+    }
+    const iconsVersion = await options.storage.userIconState.bumpVersion({
+      userId: input.userId,
+      updatedAt: input.occurredAt,
+    });
+    const object = upsert.record.objectId
+      ? await options.storage.iconObjects.findByObjectId(upsert.record.objectId)
+      : null;
+    await publishRealtimeEvent({
+      userId: input.userId,
+      sourceDeviceId: input.sourceDeviceId,
+      topic: 'icons.state.upserted',
+      occurredAt: input.occurredAt,
+      payload: {
+        iconsVersion,
+        record: {
+          domain,
+          status: upsert.record.status,
+          objectId: upsert.record.objectId,
+          objectClass: object?.objectClass ?? null,
+          objectSha256: object?.sha256 ?? null,
+          contentType: object?.contentType ?? null,
+          updatedAt: upsert.record.updatedAt,
+        },
+      },
+    });
+  }
+
+  async function removeIconStateAndPublish(input: {
+    userId: string;
+    sourceDeviceId: string | null;
+    domain: string;
+    occurredAt: string;
+  }): Promise<void> {
+    const domain = normalizeDomainCandidate(input.domain);
+    if (!domain) {
+      return;
+    }
+    const changed = await options.storage.userIconState.remove({
+      userId: input.userId,
+      domain,
+      updatedAt: input.occurredAt,
+    });
+    if (!changed) {
+      return;
+    }
+    const iconsVersion = await options.storage.userIconState.bumpVersion({
+      userId: input.userId,
+      updatedAt: input.occurredAt,
+    });
+    await publishRealtimeEvent({
+      userId: input.userId,
+      sourceDeviceId: input.sourceDeviceId,
+      topic: 'icons.state.removed',
+      occurredAt: input.occurredAt,
+      payload: {
+        iconsVersion,
+        domain,
+        updatedAt: input.occurredAt,
+      },
+    });
+  }
+
+  function iconDiscoveryNegativeBackoffMs(failCount: number): number {
+    const safeFailCount = Math.max(1, Math.trunc(failCount));
+    const exponent = Math.min(safeFailCount - 1, 8);
+    return Math.min(ICONS_DISCOVERY_NEGATIVE_BASE_TTL_MS * 2 ** exponent, ICONS_DISCOVERY_NEGATIVE_MAX_TTL_MS);
+  }
+
+  async function enqueueIconDiscoveryJobs(input: {
+    userId: string;
+    sourceDeviceId: string | null;
+    domains: string[];
+    trigger: IconDiscoveryQueueMessage['trigger'];
+    requestedAt: string;
+  }): Promise<void> {
+    if (!iconsDiscoveryQueue) {
+      return;
+    }
+    const normalizedDomains = Array.from(
+      new Set(
+        input.domains
+          .map((domain) => normalizeDomainCandidate(domain))
+          .filter((domain): domain is string => Boolean(domain)),
+      ),
+    );
+    for (const domain of normalizedDomains) {
+      const payload: IconDiscoveryQueueMessage = {
+        domain,
+        userId: input.userId,
+        sourceDeviceId: input.sourceDeviceId ?? null,
+        trigger: input.trigger,
+        requestedAt: input.requestedAt,
+      };
+      await iconsDiscoveryQueue.send(payload);
+    }
+  }
+
+  async function enforceIconsDomainWriteRateLimit(input: {
+    userId: string;
+    deviceId: string;
+    nowIso: string;
+  }): Promise<Response | null> {
+    const [deviceRate, userRate] = await Promise.all([
+      options.storage.authRateLimits.increment({
+        key: `icons_domains_write:device:${input.userId}:${input.deviceId}`,
+        nowIso: input.nowIso,
+        windowSeconds: ICONS_DOMAINS_WRITE_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+      options.storage.authRateLimits.increment({
+        key: `icons_domains_write:user:${input.userId}`,
+        nowIso: input.nowIso,
+        windowSeconds: ICONS_DOMAINS_WRITE_RATE_LIMIT_WINDOW_SECONDS,
+      }),
+    ]);
+    if (
+      deviceRate.attemptCount <= ICONS_DOMAINS_WRITE_RATE_LIMIT_PER_DEVICE &&
+      userRate.attemptCount <= ICONS_DOMAINS_WRITE_RATE_LIMIT_PER_USER
+    ) {
+      return null;
+    }
+    const nowMs = Date.parse(input.nowIso);
+    const retryAfterMs = Math.max(
+      1_000,
+      Math.max(
+        Date.parse(deviceRate.windowEndsAt) - nowMs,
+        Date.parse(userRate.windowEndsAt) - nowMs,
+      ),
+    );
+    const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
+    return jsonResponse(
+      429,
+      {
+        ok: false,
+        code: 'rate_limited',
+      },
+      {
+        headers: {
+          'retry-after': String(retryAfterSeconds),
+        },
+      },
+    );
+  }
+
+  async function processIconDiscoveryQueueMessage(
+    message: IconDiscoveryQueueMessage,
+  ): Promise<{ status: 'ready' | 'absent' | 'pending' | 'skipped' }> {
+    const domain = normalizeDomainCandidate(message.domain);
+    const userId = typeof message.userId === 'string' ? message.userId.trim() : '';
+    if (!domain || !userId) {
+      return { status: 'skipped' };
+    }
+    const sourceDeviceId =
+      typeof message.sourceDeviceId === 'string' && message.sourceDeviceId.length > 0
+        ? message.sourceDeviceId
+        : null;
+    const nowIso = isoNow(options.clock);
+    const registry = await options.storage.automaticIconRegistry.findByDomain(domain);
+
+    if (registry && registry.nextEligibleAt > nowIso) {
+      if (registry.status === 'ready' && registry.objectId) {
+        const object = await options.storage.iconObjects.findByObjectId(registry.objectId);
+        if (object && object.objectClass === 'automatic_public') {
+          await upsertIconStateAndPublish({
+            userId,
+            sourceDeviceId,
+            domain,
+            status: 'ready',
+            objectId: registry.objectId,
+            occurredAt: nowIso,
+          });
+          return { status: 'ready' };
+        }
+      }
+      if (registry.status === 'absent') {
+        await upsertIconStateAndPublish({
+          userId,
+          sourceDeviceId,
+          domain,
+          status: 'absent',
+          objectId: null,
+          occurredAt: nowIso,
+        });
+        return { status: 'absent' };
+      }
+      await upsertIconStateAndPublish({
+        userId,
+        sourceDeviceId,
+        domain,
+        status: 'pending',
+        objectId: null,
+        occurredAt: nowIso,
+      });
+      return { status: 'pending' };
+    }
+
+    let discoveredDataUrl: string | null = null;
+    let discoveredSourceUrl: string | null = null;
+    const cachedAutomatic = await options.storage.siteIconCache.findByDomain(domain);
+    if (cachedAutomatic) {
+      const updatedAtMs = Date.parse(cachedAutomatic.updatedAt);
+      const nowMs = Date.parse(nowIso);
+      if (Number.isFinite(updatedAtMs) && Number.isFinite(nowMs) && nowMs - updatedAtMs <= ICONS_DISCOVERY_SUCCESS_TTL_MS) {
+        discoveredDataUrl = cachedAutomatic.dataUrl;
+        discoveredSourceUrl = cachedAutomatic.sourceUrl;
+      }
+    }
+
+    if (!discoveredDataUrl) {
+      const discovered = await discoverSiteIcon({
+        domain,
+        nowIso,
+      });
+      if (discovered && isSafeIconDataUrl(discovered.dataUrl)) {
+        discoveredDataUrl = discovered.dataUrl;
+        discoveredSourceUrl = discovered.sourceUrl ?? null;
+        await options.storage.siteIconCache.upsert({
+          domain,
+          dataUrl: discovered.dataUrl,
+          sourceUrl: discovered.sourceUrl ?? null,
+          fetchedAt: discovered.fetchedAt,
+          updatedAt: nowIso,
+        });
+      }
+    }
+
+    if (!discoveredDataUrl) {
+      const nextFailCount = Math.max(1, (registry?.failCount ?? 0) + 1);
+      await options.storage.automaticIconRegistry.upsert({
+        domain,
+        status: 'absent',
+        objectId: null,
+        sourceUrl: null,
+        failCount: nextFailCount,
+        lastCheckedAt: nowIso,
+        nextEligibleAt: addMillisecondsIso(nowIso, iconDiscoveryNegativeBackoffMs(nextFailCount)),
+        updatedAt: nowIso,
+      });
+      await upsertIconStateAndPublish({
+        userId,
+        sourceDeviceId,
+        domain,
+        status: 'absent',
+        objectId: null,
+        occurredAt: nowIso,
+      });
+      return { status: 'absent' };
+    }
+
+    const objectRecord = await persistIconObjectFromDataUrl({
+      userId,
+      objectClass: 'automatic_public',
+      dataUrl: discoveredDataUrl,
+      nowIso,
+    });
+    await options.storage.automaticIconRegistry.upsert({
+      domain,
+      status: 'ready',
+      objectId: objectRecord.objectId,
+      sourceUrl: discoveredSourceUrl,
+      failCount: 0,
+      lastCheckedAt: nowIso,
+      nextEligibleAt: addMillisecondsIso(nowIso, ICONS_DISCOVERY_SUCCESS_TTL_MS),
+      updatedAt: nowIso,
+    });
+    await upsertIconStateAndPublish({
+      userId,
+      sourceDeviceId,
+      domain,
+      status: 'ready',
+      objectId: objectRecord.objectId,
+      occurredAt: nowIso,
+    });
+    return { status: 'ready' };
+  }
+
+  async function processIconDiscoveryHostsInline(input: {
+    userId: string;
+    sourceDeviceId: string | null;
+    domains: string[];
+    trigger: IconDiscoveryQueueMessage['trigger'];
+  }): Promise<void> {
+    for (const domain of input.domains) {
+      await processIconDiscoveryQueueMessage({
+        domain,
+        userId: input.userId,
+        sourceDeviceId: input.sourceDeviceId,
+        trigger: input.trigger,
+        requestedAt: isoNow(options.clock),
+      });
+    }
+  }
+
   app.use('*', async (c, next) => {
     await next();
     if (includeHsts) {
@@ -1706,6 +2476,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (error instanceof ZodError) {
       return jsonResponse(400, { ok: false, code: 'invalid_input' });
     }
+    console.error('[api] Unhandled route error', error);
     return jsonResponse(500, { ok: false, code: 'internal_error' });
   });
 
@@ -1956,6 +2727,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       200,
       RuntimeMetadataSchema.parse({
         serverUrl: options.serverUrl,
+        iconsAssetBaseUrl,
         deploymentFingerprint: options.deploymentFingerprint,
         ...(options.realtime
           ? {
@@ -4830,12 +5602,630 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
   });
 
+  app.post('/internal/icons/discovery/process', async (c) => {
+    if (!internalIconsDiscoveryToken) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    if (!realtimeConfig.flags.icons_discovery_v2_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const receivedToken = c.req.raw.headers.get('x-vl-internal-token') ?? '';
+    if (!receivedToken || !timingSafeSecretEquals(receivedToken, internalIconsDiscoveryToken)) {
+      return jsonResponse(403, { ok: false, code: 'forbidden' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 16 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const payload = parsedBody.body as Partial<IconDiscoveryQueueMessage>;
+    const queueMessage: IconDiscoveryQueueMessage = {
+      domain: typeof payload.domain === 'string' ? payload.domain : '',
+      userId: typeof payload.userId === 'string' ? payload.userId : '',
+      sourceDeviceId:
+        typeof payload.sourceDeviceId === 'string' && payload.sourceDeviceId.length > 0
+          ? payload.sourceDeviceId
+          : null,
+      trigger:
+        payload.trigger === 'domains_item' ||
+        payload.trigger === 'domains_batch' ||
+        payload.trigger === 'internal_requeue'
+          ? payload.trigger
+          : 'internal_requeue',
+      requestedAt: typeof payload.requestedAt === 'string' ? payload.requestedAt : isoNow(options.clock),
+    };
+    const result = await processIconDiscoveryQueueMessage(queueMessage);
+    return jsonResponse(200, {
+      ok: true,
+      status: result.status,
+    });
+  });
+
+  app.get('/api/icons/state', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const includeDomainsParam = c.req.query('domains');
+    const includeDomains =
+      typeof includeDomainsParam === 'string' && includeDomainsParam.trim().length > 0
+        ? normalizeHostEntries(
+            includeDomainsParam
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter((entry) => entry.length > 0),
+          ).slice(0, ICONS_STATE_INCLUDE_DOMAINS_MAX)
+        : undefined;
+    const state = await buildUserIconsState({
+      userId: sessionContext.user.userId,
+      includeDomains,
+    });
+    const ifNoneMatch = c.req.raw.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === state.etag) {
+      const response = new Response(null, {
+        status: 304,
+      });
+      response.headers.set('etag', state.etag);
+      response.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+      return response;
+    }
+    const payload = IconsStateOutputSchema.parse({
+      ok: true,
+      iconsVersion: state.iconsVersion,
+      etag: state.etag,
+      records: state.records,
+      serverNow: isoNow(options.clock),
+    });
+    const response = jsonResponse(200, payload);
+    response.headers.set('etag', state.etag);
+    response.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+    return response;
+  });
+
+  app.put('/api/icons/domains/item', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 64 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsDomainItemPutInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const rateLimitResponse = await enforceIconsDomainWriteRateLimit({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      nowIso,
+    });
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
+    const normalizedHosts = normalizeHostEntries(input.hosts);
+    const replaceResult = await options.storage.userIconItemDomains.replaceItemHosts({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      surface: sessionContext.device.platform,
+      itemId: input.itemId,
+      itemRevision: input.itemRevision,
+      hosts: normalizedHosts,
+      updatedAt: nowIso,
+    });
+    const pendingHosts = new Set<string>();
+    const discoveryHosts = new Set<string>();
+    if (replaceResult.result !== 'success_no_op_stale_revision') {
+      for (const host of normalizedHosts) {
+        pendingHosts.add(host);
+      }
+    }
+    const existingStates = await options.storage.userIconState.listByUserIdAndDomains(
+      sessionContext.user.userId,
+      Array.from(pendingHosts),
+    );
+    const existingStateByDomain = new Map(existingStates.map((entry) => [entry.domain, entry]));
+
+    if (replaceResult.result !== 'success_no_op_stale_revision') {
+      for (const host of pendingHosts) {
+        const existingState = existingStateByDomain.get(host) ?? null;
+        if (!existingState) {
+          await upsertIconStateAndPublish({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domain: host,
+            status: 'pending',
+            objectId: null,
+            occurredAt: nowIso,
+          });
+        }
+        if (!realtimeConfig.flags.icons_discovery_v2_v1) {
+          continue;
+        }
+        if (!existingState) {
+          discoveryHosts.add(host);
+          continue;
+        }
+        if (
+          shouldQueueIconDiscovery({
+            status: existingState.status,
+            updatedAt: existingState.updatedAt,
+            domainsChanged: replaceResult.changed,
+            nowIso,
+          })
+        ) {
+          discoveryHosts.add(host);
+        }
+      }
+    }
+    if (realtimeConfig.flags.icons_discovery_v2_v1 && discoveryHosts.size > 0) {
+      const waitUntil = resolveExecutionWaitUntil(c);
+      const domains = Array.from(discoveryHosts);
+      const task = iconsDiscoveryQueue
+        ? enqueueIconDiscoveryJobs({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domains,
+            trigger: 'domains_item',
+            requestedAt: nowIso,
+          })
+        : processIconDiscoveryHostsInline({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domains,
+            trigger: 'domains_item',
+          });
+      if (waitUntil) {
+        waitUntil(task);
+      } else {
+        void task;
+      }
+    }
+
+    return jsonResponse(
+      200,
+      IconsDomainItemPutOutputSchema.parse({
+        ok: true,
+        result: replaceResult.result,
+        domainsChanged: replaceResult.changed,
+        itemId: input.itemId,
+        itemRevision: input.itemRevision,
+        updatedAt: nowIso,
+      }),
+    );
+  });
+
+  app.post('/api/icons/domains/batch', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 512 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsDomainBatchPutInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const rateLimitResponse = await enforceIconsDomainWriteRateLimit({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      nowIso,
+    });
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
+    const pendingHosts = new Set<string>();
+    const hostsWithChangedDomains = new Set<string>();
+    const results: Array<{
+      itemId: string;
+      itemRevision: number;
+      result: 'success_changed' | 'success_no_op' | 'success_no_op_stale_revision';
+      domainsChanged: boolean;
+    }> = [];
+
+    for (const entry of input.entries) {
+      const normalizedHosts = normalizeHostEntries(entry.hosts);
+      const replaceResult = await options.storage.userIconItemDomains.replaceItemHosts({
+        userId: sessionContext.user.userId,
+        deviceId: sessionContext.device.deviceId,
+        surface: sessionContext.device.platform,
+        itemId: entry.itemId,
+        itemRevision: entry.itemRevision,
+        hosts: normalizedHosts,
+        updatedAt: nowIso,
+      });
+      results.push({
+        itemId: entry.itemId,
+        itemRevision: entry.itemRevision,
+        result: replaceResult.result,
+        domainsChanged: replaceResult.changed,
+      });
+      if (replaceResult.result === 'success_no_op_stale_revision') {
+        continue;
+      }
+      for (const host of normalizedHosts) {
+        pendingHosts.add(host);
+        if (replaceResult.changed) {
+          hostsWithChangedDomains.add(host);
+        }
+      }
+    }
+
+    const discoveryHosts = new Set<string>();
+    const existingStates = await options.storage.userIconState.listByUserIdAndDomains(
+      sessionContext.user.userId,
+      Array.from(pendingHosts),
+    );
+    const existingStateByDomain = new Map(existingStates.map((entry) => [entry.domain, entry]));
+    for (const host of pendingHosts) {
+      const existingState = existingStateByDomain.get(host) ?? null;
+      if (!existingState) {
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: host,
+          status: 'pending',
+          objectId: null,
+          occurredAt: nowIso,
+        });
+      }
+      if (!realtimeConfig.flags.icons_discovery_v2_v1) {
+        continue;
+      }
+      if (!existingState) {
+        discoveryHosts.add(host);
+        continue;
+      }
+      if (
+        shouldQueueIconDiscovery({
+          status: existingState.status,
+          updatedAt: existingState.updatedAt,
+          domainsChanged: hostsWithChangedDomains.has(host),
+          nowIso,
+        })
+      ) {
+        discoveryHosts.add(host);
+      }
+    }
+
+    if (realtimeConfig.flags.icons_discovery_v2_v1 && discoveryHosts.size > 0) {
+      const waitUntil = resolveExecutionWaitUntil(c);
+      const domains = Array.from(discoveryHosts);
+      const task = iconsDiscoveryQueue
+        ? enqueueIconDiscoveryJobs({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domains,
+            trigger: 'domains_batch',
+            requestedAt: nowIso,
+          })
+        : processIconDiscoveryHostsInline({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domains,
+            trigger: 'domains_batch',
+          });
+      if (waitUntil) {
+        waitUntil(task);
+      } else {
+        void task;
+      }
+    }
+
+    return jsonResponse(
+      200,
+      IconsDomainBatchPutOutputSchema.parse({
+        ok: true,
+        acceptedItems: results.filter((entry) => entry.result !== 'success_no_op_stale_revision').length,
+        entries: results,
+        updatedAt: nowIso,
+      }),
+    );
+  });
+
+  app.post('/api/icons/domains/reindex/start', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 8 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsDomainReindexStartInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    await options.storage.userIconItemDomains.startReindex({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      surface: sessionContext.device.platform,
+      generationId: input.generationId,
+      startedAt: nowIso,
+    });
+    return jsonResponse(
+      200,
+      IconsDomainReindexOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+        generationId: input.generationId,
+        acceptedItems: 0,
+        updatedAt: nowIso,
+      }),
+    );
+  });
+
+  app.post('/api/icons/domains/reindex/chunk', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 512 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsDomainReindexChunkInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const normalizedEntries = input.entries.map((entry) => ({
+      itemId: entry.itemId,
+      itemRevision: entry.itemRevision,
+      hosts: normalizeHostEntries(entry.hosts),
+    }));
+    const output = await options.storage.userIconItemDomains.upsertReindexChunk({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      surface: sessionContext.device.platform,
+      generationId: input.generationId,
+      entries: normalizedEntries,
+      updatedAt: nowIso,
+    });
+    return jsonResponse(
+      200,
+      IconsDomainReindexOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+        generationId: input.generationId,
+        acceptedItems: output.acceptedItems,
+        updatedAt: nowIso,
+      }),
+    );
+  });
+
+  app.post('/api/icons/domains/reindex/commit', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    if (!realtimeConfig.flags.icons_state_sync_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 8 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsDomainReindexCommitInputSchema.parse(parsedBody.body);
+    const nowIso = isoNow(options.clock);
+    const committed = await options.storage.userIconItemDomains.commitReindex({
+      userId: sessionContext.user.userId,
+      deviceId: sessionContext.device.deviceId,
+      surface: sessionContext.device.platform,
+      generationId: input.generationId,
+      updatedAt: nowIso,
+    });
+    return jsonResponse(
+      200,
+      IconsDomainReindexOutputSchema.parse({
+        ok: true,
+        result: committed.changed ? 'success_changed' : 'success_no_op',
+        generationId: input.generationId,
+        acceptedItems: 0,
+        updatedAt: nowIso,
+      }),
+    );
+  });
+
+  app.post('/api/icons/object-tickets', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode === 'cookie' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: 32 * 1024,
+      tooLargeCode: 'request_body_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const input = IconsObjectTicketIssueInputSchema.parse(parsedBody.body);
+    const ttlSeconds = Math.min(
+      ICONS_OBJECT_TICKET_TTL_SECONDS_MAX,
+      Math.max(1, Math.trunc(input.ttlSeconds ?? ICONS_OBJECT_TICKET_TTL_SECONDS_DEFAULT)),
+    );
+    const nowUnixSeconds = Math.floor(options.clock.now().getTime() / 1000);
+    const expiresAt = new Date((nowUnixSeconds + ttlSeconds) * 1000).toISOString();
+    const tickets: Array<{ objectId: string; ticket: string }> = [];
+    for (const objectId of input.objectIds) {
+      const object = await options.storage.iconObjects.findByObjectId(objectId);
+      if (!object || object.objectClass !== 'manual_private') {
+        continue;
+      }
+      if (object.ownerUserId !== sessionContext.user.userId) {
+        continue;
+      }
+      tickets.push({
+        objectId,
+        ticket: createIconObjectTicket({
+          userId: sessionContext.user.userId,
+          objectId,
+          expUnixSeconds: nowUnixSeconds + ttlSeconds,
+          secret: iconsTicketSecret,
+        }),
+      });
+    }
+    return jsonResponse(
+      200,
+      IconsObjectTicketIssueOutputSchema.parse({
+        ok: true,
+        expiresAt,
+        tickets,
+      }),
+    );
+  });
+
+  app.get('/icons/a/:sha256', async (c) => {
+    if (!iconBlobBucket) {
+      return jsonResponse(503, { ok: false, code: 'icon_blob_bucket_unavailable' });
+    }
+    const sha256 = String(c.req.param('sha256') ?? '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const object = await options.storage.iconObjects.findByClassAndSha256({
+      objectClass: 'automatic_public',
+      sha256,
+    });
+    if (!object) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const blob = await iconBlobBucket.get(object.r2Key);
+    if (!blob) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const headers = new Headers();
+    headers.set('content-type', blob.httpMetadata?.contentType || object.contentType || 'image/png');
+    headers.set('cache-control', 'public, max-age=31536000, immutable');
+    headers.set('etag', `"${object.sha256}"`);
+    headers.set('access-control-allow-origin', '*');
+    headers.set('x-content-type-options', 'nosniff');
+    headers.set('content-security-policy', "default-src 'none'; img-src 'none'; style-src 'none'; script-src 'none';");
+    return new Response(await blob.arrayBuffer(), {
+      status: 200,
+      headers,
+    });
+  });
+
+  app.get('/icons/m/:objectId', async (c) => {
+    if (!iconBlobBucket) {
+      return jsonResponse(503, { ok: false, code: 'icon_blob_bucket_unavailable' });
+    }
+    const objectId = String(c.req.param('objectId') ?? '').trim();
+    const ticket = String(c.req.query('ticket') ?? '').trim();
+    if (!objectId || !ticket) {
+      return jsonResponse(401, { ok: false, code: 'invalid_ticket' });
+    }
+    const ticketValidation = verifyIconObjectTicket({
+      ticket,
+      nowUnixSeconds: Math.floor(options.clock.now().getTime() / 1000),
+      secret: iconsTicketSecret,
+    });
+    if (!ticketValidation.ok) {
+      return jsonResponse(401, { ok: false, code: 'invalid_ticket' });
+    }
+    if (ticketValidation.objectId !== objectId) {
+      return jsonResponse(401, { ok: false, code: 'invalid_ticket' });
+    }
+    const object = await options.storage.iconObjects.findByObjectId(objectId);
+    if (!object || object.objectClass !== 'manual_private' || object.ownerUserId !== ticketValidation.userId) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const blob = await iconBlobBucket.get(object.r2Key);
+    if (!blob) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    const headers = new Headers();
+    headers.set('content-type', blob.httpMetadata?.contentType || object.contentType || 'image/png');
+    headers.set('cache-control', 'private, no-store');
+    headers.set('pragma', 'no-cache');
+    headers.set('cdn-cache-control', 'no-store');
+    const allowedCorsOrigin = resolveAllowedIconCorsOrigin(c.req.raw);
+    if (allowedCorsOrigin) {
+      headers.set('access-control-allow-origin', allowedCorsOrigin);
+      headers.set('vary', 'origin');
+    }
+    headers.set('x-content-type-options', 'nosniff');
+    headers.set('content-security-policy', "default-src 'none'; img-src 'none'; style-src 'none'; script-src 'none';");
+    return new Response(await blob.arrayBuffer(), {
+      status: 200,
+      headers,
+    });
+  });
+
   app.post('/api/icons/resolve', async (c) => {
     const sessionContext = await requireAuthenticatedSession(c.req.raw, {
       allowExtensionBearer: true,
     });
     if (!sessionContext) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!realtimeConfig.flags.icons_http_fallback_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
     }
     const parsedBody = await parseJsonBodyWithLimit<unknown>({
       request: c.req.raw,
@@ -4886,6 +6276,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     });
     if (!sessionContext) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (!realtimeConfig.flags.icons_http_fallback_v1) {
+      return jsonResponse(404, { ok: false, code: 'feature_disabled' });
     }
     const parsedBody = await parseJsonBodyWithLimit<unknown>({
       request: c.req.raw,
@@ -4974,6 +6367,49 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     });
     const unresolved = discovery.unresolved.filter((domain) => !existingAutomaticByDomain.has(domain));
 
+    if (realtimeConfig.flags.icons_state_sync_v1) {
+      for (const entry of merged) {
+        if (entry.source !== 'automatic') {
+          continue;
+        }
+        try {
+          const object = await persistIconObjectFromDataUrl({
+            userId: sessionContext.user.userId,
+            objectClass: 'automatic_public',
+            dataUrl: entry.dataUrl,
+            nowIso,
+          });
+          await upsertIconStateAndPublish({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domain: entry.domain,
+            status: 'ready',
+            objectId: object.objectId,
+            occurredAt: nowIso,
+          });
+        } catch {
+          await upsertIconStateAndPublish({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domain: entry.domain,
+            status: 'absent',
+            objectId: null,
+            occurredAt: nowIso,
+          });
+        }
+      }
+      for (const unresolvedDomain of unresolved) {
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: unresolvedDomain,
+          status: 'absent',
+          objectId: null,
+          occurredAt: nowIso,
+        });
+      }
+    }
+
     await publishRealtimeEvent({
       userId: sessionContext.user.userId,
       topic: 'icons.discover.resolved',
@@ -5004,18 +6440,30 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
     }
     const manual = await options.storage.manualSiteIconOverrides.listByUserId(sessionContext.user.userId);
-    return jsonResponse(
-      200,
-      SiteIconManualListOutputSchema.parse({
-        ok: true,
-        icons: manual.map((entry) => ({
-          domain: entry.domain,
-          dataUrl: entry.dataUrl,
-          source: entry.source,
-          updatedAt: entry.updatedAt,
-        })),
-      }),
-    );
+    const payload = SiteIconManualListOutputSchema.parse({
+      ok: true,
+      icons: manual.map((entry) => ({
+        domain: entry.domain,
+        dataUrl: entry.dataUrl,
+        source: entry.source,
+        updatedAt: entry.updatedAt,
+      })),
+    });
+    const etag = stableManualIconsEtag({
+      userId: sessionContext.user.userId,
+      icons: payload.icons,
+    });
+    const ifNoneMatch = c.req.raw.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      const response = new Response(null, { status: 304 });
+      response.headers.set('etag', etag);
+      response.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+      return addSecurityHeaders(response);
+    }
+    const response = jsonResponse(200, payload);
+    response.headers.set('etag', etag);
+    response.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+    return response;
   });
 
   app.post('/api/icons/manual/upsert', async (c) => {
@@ -5054,6 +6502,33 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       source: input.source,
       updatedAt: nowIso,
     });
+    if (realtimeConfig.flags.icons_state_sync_v1) {
+      try {
+        const object = await persistIconObjectFromDataUrl({
+          userId: sessionContext.user.userId,
+          objectClass: 'manual_private',
+          dataUrl: input.dataUrl,
+          nowIso,
+        });
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: input.domain,
+          status: 'ready',
+          objectId: object.objectId,
+          occurredAt: nowIso,
+        });
+      } catch {
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: input.domain,
+          status: 'absent',
+          objectId: null,
+          occurredAt: nowIso,
+        });
+      }
+    }
     const noChanges = previous?.dataUrl === input.dataUrl && previous.source === input.source;
     if (!noChanges) {
       await publishRealtimeEvent({
@@ -5103,6 +6578,14 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       sessionContext.user.userId,
       input.domain,
     );
+    if (changed && realtimeConfig.flags.icons_state_sync_v1) {
+      await removeIconStateAndPublish({
+        userId: sessionContext.user.userId,
+        sourceDeviceId: sessionContext.device.deviceId,
+        domain: input.domain,
+        occurredAt: isoNow(options.clock),
+      });
+    }
     if (changed) {
       await publishRealtimeEvent({
         userId: sessionContext.user.userId,

@@ -116,6 +116,7 @@ export const InviteCreateOutputSchema = z
 export const RuntimeMetadataSchema = z
   .object({
     serverUrl: z.string().url(),
+    iconsAssetBaseUrl: z.string().url().optional(),
     deploymentFingerprint: z.string().min(1),
     realtime: z
       .object({
@@ -132,6 +133,19 @@ export const RuntimeMetadataSchema = z
             realtime_delta_attachments_v1: z.boolean(),
             realtime_apply_web_v1: z.boolean(),
             realtime_apply_extension_v1: z.boolean(),
+            icons_state_sync_v1: z.boolean(),
+            icons_ws_apply_web_v1: z.boolean(),
+            icons_ws_apply_extension_v1: z.boolean(),
+            icons_discovery_v2_v1: z.boolean(),
+            icons_fast_first_v1: z.boolean(),
+            icons_best_later_v1: z.boolean(),
+            icons_http_fallback_v1: z.boolean(),
+            icons_manual_private_ticket_v1: z.boolean(),
+            icons_provider_favicon_vemetric_enabled: z.boolean(),
+            icons_provider_google_s2_enabled: z.boolean(),
+            icons_provider_icon_horse_enabled: z.boolean(),
+            icons_provider_duckduckgo_ip3_enabled: z.boolean(),
+            icons_provider_faviconextractor_enabled: z.boolean(),
           })
           .strict(),
       })
@@ -154,6 +168,8 @@ export const RealtimeConnectTokenOutputSchema = z
 export const RealtimeTopicSchema = z.enum([
   'vault.item.upserted',
   'vault.item.tombstoned',
+  'icons.state.upserted',
+  'icons.state.removed',
   'icons.manual.upserted',
   'icons.manual.removed',
   'icons.discover.resolved',
@@ -212,6 +228,42 @@ export const RealtimeIconsDiscoverResolvedPayloadSchema = z
         .strict(),
     ),
     unresolved: z.array(z.string().trim().min(1)),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const IconObjectClassSchema = z.enum(['automatic_public', 'manual_private']);
+
+export const IconStateStatusSchema = z.enum(['pending', 'ready', 'absent', 'removed']);
+
+export const IconStateRecordSchema = z
+  .object({
+    domain: z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,255}$/),
+    status: IconStateStatusSchema,
+    objectId: z.string().min(1).nullable(),
+    objectClass: IconObjectClassSchema.nullable(),
+    objectSha256: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    contentType: z.string().min(1).nullable(),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeIconsStateUpsertedPayloadSchema = z
+  .object({
+    iconsVersion: z.number().int().nonnegative(),
+    record: IconStateRecordSchema,
+  })
+  .strict();
+
+export const RealtimeIconsStateRemovedPayloadSchema = z
+  .object({
+    iconsVersion: z.number().int().nonnegative(),
+    domain: z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,255}$/),
     updatedAt: isoDatetimeSchema,
   })
   .strict();
@@ -288,6 +340,7 @@ export const RealtimeServerMessageSchema = z.discriminatedUnion('type', [
         z.enum([
           'vault',
           'icons_manual',
+          'icons_state',
           'password_history',
           'attachments',
         ]),
@@ -1378,6 +1431,145 @@ export const SiteIconManualActionOutputSchema = z
   })
   .strict();
 
+export const IconObjectIdSchema = z.string().trim().min(1).max(128);
+
+export const IconSha256Schema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-f0-9]{64}$/);
+
+export const IconsStateQuerySchema = z
+  .object({
+    includeDomains: z.array(SiteIconDomainSchema).min(1).max(500).optional(),
+  })
+  .strict();
+
+export const IconsStateOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    iconsVersion: z.number().int().nonnegative(),
+    etag: z.string().min(1),
+    records: z.array(IconStateRecordSchema),
+    serverNow: isoDatetimeSchema,
+  })
+  .strict();
+
+export const IconsDomainItemPutInputSchema = z
+  .object({
+    itemId: z.string().min(1),
+    itemRevision: z.number().int().nonnegative(),
+    hosts: z.array(SiteIconDomainSchema).max(100),
+  })
+  .strict();
+
+export const IconsDomainItemPutOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: z.enum(['success_changed', 'success_no_op', 'success_no_op_stale_revision']),
+    domainsChanged: z.boolean(),
+    itemId: z.string().min(1),
+    itemRevision: z.number().int().nonnegative(),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const IconsDomainBatchPutInputSchema = z
+  .object({
+    entries: z
+      .array(
+        z
+          .object({
+            itemId: z.string().min(1),
+            itemRevision: z.number().int().nonnegative(),
+            hosts: z.array(SiteIconDomainSchema).max(100),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(500),
+  })
+  .strict();
+
+export const IconsDomainBatchPutEntryOutputSchema = z
+  .object({
+    itemId: z.string().min(1),
+    itemRevision: z.number().int().nonnegative(),
+    result: z.enum(['success_changed', 'success_no_op', 'success_no_op_stale_revision']),
+    domainsChanged: z.boolean(),
+  })
+  .strict();
+
+export const IconsDomainBatchPutOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    acceptedItems: z.number().int().nonnegative(),
+    entries: z.array(IconsDomainBatchPutEntryOutputSchema),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const IconsDomainReindexStartInputSchema = z
+  .object({
+    generationId: z.string().trim().min(1).max(128),
+  })
+  .strict();
+
+export const IconsDomainReindexChunkInputSchema = z
+  .object({
+    generationId: z.string().trim().min(1).max(128),
+    entries: z
+      .array(
+        z
+          .object({
+            itemId: z.string().min(1),
+            itemRevision: z.number().int().nonnegative(),
+            hosts: z.array(SiteIconDomainSchema).max(100),
+          })
+          .strict(),
+      )
+      .max(500),
+  })
+  .strict();
+
+export const IconsDomainReindexCommitInputSchema = z
+  .object({
+    generationId: z.string().trim().min(1).max(128),
+  })
+  .strict();
+
+export const IconsDomainReindexOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    result: CanonicalResultSchema,
+    generationId: z.string().min(1),
+    acceptedItems: z.number().int().nonnegative(),
+    updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const IconsObjectTicketIssueInputSchema = z
+  .object({
+    objectIds: z.array(IconObjectIdSchema).min(1).max(200),
+    ttlSeconds: z.number().int().positive().max(300).optional(),
+  })
+  .strict();
+
+export const IconsObjectTicketIssueOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    expiresAt: isoDatetimeSchema,
+    tickets: z.array(
+      z
+        .object({
+          objectId: IconObjectIdSchema,
+          ticket: z.string().min(1),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
 export const PasswordGeneratorHistoryEntryIdSchema = z
   .string()
   .trim()
@@ -1482,6 +1674,8 @@ export type RealtimeConnectTokenOutput = z.infer<typeof RealtimeConnectTokenOutp
 export type RealtimeTopic = z.infer<typeof RealtimeTopicSchema>;
 export type RealtimeVaultItemUpsertedPayload = z.infer<typeof RealtimeVaultItemUpsertedPayloadSchema>;
 export type RealtimeVaultItemTombstonedPayload = z.infer<typeof RealtimeVaultItemTombstonedPayloadSchema>;
+export type RealtimeIconsStateUpsertedPayload = z.infer<typeof RealtimeIconsStateUpsertedPayloadSchema>;
+export type RealtimeIconsStateRemovedPayload = z.infer<typeof RealtimeIconsStateRemovedPayloadSchema>;
 export type RealtimeIconsManualUpsertedPayload = z.infer<typeof RealtimeIconsManualUpsertedPayloadSchema>;
 export type RealtimeIconsManualRemovedPayload = z.infer<typeof RealtimeIconsManualRemovedPayloadSchema>;
 export type RealtimeIconsDiscoverResolvedPayload = z.infer<typeof RealtimeIconsDiscoverResolvedPayloadSchema>;
@@ -1587,6 +1781,22 @@ export type SiteIconManualUpsertInput = z.infer<typeof SiteIconManualUpsertInput
 export type SiteIconManualListOutput = z.infer<typeof SiteIconManualListOutputSchema>;
 export type SiteIconManualRemoveInput = z.infer<typeof SiteIconManualRemoveInputSchema>;
 export type SiteIconManualActionOutput = z.infer<typeof SiteIconManualActionOutputSchema>;
+export type IconObjectClass = z.infer<typeof IconObjectClassSchema>;
+export type IconStateStatus = z.infer<typeof IconStateStatusSchema>;
+export type IconStateRecord = z.infer<typeof IconStateRecordSchema>;
+export type IconsStateQuery = z.infer<typeof IconsStateQuerySchema>;
+export type IconsStateOutput = z.infer<typeof IconsStateOutputSchema>;
+export type IconsDomainItemPutInput = z.infer<typeof IconsDomainItemPutInputSchema>;
+export type IconsDomainItemPutOutput = z.infer<typeof IconsDomainItemPutOutputSchema>;
+export type IconsDomainBatchPutInput = z.infer<typeof IconsDomainBatchPutInputSchema>;
+export type IconsDomainBatchPutEntryOutput = z.infer<typeof IconsDomainBatchPutEntryOutputSchema>;
+export type IconsDomainBatchPutOutput = z.infer<typeof IconsDomainBatchPutOutputSchema>;
+export type IconsDomainReindexStartInput = z.infer<typeof IconsDomainReindexStartInputSchema>;
+export type IconsDomainReindexChunkInput = z.infer<typeof IconsDomainReindexChunkInputSchema>;
+export type IconsDomainReindexCommitInput = z.infer<typeof IconsDomainReindexCommitInputSchema>;
+export type IconsDomainReindexOutput = z.infer<typeof IconsDomainReindexOutputSchema>;
+export type IconsObjectTicketIssueInput = z.infer<typeof IconsObjectTicketIssueInputSchema>;
+export type IconsObjectTicketIssueOutput = z.infer<typeof IconsObjectTicketIssueOutputSchema>;
 export type PasswordGeneratorHistoryRecord = z.infer<typeof PasswordGeneratorHistoryRecordSchema>;
 export type PasswordGeneratorHistoryListOutput = z.infer<typeof PasswordGeneratorHistoryListOutputSchema>;
 export type PasswordGeneratorHistoryUpsertInput = z.infer<typeof PasswordGeneratorHistoryUpsertInputSchema>;

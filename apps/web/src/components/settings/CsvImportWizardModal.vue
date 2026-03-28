@@ -183,7 +183,6 @@ async function startImport() {
         progress.value = current;
       },
     });
-    void discoverImportedSiteIcons(preview.value);
   } catch (error) {
     errorMessage.value = humanizeImportError(error);
   } finally {
@@ -226,49 +225,6 @@ function moveToPreview() {
   activeStep.value = 'Preview';
 }
 
-function normalizeImportHost(rawUrl: string): string | null {
-  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
-    return null;
-  }
-  try {
-    const parsed = new URL(rawUrl.includes('://') ? rawUrl : `https://${rawUrl}`);
-    const hostname = parsed.hostname.trim().toLowerCase().replace(/\.$/u, '');
-    return hostname.length > 0 ? hostname : null;
-  } catch {
-    return null;
-  }
-}
-
-function importHostsFromPreview(value: VaultImportPreview): string[] {
-  const hosts = new Set<string>();
-  for (const candidate of value.candidates) {
-    if (candidate.itemType !== 'login' || !Array.isArray(candidate.urls)) {
-      continue;
-    }
-    for (const rawUrl of candidate.urls) {
-      const host = normalizeImportHost(rawUrl);
-      if (host) {
-        hosts.add(host);
-      }
-    }
-  }
-  return Array.from(hosts).slice(0, 200);
-}
-
-async function discoverImportedSiteIcons(previewValue: VaultImportPreview) {
-  const hosts = importHostsFromPreview(previewValue);
-  if (hosts.length === 0) {
-    return;
-  }
-  try {
-    await props.sessionStore.discoverSiteIcons({
-      domains: hosts,
-      forceRefresh: false,
-    });
-  } catch {
-    // Best-effort enrichment: import UX must not depend on icon discovery.
-  }
-}
 </script>
 
 <template>

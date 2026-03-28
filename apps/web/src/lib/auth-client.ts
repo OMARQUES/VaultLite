@@ -23,6 +23,17 @@ import type {
   ExtensionLinkApproveInput,
   ExtensionLinkPendingListOutput,
   ExtensionLinkRejectInput,
+  IconsDomainItemPutInput,
+  IconsDomainItemPutOutput,
+  IconsDomainBatchPutInput,
+  IconsDomainBatchPutOutput,
+  IconsDomainReindexChunkInput,
+  IconsDomainReindexCommitInput,
+  IconsDomainReindexOutput,
+  IconsDomainReindexStartInput,
+  IconsObjectTicketIssueInput,
+  IconsObjectTicketIssueOutput,
+  IconsStateOutput,
   SiteIconDiscoverBatchInput,
   SiteIconDiscoverBatchOutput,
   SiteIconManualActionOutput,
@@ -150,9 +161,22 @@ export interface VaultLiteAuthClient {
   getUnlockGrantStatus(input: UnlockGrantStatusInput): Promise<UnlockGrantStatusOutput>;
   consumeUnlockGrant(input: UnlockGrantConsumeInput): Promise<UnlockGrantConsumeOutput>;
   consumeWebBootstrapGrant(input: WebBootstrapGrantConsumeInput): Promise<WebBootstrapGrantConsumeOutput>;
+  getIconsState(input?: { domains?: string[]; etag?: string }): Promise<
+    | { status: 'ok'; payload: IconsStateOutput; etag: string | null }
+    | { status: 'not_modified'; etag: string | null }
+  >;
+  putIconDomainsItem(input: IconsDomainItemPutInput): Promise<IconsDomainItemPutOutput>;
+  putIconDomainsBatch(input: IconsDomainBatchPutInput): Promise<IconsDomainBatchPutOutput>;
+  startIconDomainsReindex(input: IconsDomainReindexStartInput): Promise<IconsDomainReindexOutput>;
+  sendIconDomainsReindexChunk(input: IconsDomainReindexChunkInput): Promise<IconsDomainReindexOutput>;
+  commitIconDomainsReindex(input: IconsDomainReindexCommitInput): Promise<IconsDomainReindexOutput>;
+  issueIconObjectTickets(input: IconsObjectTicketIssueInput): Promise<IconsObjectTicketIssueOutput>;
   resolveSiteIcons(input: SiteIconResolveBatchInput): Promise<SiteIconResolveBatchOutput>;
   discoverSiteIcons(input: SiteIconDiscoverBatchInput): Promise<SiteIconDiscoverBatchOutput>;
-  listManualSiteIcons(): Promise<SiteIconManualListOutput>;
+  listManualSiteIcons(input?: { etag?: string }): Promise<
+    | { status: 'ok'; payload: SiteIconManualListOutput; etag: string | null }
+    | { status: 'not_modified'; etag: string | null }
+  >;
   upsertManualSiteIcon(input: SiteIconManualUpsertInput): Promise<SiteIconManualActionOutput>;
   removeManualSiteIcon(input: SiteIconManualRemoveInput): Promise<SiteIconManualActionOutput>;
   listPasswordGeneratorHistory(): Promise<PasswordGeneratorHistoryListOutput>;
@@ -576,6 +600,112 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         { emitUnauthorizedEvent: true },
       );
     },
+    async getIconsState(input) {
+      const query = new URLSearchParams();
+      if (Array.isArray(input?.domains) && input.domains.length > 0) {
+        query.set('domains', input.domains.join(','));
+      }
+      const response = await fetch(
+        `${baseUrl}/api/icons/state${query.size > 0 ? `?${query.toString()}` : ''}`,
+        {
+          credentials: 'include',
+          method: 'GET',
+          headers: {
+            ...(input?.etag ? { 'if-none-match': input.etag } : {}),
+          },
+        },
+      );
+      if (response.status === 304) {
+        return {
+          status: 'not_modified' as const,
+          etag: response.headers.get('etag'),
+        };
+      }
+      if (!response.ok) {
+        let responseCode = '';
+        try {
+          const payload = (await response.clone().json()) as { code?: string };
+          responseCode = payload.code ?? '';
+        } catch {
+          // noop
+        }
+        if (response.status === 401) {
+          dispatchVaultUnauthorizedEvent({
+            source: 'auth',
+            status: 401,
+            code: responseCode || null,
+            message: null,
+            url: `${baseUrl}/api/icons/state`,
+          });
+        }
+        throw new Error(responseCode || `request_failed_${response.status}`);
+      }
+      return {
+        status: 'ok' as const,
+        payload: (await response.json()) as IconsStateOutput,
+        etag: response.headers.get('etag'),
+      };
+    },
+    putIconDomainsItem(input) {
+      return requestJson<IconsDomainItemPutOutput>(
+        `${baseUrl}/api/icons/domains/item`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    putIconDomainsBatch(input) {
+      return requestJson<IconsDomainBatchPutOutput>(
+        `${baseUrl}/api/icons/domains/batch`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    startIconDomainsReindex(input) {
+      return requestJson<IconsDomainReindexOutput>(
+        `${baseUrl}/api/icons/domains/reindex/start`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    sendIconDomainsReindexChunk(input) {
+      return requestJson<IconsDomainReindexOutput>(
+        `${baseUrl}/api/icons/domains/reindex/chunk`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    commitIconDomainsReindex(input) {
+      return requestJson<IconsDomainReindexOutput>(
+        `${baseUrl}/api/icons/domains/reindex/commit`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    issueIconObjectTickets(input) {
+      return requestJson<IconsObjectTicketIssueOutput>(
+        `${baseUrl}/api/icons/object-tickets`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+        { emitUnauthorizedEvent: true },
+      );
+    },
     resolveSiteIcons(input) {
       return requestJson<SiteIconResolveBatchOutput>(
         `${baseUrl}/api/icons/resolve`,
@@ -596,12 +726,44 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         { emitUnauthorizedEvent: true },
       );
     },
-    listManualSiteIcons() {
-      return requestJson<SiteIconManualListOutput>(
-        `${baseUrl}/api/icons/manual`,
-        undefined,
-        { emitUnauthorizedEvent: true },
-      );
+    async listManualSiteIcons(input) {
+      const response = await fetch(`${baseUrl}/api/icons/manual`, {
+        credentials: 'include',
+        method: 'GET',
+        headers: {
+          ...(input?.etag ? { 'if-none-match': input.etag } : {}),
+        },
+      });
+      if (response.status === 304) {
+        return {
+          status: 'not_modified' as const,
+          etag: response.headers.get('etag'),
+        };
+      }
+      if (!response.ok) {
+        let responseCode = '';
+        try {
+          const payload = (await response.clone().json()) as { code?: string };
+          responseCode = payload.code ?? '';
+        } catch {
+          // noop
+        }
+        if (response.status === 401) {
+          dispatchVaultUnauthorizedEvent({
+            source: 'auth',
+            status: 401,
+            code: responseCode || null,
+            message: null,
+            url: `${baseUrl}/api/icons/manual`,
+          });
+        }
+        throw new Error(responseCode || `request_failed_${response.status}`);
+      }
+      return {
+        status: 'ok' as const,
+        payload: (await response.json()) as SiteIconManualListOutput,
+        etag: response.headers.get('etag'),
+      };
     },
     upsertManualSiteIcon(input) {
       return requestJson<SiteIconManualActionOutput>(

@@ -59,6 +59,64 @@ async function requestJson(url, init) {
   return response.json();
 }
 
+async function requestWithNotModified(url, init = {}) {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), DEFAULT_REQUEST_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: 'omit',
+      cache: 'no-store',
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      const timeoutError = new Error('request_timeout');
+      timeoutError.code = 'request_timeout';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  if (response.status === 304) {
+    return {
+      status: 'not_modified',
+      etag: response.headers.get('etag'),
+    };
+  }
+
+  if (!response.ok) {
+    let code = '';
+    let message = '';
+    let interval;
+    try {
+      const payload = await response.clone().json();
+      code = typeof payload.code === 'string' ? payload.code : '';
+      message = typeof payload.message === 'string' ? payload.message : '';
+      interval = typeof payload.interval === 'number' ? payload.interval : undefined;
+    } catch {
+      // Keep status-only fallback.
+    }
+    const detail = message || code || `request_failed_${response.status}`;
+    const error = new Error(detail);
+    error.code = code;
+    error.status = response.status;
+    if (typeof interval === 'number') {
+      error.interval = interval;
+    }
+    throw error;
+  }
+
+  return {
+    status: 'ok',
+    payload: await response.json(),
+    etag: response.headers.get('etag'),
+  };
+}
+
 export function createExtensionApiClient(serverOrigin) {
   const base = serverOrigin.replace(/\/+$/u, '');
   return {
@@ -239,10 +297,63 @@ export function createExtensionApiClient(serverOrigin) {
         }),
       });
     },
-    async listManualSiteIcons(input = {}) {
-      return requestJson(`${base}/api/icons/manual`, {
+    async getIconsState(input = {}) {
+      const query = new URLSearchParams();
+      if (Array.isArray(input?.domains) && input.domains.length > 0) {
+        query.set('domains', input.domains.join(','));
+      }
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return requestWithNotModified(`${base}/api/icons/state${suffix}`, {
         method: 'GET',
+        headers: buildHeaders({
+          bearerToken: input?.bearerToken,
+          extra: input?.etag ? { 'if-none-match': input.etag } : {},
+        }),
+      });
+    },
+    async putIconDomainsItem(input) {
+      return requestJson(`${base}/api/icons/domains/item`, {
+        method: 'PUT',
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemId: input?.itemId,
+          itemRevision: input?.itemRevision,
+          hosts: Array.isArray(input?.hosts) ? input.hosts : [],
+        }),
+      });
+    },
+    async putIconDomainsBatch(input) {
+      return requestJson(`${base}/api/icons/domains/batch`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          entries: Array.isArray(input?.entries)
+            ? input.entries.map((entry) => ({
+                itemId: entry?.itemId,
+                itemRevision: entry?.itemRevision,
+                hosts: Array.isArray(entry?.hosts) ? entry.hosts : [],
+              }))
+            : [],
+        }),
+      });
+    },
+    async issueIconObjectTickets(input) {
+      return requestJson(`${base}/api/icons/object-tickets`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          objectIds: Array.isArray(input?.objectIds) ? input.objectIds : [],
+          ttlSeconds: Number.isFinite(input?.ttlSeconds) ? Math.max(1, Math.trunc(input.ttlSeconds)) : undefined,
+        }),
+      });
+    },
+    async listManualSiteIcons(input = {}) {
+      return requestWithNotModified(`${base}/api/icons/manual`, {
+        method: 'GET',
+        headers: buildHeaders({
+          bearerToken: input?.bearerToken,
+          extra: input?.etag ? { 'if-none-match': input.etag } : {},
+        }),
       });
     },
     async upsertManualSiteIcon(input) {

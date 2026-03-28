@@ -13,6 +13,15 @@ import type {
   DeviceRepository,
   ExtensionSessionRecoverSecretRecord,
   ExtensionSessionRecoverSecretRepository,
+  IconIngestJobRecord,
+  IconIngestJobRepository,
+  IconObjectRecord,
+  IconObjectRepository,
+  UserIconStateRecord,
+  UserIconStateRepository,
+  UserIconItemDomainRepository,
+  UserIconReindexSessionRecord,
+  IconObjectClass,
   ManualSiteIconOverrideRecord,
   ManualSiteIconOverrideRepository,
   PasswordGeneratorHistoryRecord,
@@ -43,6 +52,8 @@ import type {
   RotatePasswordAtomicInput,
   RotatePasswordAtomicResult,
   RevokeDeviceAndSessionsAtomicInput,
+  AutomaticIconRegistryRecord,
+  AutomaticIconRegistryRepository,
   SiteIconCacheRecord,
   SiteIconCacheRepository,
   UserAccountRecord,
@@ -97,6 +108,8 @@ export interface CloudflareMigration {
 }
 
 const MIGRATION_FILENAME_PATTERN = /^(\d{4})_([a-z0-9_]+)\.sql$/i;
+// D1 in local/runtime can reject large IN() bind lists; keep a conservative chunk size.
+const D1_SAFE_IN_CLAUSE_CHUNK = 90;
 const EMBEDDED_CLOUDFLARE_MIGRATIONS: Array<{
   id: string;
   filename: string;
@@ -537,6 +550,132 @@ CREATE INDEX IF NOT EXISTS idx_realtime_outbox_published_at
 
 CREATE INDEX IF NOT EXISTS idx_realtime_one_time_tokens_expires_at
   ON realtime_one_time_tokens (expires_at);`,
+  },
+  {
+    id: '0017_icons_state_v43',
+    filename: '0017_icons_state_v43.sql',
+    sql: `CREATE TABLE IF NOT EXISTS icon_objects (
+  object_id TEXT PRIMARY KEY,
+  object_class TEXT NOT NULL,
+  owner_user_id TEXT NULL,
+  sha256 TEXT NOT NULL,
+  r2_key TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_length INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_icon_objects_class_sha
+  ON icon_objects (object_class, sha256);
+
+CREATE INDEX IF NOT EXISTS idx_icon_objects_owner_class_sha
+  ON icon_objects (owner_user_id, object_class, sha256);
+
+CREATE TABLE IF NOT EXISTS user_icon_state (
+  user_id TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  status TEXT NOT NULL,
+  object_id TEXT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, domain)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_icon_state_user_updated
+  ON user_icon_state (user_id, updated_at, domain);
+
+CREATE INDEX IF NOT EXISTS idx_user_icon_state_object
+  ON user_icon_state (object_id);
+
+CREATE TABLE IF NOT EXISTS user_icon_versions (
+  user_id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_icon_item_domain_heads (
+  user_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  item_revision INTEGER NOT NULL,
+  generation_id TEXT NULL,
+  last_seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, device_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_icon_item_domain_heads_user_device_generation
+  ON user_icon_item_domain_heads (user_id, device_id, generation_id);
+
+CREATE TABLE IF NOT EXISTS user_icon_item_domains (
+  user_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  host TEXT NOT NULL,
+  item_revision INTEGER NOT NULL,
+  generation_id TEXT NULL,
+  last_seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, device_id, item_id, host)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_icon_item_domains_user_host
+  ON user_icon_item_domains (user_id, host);
+
+CREATE INDEX IF NOT EXISTS idx_user_icon_item_domains_user_device_generation
+  ON user_icon_item_domains (user_id, device_id, generation_id);
+
+CREATE TABLE IF NOT EXISTS user_icon_reindex_sessions (
+  user_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, device_id)
+);
+
+CREATE TABLE IF NOT EXISTS icon_ingest_jobs (
+  job_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  object_class TEXT NOT NULL,
+  status TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  r2_key TEXT NOT NULL,
+  object_id TEXT NULL,
+  error_code TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_icon_ingest_jobs_status_created
+  ON icon_ingest_jobs (status, created_at, job_id);
+
+CREATE INDEX IF NOT EXISTS idx_icon_ingest_jobs_user_status
+  ON icon_ingest_jobs (user_id, status, created_at);`,
+  },
+  {
+    id: '0018_automatic_icon_registry',
+    filename: '0018_automatic_icon_registry.sql',
+    sql: `CREATE TABLE IF NOT EXISTS automatic_icon_registry (
+  domain TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  object_id TEXT NULL,
+  source_url TEXT NULL,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT NOT NULL,
+  next_eligible_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_automatic_icon_registry_next_eligible
+  ON automatic_icon_registry (next_eligible_at, domain);
+
+CREATE INDEX IF NOT EXISTS idx_automatic_icon_registry_status
+  ON automatic_icon_registry (status, updated_at);`,
   },
 ];
 
@@ -2075,6 +2214,75 @@ class CloudflareSiteIconCacheRepository implements SiteIconCacheRepository {
   }
 }
 
+class CloudflareAutomaticIconRegistryRepository implements AutomaticIconRegistryRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async findByDomain(domain: string): Promise<AutomaticIconRegistryRecord | null> {
+    const normalized = domain.trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+    return selectOne<AutomaticIconRegistryRecord>(
+      this.db,
+      `SELECT domain AS domain,
+              status AS status,
+              object_id AS objectId,
+              source_url AS sourceUrl,
+              fail_count AS failCount,
+              last_checked_at AS lastCheckedAt,
+              next_eligible_at AS nextEligibleAt,
+              updated_at AS updatedAt
+       FROM automatic_icon_registry
+       WHERE domain = ?`,
+      [normalized],
+    );
+  }
+
+  async upsert(record: AutomaticIconRegistryRecord): Promise<AutomaticIconRegistryRecord> {
+    const normalized: AutomaticIconRegistryRecord = {
+      ...record,
+      domain: record.domain.trim().toLowerCase(),
+      status: record.status === 'ready' ? 'ready' : record.status === 'absent' ? 'absent' : 'pending',
+      objectId: record.objectId ?? null,
+      sourceUrl: record.sourceUrl ?? null,
+      failCount: Math.max(0, Math.trunc(record.failCount)),
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO automatic_icon_registry (
+         domain,
+         status,
+         object_id,
+         source_url,
+         fail_count,
+         last_checked_at,
+         next_eligible_at,
+         updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(domain)
+       DO UPDATE SET
+         status = excluded.status,
+         object_id = excluded.object_id,
+         source_url = excluded.source_url,
+         fail_count = excluded.fail_count,
+         last_checked_at = excluded.last_checked_at,
+         next_eligible_at = excluded.next_eligible_at,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.domain,
+        normalized.status,
+        normalized.objectId,
+        normalized.sourceUrl,
+        normalized.failCount,
+        normalized.lastCheckedAt,
+        normalized.nextEligibleAt,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+}
+
 class CloudflareManualSiteIconOverrideRepository implements ManualSiteIconOverrideRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -2108,20 +2316,28 @@ class CloudflareManualSiteIconOverrideRepository implements ManualSiteIconOverri
     if (normalized.length === 0) {
       return [];
     }
-    const placeholders = normalized.map(() => '?').join(', ');
-    return selectMany<ManualSiteIconOverrideRecord>(
-      this.db,
-      `SELECT user_id AS userId,
-              domain AS domain,
-              data_url AS dataUrl,
-              source AS source,
-              updated_at AS updatedAt
-       FROM manual_site_icon_overrides
-       WHERE user_id = ?
-         AND domain IN (${placeholders})
-       ORDER BY domain ASC`,
-      [userId, ...normalized],
-    );
+    const records = new Map<string, ManualSiteIconOverrideRecord>();
+    for (let index = 0; index < normalized.length; index += D1_SAFE_IN_CLAUSE_CHUNK) {
+      const chunk = normalized.slice(index, index + D1_SAFE_IN_CLAUSE_CHUNK);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await selectMany<ManualSiteIconOverrideRecord>(
+        this.db,
+        `SELECT user_id AS userId,
+                domain AS domain,
+                data_url AS dataUrl,
+                source AS source,
+                updated_at AS updatedAt
+         FROM manual_site_icon_overrides
+         WHERE user_id = ?
+           AND domain IN (${placeholders})
+         ORDER BY domain ASC`,
+        [userId, ...chunk],
+      );
+      for (const row of rows) {
+        records.set(row.domain, row);
+      }
+    }
+    return Array.from(records.values()).sort((left, right) => left.domain.localeCompare(right.domain));
   }
 
   async findByUserIdAndDomain(
@@ -2184,6 +2400,779 @@ class CloudflareManualSiteIconOverrideRepository implements ManualSiteIconOverri
       [userId, normalized],
     );
     return changed === 1;
+  }
+}
+
+class CloudflareIconObjectRepository implements IconObjectRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: IconObjectRecord): Promise<IconObjectRecord> {
+    const normalized: IconObjectRecord = {
+      ...record,
+      objectId: record.objectId.trim(),
+      ownerUserId: record.ownerUserId ?? null,
+      sha256: record.sha256.trim().toLowerCase(),
+      r2Key: record.r2Key.trim(),
+      contentType: record.contentType.trim().toLowerCase(),
+      byteLength: Math.max(0, Math.trunc(record.byteLength)),
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO icon_objects (
+         object_id, object_class, owner_user_id, sha256, r2_key, content_type, byte_length, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(object_id) DO UPDATE SET
+         object_class = excluded.object_class,
+         owner_user_id = excluded.owner_user_id,
+         sha256 = excluded.sha256,
+         r2_key = excluded.r2_key,
+         content_type = excluded.content_type,
+         byte_length = excluded.byte_length,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.objectId,
+        normalized.objectClass,
+        normalized.ownerUserId,
+        normalized.sha256,
+        normalized.r2Key,
+        normalized.contentType,
+        normalized.byteLength,
+        normalized.createdAt,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+
+  async findByObjectId(objectId: string): Promise<IconObjectRecord | null> {
+    return selectOne<IconObjectRecord>(
+      this.db,
+      `SELECT object_id AS objectId,
+              object_class AS objectClass,
+              owner_user_id AS ownerUserId,
+              sha256 AS sha256,
+              r2_key AS r2Key,
+              content_type AS contentType,
+              byte_length AS byteLength,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM icon_objects
+       WHERE object_id = ?`,
+      [objectId.trim()],
+    );
+  }
+
+  async findByClassAndSha256(input: {
+    objectClass: IconObjectClass;
+    sha256: string;
+    ownerUserId?: string | null;
+  }): Promise<IconObjectRecord | null> {
+    const sha256 = input.sha256.trim().toLowerCase();
+    if (input.objectClass === 'manual_private') {
+      return selectOne<IconObjectRecord>(
+        this.db,
+        `SELECT object_id AS objectId,
+                object_class AS objectClass,
+                owner_user_id AS ownerUserId,
+                sha256 AS sha256,
+                r2_key AS r2Key,
+                content_type AS contentType,
+                byte_length AS byteLength,
+                created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM icon_objects
+         WHERE object_class = ?
+           AND owner_user_id = ?
+           AND sha256 = ?
+         LIMIT 1`,
+        [input.objectClass, input.ownerUserId ?? null, sha256],
+      );
+    }
+    return selectOne<IconObjectRecord>(
+      this.db,
+      `SELECT object_id AS objectId,
+              object_class AS objectClass,
+              owner_user_id AS ownerUserId,
+              sha256 AS sha256,
+              r2_key AS r2Key,
+              content_type AS contentType,
+              byte_length AS byteLength,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM icon_objects
+       WHERE object_class = ?
+         AND sha256 = ?
+       LIMIT 1`,
+      [input.objectClass, sha256],
+    );
+  }
+
+  async removeByObjectId(objectId: string): Promise<boolean> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `DELETE FROM icon_objects
+       WHERE object_id = ?`,
+      [objectId.trim()],
+    );
+    return changed > 0;
+  }
+
+  async listOrphanCandidates(input: {
+    notReferencedAfterIso: string;
+    limit: number;
+  }): Promise<IconObjectRecord[]> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(2_000, Math.trunc(input.limit))) : 200;
+    return selectMany<IconObjectRecord>(
+      this.db,
+      `SELECT io.object_id AS objectId,
+              io.object_class AS objectClass,
+              io.owner_user_id AS ownerUserId,
+              io.sha256 AS sha256,
+              io.r2_key AS r2Key,
+              io.content_type AS contentType,
+              io.byte_length AS byteLength,
+              io.created_at AS createdAt,
+              io.updated_at AS updatedAt
+       FROM icon_objects io
+       LEFT JOIN user_icon_state s ON s.object_id = io.object_id
+       WHERE s.object_id IS NULL
+         AND io.updated_at <= ?
+       ORDER BY io.updated_at ASC, io.object_id ASC
+       LIMIT ?`,
+      [input.notReferencedAfterIso, safeLimit],
+    );
+  }
+}
+
+class CloudflareUserIconStateRepository implements UserIconStateRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async listByUserId(userId: string): Promise<UserIconStateRecord[]> {
+    return selectMany<UserIconStateRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              domain AS domain,
+              status AS status,
+              object_id AS objectId,
+              updated_at AS updatedAt
+       FROM user_icon_state
+       WHERE user_id = ?
+       ORDER BY domain ASC`,
+      [userId],
+    );
+  }
+
+  async listByUserIdAndDomains(userId: string, domains: string[]): Promise<UserIconStateRecord[]> {
+    const normalizedDomains = Array.from(
+      new Set(
+        domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0),
+      ),
+    );
+    if (normalizedDomains.length === 0) {
+      return [];
+    }
+    const records = new Map<string, UserIconStateRecord>();
+    for (let index = 0; index < normalizedDomains.length; index += D1_SAFE_IN_CLAUSE_CHUNK) {
+      const chunk = normalizedDomains.slice(index, index + D1_SAFE_IN_CLAUSE_CHUNK);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await selectMany<UserIconStateRecord>(
+        this.db,
+        `SELECT user_id AS userId,
+                domain AS domain,
+                status AS status,
+                object_id AS objectId,
+                updated_at AS updatedAt
+         FROM user_icon_state
+         WHERE user_id = ?
+           AND domain IN (${placeholders})
+         ORDER BY domain ASC`,
+        [userId, ...chunk],
+      );
+      for (const row of rows) {
+        records.set(row.domain, row);
+      }
+    }
+    return Array.from(records.values()).sort((left, right) => left.domain.localeCompare(right.domain));
+  }
+
+  async findByUserIdAndDomain(userId: string, domain: string): Promise<UserIconStateRecord | null> {
+    const normalizedDomain = domain.trim().toLowerCase();
+    if (!normalizedDomain) {
+      return null;
+    }
+    return selectOne<UserIconStateRecord>(
+      this.db,
+      `SELECT user_id AS userId,
+              domain AS domain,
+              status AS status,
+              object_id AS objectId,
+              updated_at AS updatedAt
+       FROM user_icon_state
+       WHERE user_id = ?
+         AND domain = ?`,
+      [userId, normalizedDomain],
+    );
+  }
+
+  async upsert(record: UserIconStateRecord): Promise<{ record: UserIconStateRecord; changed: boolean }> {
+    const normalized: UserIconStateRecord = {
+      ...record,
+      domain: record.domain.trim().toLowerCase(),
+      objectId: record.objectId ?? null,
+    };
+    const existing = await this.findByUserIdAndDomain(normalized.userId, normalized.domain);
+    const changed =
+      !existing ||
+      existing.status !== normalized.status ||
+      existing.objectId !== normalized.objectId;
+    if (!changed && existing) {
+      return {
+        record: existing,
+        changed: false,
+      };
+    }
+    await executeOne(
+      this.db,
+      `INSERT INTO user_icon_state (user_id, domain, status, object_id, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, domain)
+       DO UPDATE SET
+         status = excluded.status,
+         object_id = excluded.object_id,
+         updated_at = excluded.updated_at`,
+      [
+        normalized.userId,
+        normalized.domain,
+        normalized.status,
+        normalized.objectId,
+        normalized.updatedAt,
+      ],
+    );
+    return {
+      record: normalized,
+      changed,
+    };
+  }
+
+  async remove(input: { userId: string; domain: string; updatedAt: string }): Promise<boolean> {
+    const normalizedDomain = input.domain.trim().toLowerCase();
+    if (!normalizedDomain) {
+      return false;
+    }
+    const changed = await executeOneWithChanges(
+      this.db,
+      `DELETE FROM user_icon_state
+       WHERE user_id = ?
+         AND domain = ?`,
+      [input.userId, normalizedDomain],
+    );
+    return changed > 0;
+  }
+
+  async getVersion(userId: string): Promise<number> {
+    const row = await selectOne<{ version: number }>(
+      this.db,
+      `SELECT version AS version
+       FROM user_icon_versions
+       WHERE user_id = ?`,
+      [userId],
+    );
+    return row?.version ?? 0;
+  }
+
+  async bumpVersion(input: { userId: string; updatedAt: string }): Promise<number> {
+    await executeOne(
+      this.db,
+      `INSERT INTO user_icon_versions (user_id, version, updated_at)
+       VALUES (?, 1, ?)
+       ON CONFLICT(user_id)
+       DO UPDATE SET
+         version = user_icon_versions.version + 1,
+         updated_at = excluded.updated_at`,
+      [input.userId, input.updatedAt],
+    );
+    return this.getVersion(input.userId);
+  }
+}
+
+class CloudflareUserIconItemDomainRepository implements UserIconItemDomainRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async replaceItemHosts(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    itemId: string;
+    itemRevision: number;
+    hosts: string[];
+    generationId?: string | null;
+    updatedAt: string;
+  }): Promise<{
+    result: 'success_changed' | 'success_no_op' | 'success_no_op_stale_revision';
+    changed: boolean;
+  }> {
+    const normalizedItemId = input.itemId.trim();
+    const normalizedHosts = Array.from(
+      new Set(
+        input.hosts
+          .filter((host): host is string => typeof host === 'string')
+          .map((host) => host.trim().toLowerCase())
+          .filter((host) => host.length > 0),
+      ),
+    );
+    const head = await selectOne<{ itemRevision: number; generationId: string | null }>(
+      this.db,
+      `SELECT item_revision AS itemRevision,
+              generation_id AS generationId
+       FROM user_icon_item_domain_heads
+       WHERE user_id = ?
+         AND device_id = ?
+         AND item_id = ?`,
+      [input.userId, input.deviceId, normalizedItemId],
+    );
+    if (head && input.itemRevision < head.itemRevision) {
+      return {
+        result: 'success_no_op_stale_revision',
+        changed: false,
+      };
+    }
+    const existingHosts = await selectMany<{ host: string }>(
+      this.db,
+      `SELECT host AS host
+       FROM user_icon_item_domains
+       WHERE user_id = ?
+         AND device_id = ?
+         AND item_id = ?
+       ORDER BY host ASC`,
+      [input.userId, input.deviceId, normalizedItemId],
+    );
+    const existingHostValues = existingHosts.map((entry) => entry.host).sort();
+    const nextHosts = [...normalizedHosts].sort();
+    const hostsChanged =
+      existingHostValues.length !== nextHosts.length ||
+      existingHostValues.some((value, index) => value !== nextHosts[index]);
+    const revisionChanged = !head || head.itemRevision !== input.itemRevision;
+    const generationId = input.generationId ?? head?.generationId ?? null;
+    const changed = hostsChanged || revisionChanged;
+    if (!changed) {
+      return {
+        result: 'success_no_op',
+        changed: false,
+      };
+    }
+
+    const statements: D1PreparedStatementLike[] = [
+      this.db.prepare(
+        `INSERT INTO user_icon_item_domain_heads (
+           user_id, device_id, surface, item_id, item_revision, generation_id, last_seen_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, device_id, item_id)
+         DO UPDATE SET
+           surface = excluded.surface,
+           item_revision = excluded.item_revision,
+           generation_id = excluded.generation_id,
+           last_seen_at = excluded.last_seen_at,
+           updated_at = excluded.updated_at`,
+      ).bind(
+        input.userId,
+        input.deviceId,
+        input.surface,
+        normalizedItemId,
+        input.itemRevision,
+        generationId,
+        input.updatedAt,
+        input.updatedAt,
+      ),
+    ];
+    if (hostsChanged) {
+      statements.push(
+        this.db.prepare(
+          `DELETE FROM user_icon_item_domains
+           WHERE user_id = ?
+             AND device_id = ?
+             AND item_id = ?`,
+        ).bind(input.userId, input.deviceId, normalizedItemId),
+      );
+      for (const host of normalizedHosts) {
+        statements.push(
+          this.db.prepare(
+            `INSERT INTO user_icon_item_domains (
+               user_id, device_id, surface, item_id, host, item_revision, generation_id, last_seen_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, device_id, item_id, host)
+             DO UPDATE SET
+               surface = excluded.surface,
+               item_revision = excluded.item_revision,
+               generation_id = excluded.generation_id,
+               last_seen_at = excluded.last_seen_at,
+               updated_at = excluded.updated_at`,
+          ).bind(
+            input.userId,
+            input.deviceId,
+            input.surface,
+            normalizedItemId,
+            host,
+            input.itemRevision,
+            generationId,
+            input.updatedAt,
+            input.updatedAt,
+          ),
+        );
+      }
+    } else {
+      statements.push(
+        this.db.prepare(
+          `UPDATE user_icon_item_domains
+           SET surface = ?,
+               item_revision = ?,
+               generation_id = ?,
+               last_seen_at = ?,
+               updated_at = ?
+           WHERE user_id = ?
+             AND device_id = ?
+             AND item_id = ?`,
+        ).bind(
+          input.surface,
+          input.itemRevision,
+          generationId,
+          input.updatedAt,
+          input.updatedAt,
+          input.userId,
+          input.deviceId,
+          normalizedItemId,
+        ),
+      );
+    }
+    if (typeof this.db.batch === 'function') {
+      await this.db.batch(statements);
+    } else {
+      await this.db.exec('BEGIN TRANSACTION');
+      try {
+        for (const statement of statements) {
+          await statement.run();
+        }
+        await this.db.exec('COMMIT');
+      } catch (error) {
+        try {
+          await this.db.exec('ROLLBACK');
+        } catch {
+          // Preserve original error.
+        }
+        throw error;
+      }
+    }
+    return {
+      result: changed ? 'success_changed' : 'success_no_op',
+      changed,
+    };
+  }
+
+  async startReindex(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    startedAt: string;
+  }): Promise<UserIconReindexSessionRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO user_icon_reindex_sessions (
+         user_id, device_id, surface, generation_id, started_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, device_id)
+       DO UPDATE SET
+         surface = excluded.surface,
+         generation_id = excluded.generation_id,
+         started_at = excluded.started_at,
+         updated_at = excluded.updated_at`,
+      [
+        input.userId,
+        input.deviceId,
+        input.surface,
+        input.generationId,
+        input.startedAt,
+        input.startedAt,
+      ],
+    );
+    return {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      surface: input.surface,
+      generationId: input.generationId,
+      startedAt: input.startedAt,
+      updatedAt: input.startedAt,
+    };
+  }
+
+  async upsertReindexChunk(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    entries: Array<{ itemId: string; itemRevision: number; hosts: string[] }>;
+    updatedAt: string;
+  }): Promise<{ acceptedItems: number }> {
+    const session = await selectOne<{ generationId: string }>(
+      this.db,
+      `SELECT generation_id AS generationId
+       FROM user_icon_reindex_sessions
+       WHERE user_id = ?
+         AND device_id = ?`,
+      [input.userId, input.deviceId],
+    );
+    if (!session || session.generationId !== input.generationId) {
+      return { acceptedItems: 0 };
+    }
+    let acceptedItems = 0;
+    for (const entry of input.entries) {
+      const replaced = await this.replaceItemHosts({
+        userId: input.userId,
+        deviceId: input.deviceId,
+        surface: input.surface,
+        itemId: entry.itemId,
+        itemRevision: entry.itemRevision,
+        hosts: entry.hosts,
+        generationId: input.generationId,
+        updatedAt: input.updatedAt,
+      });
+      if (replaced.result !== 'success_no_op_stale_revision') {
+        acceptedItems += 1;
+      }
+    }
+    await executeOne(
+      this.db,
+      `UPDATE user_icon_reindex_sessions
+       SET updated_at = ?
+       WHERE user_id = ?
+         AND device_id = ?
+         AND generation_id = ?`,
+      [input.updatedAt, input.userId, input.deviceId, input.generationId],
+    );
+    return { acceptedItems };
+  }
+
+  async commitReindex(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    updatedAt: string;
+  }): Promise<{ changed: boolean }> {
+    const session = await selectOne<{ generationId: string }>(
+      this.db,
+      `SELECT generation_id AS generationId
+       FROM user_icon_reindex_sessions
+       WHERE user_id = ?
+         AND device_id = ?`,
+      [input.userId, input.deviceId],
+    );
+    if (!session || session.generationId !== input.generationId) {
+      return { changed: false };
+    }
+    const headsToDelete = await selectMany<{ itemId: string }>(
+      this.db,
+      `SELECT item_id AS itemId
+       FROM user_icon_item_domain_heads
+       WHERE user_id = ?
+         AND device_id = ?
+         AND (generation_id IS NULL OR generation_id <> ?)`,
+      [input.userId, input.deviceId, input.generationId],
+    );
+    if (headsToDelete.length > 0) {
+      const statements: D1PreparedStatementLike[] = [];
+      for (const row of headsToDelete) {
+        statements.push(
+          this.db.prepare(
+            `DELETE FROM user_icon_item_domains
+             WHERE user_id = ?
+               AND device_id = ?
+               AND item_id = ?`,
+          ).bind(input.userId, input.deviceId, row.itemId),
+        );
+        statements.push(
+          this.db.prepare(
+            `DELETE FROM user_icon_item_domain_heads
+             WHERE user_id = ?
+               AND device_id = ?
+               AND item_id = ?`,
+          ).bind(input.userId, input.deviceId, row.itemId),
+        );
+      }
+      statements.push(
+        this.db.prepare(
+          `DELETE FROM user_icon_reindex_sessions
+           WHERE user_id = ?
+             AND device_id = ?
+             AND generation_id = ?`,
+        ).bind(input.userId, input.deviceId, input.generationId),
+      );
+      if (typeof this.db.batch === 'function') {
+        await this.db.batch(statements);
+      } else {
+        await this.db.exec('BEGIN TRANSACTION');
+        try {
+          for (const statement of statements) {
+            await statement.run();
+          }
+          await this.db.exec('COMMIT');
+        } catch (error) {
+          try {
+            await this.db.exec('ROLLBACK');
+          } catch {
+            // Preserve original error.
+          }
+          throw error;
+        }
+      }
+      return { changed: true };
+    }
+    await executeOne(
+      this.db,
+      `DELETE FROM user_icon_reindex_sessions
+       WHERE user_id = ?
+         AND device_id = ?
+         AND generation_id = ?`,
+      [input.userId, input.deviceId, input.generationId],
+    );
+    return { changed: false };
+  }
+
+  async listEffectiveHostsByUserId(userId: string): Promise<string[]> {
+    const rows = await selectMany<{ host: string }>(
+      this.db,
+      `SELECT DISTINCT host AS host
+       FROM user_icon_item_domains
+       WHERE user_id = ?
+       ORDER BY host ASC`,
+      [userId],
+    );
+    return rows.map((entry) => entry.host);
+  }
+}
+
+class CloudflareIconIngestJobRepository implements IconIngestJobRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: IconIngestJobRecord): Promise<IconIngestJobRecord> {
+    const normalized: IconIngestJobRecord = {
+      ...record,
+      domain: record.domain.trim().toLowerCase(),
+      sha256: record.sha256.trim().toLowerCase(),
+      r2Key: record.r2Key.trim(),
+      objectId: record.objectId ?? null,
+      errorCode: record.errorCode ?? null,
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO icon_ingest_jobs (
+         job_id, user_id, domain, object_class, status, sha256, r2_key, object_id, error_code, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        normalized.jobId,
+        normalized.userId,
+        normalized.domain,
+        normalized.objectClass,
+        normalized.status,
+        normalized.sha256,
+        normalized.r2Key,
+        normalized.objectId,
+        normalized.errorCode,
+        normalized.createdAt,
+        normalized.updatedAt,
+      ],
+    );
+    return normalized;
+  }
+
+  async updateStatus(input: {
+    jobId: string;
+    status: IconIngestJobRecord['status'];
+    objectId?: string | null;
+    errorCode?: string | null;
+    updatedAt: string;
+  }): Promise<IconIngestJobRecord | null> {
+    const current = await this.findByJobId(input.jobId);
+    if (!current) {
+      return null;
+    }
+    const nextObjectId =
+      Object.prototype.hasOwnProperty.call(input, 'objectId') && input.objectId !== undefined
+        ? (input.objectId ?? null)
+        : current.objectId;
+    const nextErrorCode =
+      Object.prototype.hasOwnProperty.call(input, 'errorCode') && input.errorCode !== undefined
+        ? (input.errorCode ?? null)
+        : current.errorCode;
+    await executeOne(
+      this.db,
+      `UPDATE icon_ingest_jobs
+       SET status = ?,
+           object_id = ?,
+           error_code = ?,
+           updated_at = ?
+       WHERE job_id = ?`,
+      [input.status, nextObjectId, nextErrorCode, input.updatedAt, input.jobId],
+    );
+    return this.findByJobId(input.jobId);
+  }
+
+  async findByJobId(jobId: string): Promise<IconIngestJobRecord | null> {
+    return selectOne<IconIngestJobRecord>(
+      this.db,
+      `SELECT job_id AS jobId,
+              user_id AS userId,
+              domain AS domain,
+              object_class AS objectClass,
+              status AS status,
+              sha256 AS sha256,
+              r2_key AS r2Key,
+              object_id AS objectId,
+              error_code AS errorCode,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM icon_ingest_jobs
+       WHERE job_id = ?`,
+      [jobId],
+    );
+  }
+
+  async listByStatus(input: {
+    status: IconIngestJobRecord['status'];
+    limit: number;
+  }): Promise<IconIngestJobRecord[]> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(2_000, Math.trunc(input.limit))) : 200;
+    return selectMany<IconIngestJobRecord>(
+      this.db,
+      `SELECT job_id AS jobId,
+              user_id AS userId,
+              domain AS domain,
+              object_class AS objectClass,
+              status AS status,
+              sha256 AS sha256,
+              r2_key AS r2Key,
+              object_id AS objectId,
+              error_code AS errorCode,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM icon_ingest_jobs
+       WHERE status = ?
+       ORDER BY created_at ASC, job_id ASC
+       LIMIT ?`,
+      [input.status, safeLimit],
+    );
+  }
+
+  async delete(jobId: string): Promise<boolean> {
+    const changed = await executeOneWithChanges(
+      this.db,
+      `DELETE FROM icon_ingest_jobs
+       WHERE job_id = ?`,
+      [jobId],
+    );
+    return changed > 0;
   }
 }
 
@@ -3235,7 +4224,12 @@ export function createCloudflareVaultLiteStorage(input: {
   const webBootstrapGrants = new CloudflareWebBootstrapGrantRepository(input.db);
   const extensionSessionRecoverSecrets = new CloudflareExtensionSessionRecoverSecretRepository(input.db);
   const siteIconCache = new CloudflareSiteIconCacheRepository(input.db);
+  const automaticIconRegistry = new CloudflareAutomaticIconRegistryRepository(input.db);
   const manualSiteIconOverrides = new CloudflareManualSiteIconOverrideRepository(input.db);
+  const iconObjects = new CloudflareIconObjectRepository(input.db);
+  const userIconState = new CloudflareUserIconStateRepository(input.db);
+  const userIconItemDomains = new CloudflareUserIconItemDomainRepository(input.db);
+  const iconIngestJobs = new CloudflareIconIngestJobRepository(input.db);
   const passwordGeneratorHistory = new CloudflarePasswordGeneratorHistoryRepository(input.db);
   const realtimeOutbox = new CloudflareRealtimeOutboxRepository(input.db);
   const realtimeOneTimeTokens = new CloudflareRealtimeOneTimeTokenRepository(input.db);
@@ -3255,7 +4249,12 @@ export function createCloudflareVaultLiteStorage(input: {
     webBootstrapGrants,
     extensionSessionRecoverSecrets,
     siteIconCache,
+    automaticIconRegistry,
     manualSiteIconOverrides,
+    iconObjects,
+    userIconState,
+    userIconItemDomains,
+    iconIngestJobs,
     passwordGeneratorHistory,
     realtimeOutbox,
     realtimeOneTimeTokens,

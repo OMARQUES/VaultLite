@@ -55,15 +55,23 @@ const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
 const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
 const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
+const STORAGE_ICON_DOMAIN_REGISTRATION_KEY = 'vaultlite.icon_domain_registration.v1';
 const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
 const ICON_HYDRATION_START_COOLDOWN_MS = 5 * 60 * 1000;
+const ICON_STATE_HYDRATION_START_COOLDOWN_MS = 10_000;
+const ICONS_STATE_RETRY_COOLDOWN_MS = 10_000;
+const ICONS_STATE_QUERY_DOMAINS_MAX = 500;
+const ICON_DOMAIN_SYNC_CONCURRENCY = 6;
+const ICON_DOMAIN_SYNC_BATCH_SIZE = 120;
 const MANUAL_ICON_HYDRATE_COOLDOWN_MS = 5 * 60 * 1000;
 const ICON_CACHE_STORAGE_KEY = 'vaultlite.icon_cache.v1';
 const ICON_CACHE_PERSIST_DEBOUNCE_MS = 1_000;
 const ICON_CACHE_MAX_ENTRIES = 160;
 const ICON_CACHE_MAX_DATA_URL_LENGTH = 128 * 1024;
+const ICON_DOMAIN_REGISTRATION_MAX_ENTRIES = 20_000;
+const ICON_DOMAIN_REGISTRATION_PERSIST_DEBOUNCE_MS = 750;
 const STORAGE_UNLOCK_CONTEXT_KEY = 'vaultlite.unlocked_context.v1';
 const STORAGE_RUNTIME_STATE_KEY = 'vaultlite.runtime_state.v1';
 const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
@@ -88,6 +96,11 @@ const REALTIME_KEEPALIVE_INTERVAL_MS = 20_000;
 const REALTIME_METADATA_REFRESH_INTERVAL_MS = 5 * 60_000;
 const REALTIME_POPUP_NOTIFY_DEBOUNCE_MS = 150;
 const REALTIME_POPUP_SIGNAL_STORAGE_KEY = 'vaultlite.realtime.popup.signal.v1';
+const REALTIME_ICONS_RESYNC_DEBOUNCE_MS = 1_500;
+const REALTIME_ICONS_RESYNC_COOLDOWN_MS = 10_000;
+const REALTIME_CURSOR_PERSIST_DEBOUNCE_MS = 2_000;
+const ICON_DOMAIN_SYNC_BACKOFF_BASE_MS = 3_000;
+const ICON_DOMAIN_SYNC_BACKOFF_MAX_MS = 60_000;
 
 const state = {
   phase: 'anonymous',
@@ -152,6 +165,9 @@ const iconDiscoverLastAttemptByDomain = new Map();
 const iconResolveMissByDomain = new Map();
 let iconHydrationInFlight = null;
 let lastIconHydrationStartedAt = 0;
+let lastIconsStateFailureAt = 0;
+let iconsStateEtag = null;
+let manualIconsEtag = null;
 let lastManualIconHydratedAt = 0;
 let manualIconHydrationInFlight = null;
 let iconCachePersistTimer = null;
@@ -176,10 +192,17 @@ let manualIconSyncQueueProcessInFlight = null;
 let runtimeInitializationPromise = null;
 let runtimeInitialized = false;
 let lastCredentialCacheSource = 'none';
+const iconDomainRegistrationByItemId = new Map();
+let iconDomainRegistrationPersistTimer = null;
+let iconDomainRegistrationPersistInFlight = null;
+let lastIconDomainBatchFallbackLogAt = 0;
+let iconDomainSyncBackoffUntil = 0;
+let iconDomainSyncBackoffAttempt = 0;
 let realtimeMetadataLoadedAt = 0;
 const realtimeRuntime = {
   enabled: false,
   wsBaseUrl: null,
+  iconsAssetBaseUrl: null,
   authLeaseSeconds: 600,
   heartbeatIntervalMs: 25_000,
   flags: null,
@@ -202,6 +225,13 @@ const realtimeConnection = {
 };
 let realtimePopupNotifyTimer = null;
 const realtimePopupNotifyDomains = new Set();
+let realtimeIconsResyncTimer = null;
+let realtimeIconsResyncInFlight = null;
+let realtimeIconsResyncQueued = false;
+let realtimeIconsResyncIncludeManual = false;
+let lastRealtimeIconsResyncAt = 0;
+const realtimeIconsResyncDomains = new Set();
+let realtimeCursorPersistTimer = null;
 
 function sessionStorageArea() {
   if (!chrome.storage || !chrome.storage.session) {
@@ -212,6 +242,104 @@ function sessionStorageArea() {
 
 function extensionOrigin() {
   return chrome.runtime.getURL('/').replace(/\/+$/u, '');
+}
+
+function iconDomainRegistrationCacheKey() {
+  const username =
+    typeof state.username === 'string' && state.username.length > 0
+      ? state.username
+      : typeof trustedState?.username === 'string' && trustedState.username.length > 0
+        ? trustedState.username
+        : null;
+  const deviceId =
+    typeof state.deviceId === 'string' && state.deviceId.length > 0
+      ? state.deviceId
+      : typeof trustedState?.deviceId === 'string' && trustedState.deviceId.length > 0
+        ? trustedState.deviceId
+        : null;
+  const deploymentFingerprint =
+    typeof state.deploymentFingerprint === 'string' && state.deploymentFingerprint.length > 0
+      ? state.deploymentFingerprint
+      : typeof trustedState?.deploymentFingerprint === 'string' && trustedState.deploymentFingerprint.length > 0
+        ? trustedState.deploymentFingerprint
+        : null;
+  if (!username || !deviceId || !deploymentFingerprint) {
+    return null;
+  }
+  return `${deploymentFingerprint}:${username}:${deviceId}`;
+}
+
+async function persistIconDomainRegistrationCacheBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  const cacheKey = iconDomainRegistrationCacheKey();
+  if (!cacheKey || iconDomainRegistrationByItemId.size === 0) {
+    try {
+      await sessionStorage.remove(STORAGE_ICON_DOMAIN_REGISTRATION_KEY);
+    } catch {
+      // Best effort only.
+    }
+    return;
+  }
+  const entries = {};
+  let written = 0;
+  for (const [itemId, signature] of iconDomainRegistrationByItemId.entries()) {
+    if (written >= ICON_DOMAIN_REGISTRATION_MAX_ENTRIES) {
+      break;
+    }
+    if (typeof itemId !== 'string' || itemId.length === 0) {
+      continue;
+    }
+    if (typeof signature !== 'string' || signature.length === 0 || signature.length > 1024) {
+      continue;
+    }
+    entries[itemId] = signature;
+    written += 1;
+  }
+  try {
+    await sessionStorage.set({
+      [STORAGE_ICON_DOMAIN_REGISTRATION_KEY]: {
+        cacheKey,
+        entries,
+        updatedAt: nowIso(),
+      },
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+function scheduleIconDomainRegistrationCachePersist() {
+  if (iconDomainRegistrationPersistTimer !== null) {
+    return;
+  }
+  iconDomainRegistrationPersistTimer = setTimeout(() => {
+    iconDomainRegistrationPersistTimer = null;
+    if (iconDomainRegistrationPersistInFlight) {
+      return;
+    }
+    iconDomainRegistrationPersistInFlight = persistIconDomainRegistrationCacheBestEffort().finally(() => {
+      iconDomainRegistrationPersistInFlight = null;
+    });
+  }, ICON_DOMAIN_REGISTRATION_PERSIST_DEBOUNCE_MS);
+}
+
+async function clearPersistedIconDomainRegistrationCacheBestEffort() {
+  if (iconDomainRegistrationPersistTimer !== null) {
+    clearTimeout(iconDomainRegistrationPersistTimer);
+    iconDomainRegistrationPersistTimer = null;
+  }
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  try {
+    await sessionStorage.remove(STORAGE_ICON_DOMAIN_REGISTRATION_KEY);
+  } catch {
+    // Best effort only.
+  }
 }
 
 function toBase64Url(bytes) {
@@ -605,6 +733,17 @@ function applyRealtimeRuntimeMetadata(metadata) {
       : flags.realtime_apply_extension_v1 === true;
   realtimeRuntime.enabled = Boolean(realtime?.enabled) && wsFlagEnabled && applyFlagEnabled;
   realtimeRuntime.wsBaseUrl = typeof realtime?.wsBaseUrl === 'string' ? realtime.wsBaseUrl : null;
+  const explicitIconsAssetBaseUrl =
+    typeof metadata?.iconsAssetBaseUrl === 'string' && metadata.iconsAssetBaseUrl.length > 0
+      ? metadata.iconsAssetBaseUrl
+      : null;
+  let metadataServerOrigin = null;
+  try {
+    metadataServerOrigin = canonicalizeServerUrl(String(metadata?.serverUrl ?? ''));
+  } catch {
+    metadataServerOrigin = null;
+  }
+  realtimeRuntime.iconsAssetBaseUrl = explicitIconsAssetBaseUrl || metadataServerOrigin || state.serverOrigin || null;
   realtimeRuntime.authLeaseSeconds = Number.isFinite(realtime?.authLeaseSeconds)
     ? Math.max(60, Math.trunc(realtime.authLeaseSeconds))
     : 600;
@@ -690,6 +829,23 @@ function closeRealtimeSocket(code = 1000, reason = 'client_stop', markIntentiona
   } finally {
     realtimeConnection.socket = null;
   }
+}
+
+function clearRealtimeCursorPersistTimer() {
+  if (realtimeCursorPersistTimer !== null) {
+    clearTimeout(realtimeCursorPersistTimer);
+    realtimeCursorPersistTimer = null;
+  }
+}
+
+function scheduleRealtimeCursorPersist() {
+  if (realtimeCursorPersistTimer !== null) {
+    return;
+  }
+  realtimeCursorPersistTimer = setTimeout(() => {
+    realtimeCursorPersistTimer = null;
+    void persistRuntimeState();
+  }, REALTIME_CURSOR_PERSIST_DEBOUNCE_MS);
 }
 
 function flushRealtimeAck() {
@@ -802,6 +958,117 @@ function schedulePopupRealtimeNotification(domains) {
   }, REALTIME_POPUP_NOTIFY_DEBOUNCE_MS);
 }
 
+async function refreshIconCacheFromRealtimeSignal() {
+  return refreshIconCacheFromRealtimeDomains([]);
+}
+
+async function refreshIconCacheFromRealtimeDomains(domains) {
+  const activeTab = await fetchActiveTab();
+  const activePageUrl = activeTab?.tabUrl ?? '';
+  const explicitDomains = Array.isArray(domains)
+    ? Array.from(
+        new Set(
+          domains
+            .map((domain) => normalizeIconDomainForApi(domain))
+            .filter((domain) => Boolean(domain)),
+        ),
+      )
+    : [];
+
+  if (explicitDomains.length > 0) {
+    await hydrateCanonicalIconsForDomains(explicitDomains, []);
+    return;
+  }
+
+  const projectedItems =
+    credentialsCache.credentials.length > 0
+      ? projectCredentialsForPage(activePageUrl)
+      : projectCredentialsFromSessionCacheForPage(activePageUrl);
+  const projectedDomains = collectProjectedDomains(projectedItems);
+  if (projectedDomains.length === 0) {
+    return;
+  }
+  await hydrateCanonicalIconsForDomains(projectedDomains, projectedItems);
+}
+
+function isLocalRealtimeEventSource(sourceDeviceId) {
+  return (
+    typeof sourceDeviceId === 'string' &&
+    sourceDeviceId.length > 0 &&
+    typeof state.deviceId === 'string' &&
+    state.deviceId.length > 0 &&
+    sourceDeviceId === state.deviceId
+  );
+}
+
+function queueRealtimeIconsResync(input = {}) {
+  if (Array.isArray(input.domains)) {
+    for (const domain of input.domains) {
+      const normalized = normalizeIconDomainForApi(domain);
+      if (normalized) {
+        realtimeIconsResyncDomains.add(normalized);
+      }
+    }
+  }
+  if (input.includeManual === true) {
+    realtimeIconsResyncIncludeManual = true;
+  }
+  if (realtimeIconsResyncTimer !== null) {
+    return;
+  }
+  realtimeIconsResyncTimer = setTimeout(() => {
+    realtimeIconsResyncTimer = null;
+    void runRealtimeIconsResync();
+  }, REALTIME_ICONS_RESYNC_DEBOUNCE_MS);
+}
+
+async function runRealtimeIconsResync() {
+  if (realtimeIconsResyncInFlight) {
+    realtimeIconsResyncQueued = true;
+    return;
+  }
+  const elapsedMs = Date.now() - lastRealtimeIconsResyncAt;
+  if (elapsedMs < REALTIME_ICONS_RESYNC_COOLDOWN_MS) {
+    const waitMs = Math.max(1, REALTIME_ICONS_RESYNC_COOLDOWN_MS - elapsedMs);
+    if (realtimeIconsResyncTimer === null) {
+      realtimeIconsResyncTimer = setTimeout(() => {
+        realtimeIconsResyncTimer = null;
+        void runRealtimeIconsResync();
+      }, waitMs);
+    }
+    return;
+  }
+
+  const domains = Array.from(realtimeIconsResyncDomains);
+  realtimeIconsResyncDomains.clear();
+  const includeManual = realtimeIconsResyncIncludeManual;
+  realtimeIconsResyncIncludeManual = false;
+  lastRealtimeIconsResyncAt = Date.now();
+
+  realtimeIconsResyncInFlight = (async () => {
+    if (includeManual) {
+      await hydrateManualIconsFromServerBestEffort();
+    }
+    await refreshIconCacheFromRealtimeDomains(domains);
+    const popupDomains = ['icons_state'];
+    if (includeManual) {
+      popupDomains.push('icons_manual');
+    }
+    schedulePopupRealtimeNotification(popupDomains);
+  })()
+    .catch(() => {
+      // Best effort only.
+    })
+    .finally(() => {
+      realtimeIconsResyncInFlight = null;
+      if (realtimeIconsResyncQueued || realtimeIconsResyncDomains.size > 0 || realtimeIconsResyncIncludeManual) {
+        realtimeIconsResyncQueued = false;
+        queueRealtimeIconsResync();
+      }
+    });
+  await realtimeIconsResyncInFlight;
+}
+
 function refreshFromRealtimeDomains(domains) {
   if (!Array.isArray(domains)) {
     return;
@@ -819,16 +1086,24 @@ function refreshFromRealtimeDomains(domains) {
       .catch(() => {});
   }
   if (domains.includes('icons_manual')) {
-    void hydrateManualIconsFromServerBestEffort()
-      .then(() => {
-        schedulePopupRealtimeNotification(['icons_manual']);
-      })
-      .catch(() => {});
+    queueRealtimeIconsResync({
+      includeManual: true,
+    });
+  }
+  if (domains.includes('icons_state')) {
+    queueRealtimeIconsResync();
   }
 }
 
-function handleRealtimeServerEventTopic(topic) {
-  if (typeof topic !== 'string') {
+function handleRealtimeServerEvent(eventEnvelope) {
+  if (!eventEnvelope || typeof eventEnvelope !== 'object') {
+    return;
+  }
+  if (isLocalRealtimeEventSource(eventEnvelope.sourceDeviceId)) {
+    return;
+  }
+  const topic = typeof eventEnvelope.topic === 'string' ? eventEnvelope.topic : '';
+  if (!topic) {
     return;
   }
   if (topic.startsWith('vault.item.')) {
@@ -845,11 +1120,20 @@ function handleRealtimeServerEventTopic(topic) {
     return;
   }
   if (topic.startsWith('icons.')) {
-    void hydrateManualIconsFromServerBestEffort()
-      .then(() => {
-        schedulePopupRealtimeNotification(['icons_manual']);
-      })
-      .catch(() => {});
+    const payloadDomains = [];
+    const eventPayload = eventEnvelope.payload;
+    if (eventPayload && typeof eventPayload === 'object') {
+      if (typeof eventPayload.domain === 'string') {
+        payloadDomains.push(eventPayload.domain);
+      }
+      if (Array.isArray(eventPayload.domains)) {
+        payloadDomains.push(...eventPayload.domains);
+      }
+    }
+    queueRealtimeIconsResync({
+      domains: payloadDomains,
+      includeManual: topic.startsWith('icons.manual.'),
+    });
     return;
   }
   if (topic.startsWith('password_history.') || topic.startsWith('vault.attachment.')) {
@@ -971,6 +1255,7 @@ async function connectRealtimeSocket() {
       if (parsed.type === 'hello') {
         if (Number.isFinite(parsed.cursor)) {
           realtimeConnection.cursor = Math.max(realtimeConnection.cursor, Math.trunc(parsed.cursor));
+          scheduleRealtimeCursorPersist();
         }
         return;
       }
@@ -983,7 +1268,8 @@ async function connectRealtimeSocket() {
         realtimeConnection.pendingAckSeq = Math.max(realtimeConnection.pendingAckSeq, seq);
         realtimeConnection.ackBatchCount += 1;
         scheduleRealtimeAck();
-        handleRealtimeServerEventTopic(parsed.event.topic);
+        scheduleRealtimeCursorPersist();
+        handleRealtimeServerEvent(parsed.event);
         return;
       }
       if (parsed.type === 'resync_required') {
@@ -1053,6 +1339,8 @@ function stopRealtimeSocket() {
   realtimeConnection.reconnectAttempt = 0;
   realtimeConnection.connecting = false;
   closeRealtimeSocket(1000, 'client_stop', true);
+  clearRealtimeCursorPersistTimer();
+  void persistRuntimeState();
 }
 
 function updateRealtimeLifecycle() {
@@ -1138,6 +1426,8 @@ function clearSensitiveMemory() {
   cacheWarmupInFlight = null;
   localCacheLoadInFlight = null;
   lastEmptyCacheRetryAt = 0;
+  iconsStateEtag = null;
+  manualIconsEtag = null;
   if (idleLockTimer !== null) {
     clearTimeout(idleLockTimer);
     idleLockTimer = null;
@@ -1207,6 +1497,7 @@ async function persistRuntimeState() {
       recoverRetryState: normalizeRecoverRetryState(recoverRetryState),
       lastIconHydrationStartedAt: normalizeRuntimeTimestamp(lastIconHydrationStartedAt),
       lastManualIconHydratedAt: normalizeRuntimeTimestamp(lastManualIconHydratedAt),
+      realtimeCursor: normalizeRuntimeTimestamp(realtimeConnection.cursor),
       updatedAt: nowIso(),
     },
   });
@@ -1268,13 +1559,22 @@ async function persistSessionToken() {
 }
 
 async function clearExtensionSessionToken() {
-  if (!sessionToken) {
+  const hadSessionToken = Boolean(sessionToken);
+  sessionToken = null;
+  state.sessionExpiresAt = null;
+  iconsStateEtag = null;
+  manualIconsEtag = null;
+  realtimeConnection.cursor = 0;
+  clearRealtimeCursorPersistTimer();
+  iconDomainRegistrationByItemId.clear();
+  await clearPersistedIconDomainRegistrationCacheBestEffort();
+  if (!hadSessionToken) {
+    void persistRuntimeState();
     updateRealtimeLifecycle();
     return;
   }
-  sessionToken = null;
-  state.sessionExpiresAt = null;
   await persistSessionToken();
+  await persistRuntimeState();
   await reconcileUnlockGrantApprovalAlarm();
   updateRealtimeLifecycle();
 }
@@ -1901,6 +2201,7 @@ async function loadPersistedState() {
         STORAGE_UNLOCK_CONTEXT_KEY,
         STORAGE_RUNTIME_STATE_KEY,
         STORAGE_SESSION_LIST_CACHE_KEY,
+        STORAGE_ICON_DOMAIN_REGISTRATION_KEY,
       ]);
     } catch {
       sessionState = {};
@@ -1916,6 +2217,7 @@ async function loadPersistedState() {
   const unlockContextEntry = sessionState?.[STORAGE_UNLOCK_CONTEXT_KEY] ?? null;
   const runtimeStateEntry = sessionState?.[STORAGE_RUNTIME_STATE_KEY] ?? null;
   const sessionListProjectionEntry = sessionState?.[STORAGE_SESSION_LIST_CACHE_KEY] ?? null;
+  const iconDomainRegistrationEntry = sessionState?.[STORAGE_ICON_DOMAIN_REGISTRATION_KEY] ?? null;
 
   state.serverOrigin = config?.serverOrigin ?? null;
   state.deploymentFingerprint = trusted?.deploymentFingerprint ?? config?.deploymentFingerprint ?? null;
@@ -1961,6 +2263,7 @@ async function loadPersistedState() {
   recoverRetryState = normalizeRecoverRetryState(runtimeStateEntry?.recoverRetryState);
   lastIconHydrationStartedAt = normalizeRuntimeTimestamp(runtimeStateEntry?.lastIconHydrationStartedAt);
   lastManualIconHydratedAt = normalizeRuntimeTimestamp(runtimeStateEntry?.lastManualIconHydratedAt);
+  realtimeConnection.cursor = normalizeRuntimeTimestamp(runtimeStateEntry?.realtimeCursor);
   if (
     sessionListProjectionEntry &&
     typeof sessionListProjectionEntry === 'object' &&
@@ -1976,6 +2279,32 @@ async function loadPersistedState() {
     };
   } else {
     clearSessionListProjectionCacheInMemory();
+  }
+
+  iconDomainRegistrationByItemId.clear();
+  const expectedIconRegistrationCacheKey = iconDomainRegistrationCacheKey();
+  if (
+    expectedIconRegistrationCacheKey &&
+    iconDomainRegistrationEntry &&
+    typeof iconDomainRegistrationEntry === 'object' &&
+    iconDomainRegistrationEntry.cacheKey === expectedIconRegistrationCacheKey &&
+    iconDomainRegistrationEntry.entries &&
+    typeof iconDomainRegistrationEntry.entries === 'object'
+  ) {
+    let loaded = 0;
+    for (const [itemId, signature] of Object.entries(iconDomainRegistrationEntry.entries)) {
+      if (loaded >= ICON_DOMAIN_REGISTRATION_MAX_ENTRIES) {
+        break;
+      }
+      if (typeof itemId !== 'string' || itemId.length === 0) {
+        continue;
+      }
+      if (typeof signature !== 'string' || signature.length === 0 || signature.length > 1024) {
+        continue;
+      }
+      iconDomainRegistrationByItemId.set(itemId, signature);
+      loaded += 1;
+    }
   }
 
   linkPairingSession = null;
@@ -3300,13 +3629,21 @@ function truncateText(value, maxLength) {
   return `${value.slice(0, Math.max(1, maxLength - 1))}…`;
 }
 
+function normalizeIconDomainForApi(rawDomain) {
+  const safeDomain = sanitizeIconHost(String(rawDomain ?? ''));
+  if (!safeDomain) {
+    return null;
+  }
+  return /^[a-z0-9.-]{1,255}$/u.test(safeDomain) ? safeDomain : null;
+}
+
 function normalizeIconDomainFromUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
     return null;
   }
   try {
     const parsed = new URL(rawUrl);
-    return sanitizeIconHost(parsed.hostname);
+    return normalizeIconDomainForApi(parsed.hostname);
   } catch {
     return null;
   }
@@ -3363,6 +3700,16 @@ function normalizePersistedIconCacheEntry(entry) {
     domain: safeDomain,
     dataUrl,
     sourceUrl: typeof entry.sourceUrl === 'string' ? entry.sourceUrl : null,
+    objectClass:
+      entry.objectClass === 'manual_private' || entry.objectClass === 'automatic_public'
+        ? entry.objectClass
+        : null,
+    objectId:
+      typeof entry.objectId === 'string' && entry.objectId.trim().length > 0 ? entry.objectId.trim() : null,
+    objectSha256:
+      typeof entry.objectSha256 === 'string' && /^[a-f0-9]{64}$/u.test(entry.objectSha256.trim().toLowerCase())
+        ? entry.objectSha256.trim().toLowerCase()
+        : null,
     updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : nowIso(),
     cachedAt,
   };
@@ -3471,6 +3818,9 @@ function cacheResolvedIcons(icons) {
       domain: safeDomain,
       dataUrl,
       sourceUrl: typeof icon.sourceUrl === 'string' ? icon.sourceUrl : null,
+      objectClass: null,
+      objectId: null,
+      objectSha256: null,
       updatedAt: typeof icon.updatedAt === 'string' ? icon.updatedAt : nowIso(),
       cachedAt: now,
     };
@@ -3479,6 +3829,9 @@ function cacheResolvedIcons(icons) {
       previous &&
       previous.dataUrl === cacheEntry.dataUrl &&
       previous.sourceUrl === cacheEntry.sourceUrl &&
+      previous.objectClass === cacheEntry.objectClass &&
+      previous.objectId === cacheEntry.objectId &&
+      previous.objectSha256 === cacheEntry.objectSha256 &&
       previous.updatedAt === cacheEntry.updatedAt;
     canonicalIconCacheByDomain.set(safeDomain, cacheEntry);
     if (!sameEntry) {
@@ -3489,6 +3842,491 @@ function cacheResolvedIcons(icons) {
   if (changed) {
     scheduleCanonicalIconCachePersist();
   }
+}
+
+function isIconsStateSyncEnabled() {
+  return realtimeRuntime?.flags?.icons_state_sync_v1 === true;
+}
+
+function iconObjectCacheKeyFromStateRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+  if (record.objectClass === 'automatic_public' && typeof record.objectSha256 === 'string') {
+    const sha = record.objectSha256.trim().toLowerCase();
+    return /^[a-f0-9]{64}$/u.test(sha) ? `a:${sha}` : null;
+  }
+  if (record.objectClass === 'manual_private' && typeof record.objectId === 'string') {
+    const objectId = record.objectId.trim();
+    return objectId.length > 0 ? `m:${objectId}` : null;
+  }
+  return null;
+}
+
+function iconObjectUrlFromStateRecord(record, manualTicketByObjectId) {
+  const baseUrl = realtimeRuntime.iconsAssetBaseUrl || state.serverOrigin;
+  if (!baseUrl) {
+    return null;
+  }
+  if (record.objectClass === 'automatic_public' && typeof record.objectSha256 === 'string') {
+    const sha = record.objectSha256.trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/u.test(sha)) {
+      return null;
+    }
+    return `${baseUrl.replace(/\/+$/u, '')}/icons/a/${sha}`;
+  }
+  if (record.objectClass === 'manual_private' && typeof record.objectId === 'string') {
+    const objectId = record.objectId.trim();
+    if (!objectId) {
+      return null;
+    }
+    const ticket = manualTicketByObjectId.get(objectId);
+    if (!ticket) {
+      return null;
+    }
+    return `${baseUrl.replace(/\/+$/u, '')}/icons/m/${objectId}?ticket=${encodeURIComponent(ticket)}`;
+  }
+  return null;
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, Math.min(index + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function fetchIconObjectDataUrl(objectUrl) {
+  try {
+    const response = await fetch(objectUrl, {
+      method: 'GET',
+      credentials: 'omit',
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const contentTypeHeader = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    const contentType = contentTypeHeader.startsWith('image/') ? contentTypeHeader : 'image/png';
+    const arrayBuffer = await response.arrayBuffer();
+    if (!arrayBuffer || arrayBuffer.byteLength <= 0) {
+      return null;
+    }
+    const base64 = bytesToBase64(new Uint8Array(arrayBuffer));
+    const dataUrl = `data:${contentType};base64,${base64}`;
+    return validateAutomaticIconDataUrl(dataUrl) ? dataUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+function collectIconHostsFromCredential(credential) {
+  if (!credential || credential.itemType !== 'login' || !Array.isArray(credential.urls)) {
+    return [];
+  }
+  const hosts = new Set();
+  for (const rawUrl of credential.urls) {
+    const safeHost = normalizeIconDomainFromUrl(rawUrl);
+    if (safeHost) {
+      hosts.add(safeHost);
+    }
+  }
+  return Array.from(hosts).sort((left, right) => left.localeCompare(right));
+}
+
+async function runWithConcurrency(tasks, concurrency) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return;
+  }
+  const safeConcurrency = Math.max(1, Math.min(Math.trunc(concurrency) || 1, tasks.length));
+  const workers = Array.from({ length: safeConcurrency }, async (_, workerIndex) => {
+    for (let index = workerIndex; index < tasks.length; index += safeConcurrency) {
+      await tasks[index]();
+    }
+  });
+  await Promise.allSettled(workers);
+}
+
+function shouldFallbackToLegacyIconsState(error) {
+  const code = String(error?.code ?? '');
+  const message =
+    typeof error?.message === 'string'
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+  return code === 'feature_disabled' || code === 'request_failed_404' || message.includes('request_failed_404');
+}
+
+function isIconDomainSyncPayloadError(error) {
+  const status = Number(error?.status ?? 0);
+  const code = String(error?.code ?? '');
+  const message = typeof error?.message === 'string' ? error.message : '';
+  return (
+    status === 400 ||
+    status === 413 ||
+    code === 'request_body_too_large' ||
+    code === 'invalid_input' ||
+    message.includes('request_body_too_large')
+  );
+}
+
+function shouldBackoffIconDomainSync(error) {
+  const status = Number(error?.status ?? 0);
+  const code = String(error?.code ?? '');
+  if (status === 429 || status >= 500) {
+    return true;
+  }
+  return (
+    code === 'request_timeout' ||
+    code === 'rate_limited' ||
+    code === 'request_failed_429' ||
+    code === 'request_failed_500' ||
+    code === 'request_failed_502' ||
+    code === 'request_failed_503' ||
+    code === 'request_failed_504'
+  );
+}
+
+function nextIconDomainSyncBackoffMs() {
+  iconDomainSyncBackoffAttempt = Math.max(1, iconDomainSyncBackoffAttempt + 1);
+  const exponent = Math.min(iconDomainSyncBackoffAttempt - 1, 6);
+  const baseMs = Math.min(ICON_DOMAIN_SYNC_BACKOFF_BASE_MS * 2 ** exponent, ICON_DOMAIN_SYNC_BACKOFF_MAX_MS);
+  const jitterMs = Math.round(Math.random() * Math.max(250, baseMs * 0.2));
+  return baseMs + jitterMs;
+}
+
+function markIconDomainSyncSuccess() {
+  iconDomainSyncBackoffAttempt = 0;
+  iconDomainSyncBackoffUntil = 0;
+}
+
+function selectDomainsForIconsState(domains) {
+  const uniqueDomains = Array.from(
+    new Set(
+      domains
+        .map((domain) => normalizeIconDomainForApi(domain))
+        .filter((domain) => Boolean(domain)),
+    ),
+  );
+  if (uniqueDomains.length <= ICONS_STATE_QUERY_DOMAINS_MAX) {
+    return uniqueDomains;
+  }
+  const missing = [];
+  const known = [];
+  for (const domain of uniqueDomains) {
+    const hasKnownIcon = iconDomainAliases(domain).some((alias) => Boolean(iconCacheEntryForDomain(alias)));
+    if (hasKnownIcon) {
+      known.push(domain);
+    } else {
+      missing.push(domain);
+    }
+  }
+  return [...missing, ...known].slice(0, ICONS_STATE_QUERY_DOMAINS_MAX);
+}
+
+async function syncIconStateDomainRegistrations(projectedItems) {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !isIconsStateSyncEnabled()) {
+    return;
+  }
+  if (Date.now() < iconDomainSyncBackoffUntil) {
+    return;
+  }
+  const credentialById = new Map();
+  for (const credential of credentialsCache.credentials) {
+    credentialById.set(credential.itemId, credential);
+  }
+  let registrationChanged = false;
+  for (const itemId of Array.from(iconDomainRegistrationByItemId.keys())) {
+    if (!credentialById.has(itemId)) {
+      iconDomainRegistrationByItemId.delete(itemId);
+      registrationChanged = true;
+    }
+  }
+  const pendingEntries = [];
+  for (const projected of projectedItems) {
+    const credential = credentialById.get(projected?.itemId);
+    if (!credential || credential.itemType !== 'login') {
+      continue;
+    }
+    const hosts = collectIconHostsFromCredential(credential);
+    if (hosts.length === 0) {
+      continue;
+    }
+    const signature = `${credential.revision}:${hosts.join(',')}`;
+    if (iconDomainRegistrationByItemId.get(credential.itemId) === signature) {
+      continue;
+    }
+    pendingEntries.push({
+      itemId: credential.itemId,
+      itemRevision: credential.revision,
+      hosts,
+      signature,
+    });
+  }
+  if (pendingEntries.length === 0) {
+    if (registrationChanged) {
+      scheduleIconDomainRegistrationCachePersist();
+    }
+    return;
+  }
+
+  const fallbackPerItemSync = async (entries) => {
+    const updateTasks = entries.map((entry) => async () => {
+      try {
+        await apiClient.putIconDomainsItem({
+          bearerToken: sessionToken,
+          itemId: entry.itemId,
+          itemRevision: entry.itemRevision,
+          hosts: entry.hosts,
+        });
+        iconDomainRegistrationByItemId.set(entry.itemId, entry.signature);
+        registrationChanged = true;
+      } catch {
+        // Keep previous signature and retry later.
+      }
+    });
+    await runWithConcurrency(updateTasks, ICON_DOMAIN_SYNC_CONCURRENCY);
+  };
+
+  const syncChunkWithAdaptiveBatch = async (entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return;
+    }
+    try {
+      const response = await apiClient.putIconDomainsBatch({
+        bearerToken: sessionToken,
+        entries: entries.map((entry) => ({
+          itemId: entry.itemId,
+          itemRevision: entry.itemRevision,
+          hosts: entry.hosts,
+        })),
+      });
+      const staleItemIds = new Set(
+        Array.isArray(response?.entries)
+          ? response.entries
+              .filter((entry) => entry?.result === 'success_no_op_stale_revision')
+              .map((entry) => entry.itemId)
+          : [],
+      );
+      for (const entry of entries) {
+        if (staleItemIds.has(entry.itemId)) {
+          continue;
+        }
+        iconDomainRegistrationByItemId.set(entry.itemId, entry.signature);
+        registrationChanged = true;
+      }
+      return;
+    } catch (error) {
+      if (!isIconDomainSyncPayloadError(error)) {
+        throw error;
+      }
+      if (entries.length <= 1) {
+        await fallbackPerItemSync(entries);
+        return;
+      }
+      const middle = Math.ceil(entries.length / 2);
+      await syncChunkWithAdaptiveBatch(entries.slice(0, middle));
+      await syncChunkWithAdaptiveBatch(entries.slice(middle));
+    }
+  };
+
+  for (let index = 0; index < pendingEntries.length; index += ICON_DOMAIN_SYNC_BATCH_SIZE) {
+    const chunk = pendingEntries.slice(index, index + ICON_DOMAIN_SYNC_BATCH_SIZE);
+    try {
+      await syncChunkWithAdaptiveBatch(chunk);
+      markIconDomainSyncSuccess();
+    } catch (error) {
+      const now = Date.now();
+      if (now - lastIconDomainBatchFallbackLogAt > 30_000) {
+        lastIconDomainBatchFallbackLogAt = now;
+        const status = Number(error?.status ?? 0);
+        const code = String(error?.code ?? '');
+        const detail = typeof error?.message === 'string' ? error.message : '';
+        console.warn('[vaultlite][icons] domains batch sync failed; using per-item fallback', {
+          status: Number.isFinite(status) ? status : 0,
+          code,
+          detail,
+          chunkSize: chunk.length,
+        });
+      }
+      if (shouldBackoffIconDomainSync(error)) {
+        iconDomainSyncBackoffUntil = Date.now() + nextIconDomainSyncBackoffMs();
+        break;
+      }
+      await fallbackPerItemSync(chunk);
+    }
+  }
+  if (registrationChanged) {
+    scheduleIconDomainRegistrationCachePersist();
+  }
+}
+
+async function hydrateCanonicalIconsForDomainsFromState(domains, projectedItems) {
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !Array.isArray(domains) || domains.length === 0) {
+    return;
+  }
+  if (Date.now() - lastIconsStateFailureAt < ICONS_STATE_RETRY_COOLDOWN_MS) {
+    return;
+  }
+  await syncIconStateDomainRegistrations(projectedItems);
+  const uniqueDomains = selectDomainsForIconsState(domains);
+  if (uniqueDomains.length === 0) {
+    return;
+  }
+
+  const response = await apiClient.getIconsState({
+    bearerToken: sessionToken,
+    domains: uniqueDomains,
+    etag: iconsStateEtag || undefined,
+  });
+  if (response?.status === 'not_modified') {
+    if (typeof response?.etag === 'string' && response.etag.length > 0) {
+      iconsStateEtag = response.etag;
+    }
+    return;
+  }
+  const payload = response?.payload && typeof response.payload === 'object' ? response.payload : null;
+  if (!payload || !Array.isArray(payload.records)) {
+    return;
+  }
+  if (typeof response?.etag === 'string' && response.etag.length > 0) {
+    iconsStateEtag = response.etag;
+  } else if (typeof payload.etag === 'string' && payload.etag.length > 0) {
+    iconsStateEtag = payload.etag;
+  }
+
+  const manualObjectIds = Array.from(
+    new Set(
+      payload.records
+        .filter(
+          (record) =>
+            record &&
+            record.status === 'ready' &&
+            record.objectClass === 'manual_private' &&
+            typeof record.objectId === 'string' &&
+            record.objectId.trim().length > 0,
+        )
+        .map((record) => record.objectId.trim())
+        .filter(
+          (objectId) =>
+            !Array.from(canonicalIconCacheByDomain.values()).some(
+              (entry) => entry.objectClass === 'manual_private' && entry.objectId === objectId,
+            ),
+        ),
+    ),
+  );
+  const manualTicketByObjectId = new Map();
+  if (manualObjectIds.length > 0) {
+    try {
+      const ticketResponse = await apiClient.issueIconObjectTickets({
+        bearerToken: sessionToken,
+        objectIds: manualObjectIds,
+        ttlSeconds: 300,
+      });
+      for (const entry of ticketResponse?.tickets ?? []) {
+        if (entry?.objectId && entry?.ticket) {
+          manualTicketByObjectId.set(entry.objectId, entry.ticket);
+        }
+      }
+    } catch {
+      // Manual-private icons remain on previous cache entry until next refresh.
+    }
+  }
+
+  let changed = false;
+  const now = Date.now();
+  for (const record of payload.records) {
+    if (!record || typeof record !== 'object') {
+      continue;
+    }
+    const safeDomain = normalizeIconDomainForApi(record.domain);
+    if (!safeDomain) {
+      continue;
+    }
+    if (record.status === 'removed' || record.status === 'absent') {
+      for (const alias of iconDomainAliases(safeDomain)) {
+        if (canonicalIconCacheByDomain.delete(alias)) {
+          changed = true;
+        }
+      }
+      iconResolveMissByDomain.set(safeDomain, now);
+      continue;
+    }
+    if (record.status !== 'ready') {
+      continue;
+    }
+
+    const objectCacheKey = iconObjectCacheKeyFromStateRecord(record);
+    if (!objectCacheKey) {
+      continue;
+    }
+    let cachedEntry = null;
+    for (const alias of iconDomainAliases(safeDomain)) {
+      const candidate = canonicalIconCacheByDomain.get(alias);
+      const candidateObjectKey =
+        candidate?.objectClass === 'automatic_public' && typeof candidate.objectSha256 === 'string'
+          ? `a:${candidate.objectSha256}`
+          : candidate?.objectClass === 'manual_private' && typeof candidate.objectId === 'string'
+            ? `m:${candidate.objectId}`
+            : null;
+      if (candidateObjectKey && candidateObjectKey === objectCacheKey) {
+        cachedEntry = candidate;
+        break;
+      }
+    }
+
+    let dataUrl = cachedEntry?.dataUrl ?? null;
+    if (!dataUrl) {
+      const objectUrl = iconObjectUrlFromStateRecord(record, manualTicketByObjectId);
+      if (!objectUrl) {
+        continue;
+      }
+      dataUrl = await fetchIconObjectDataUrl(objectUrl);
+      if (!dataUrl) {
+        continue;
+      }
+    }
+
+    const cacheEntry = {
+      domain: safeDomain,
+      dataUrl,
+      sourceUrl: null,
+      objectClass: record.objectClass === 'manual_private' ? 'manual_private' : 'automatic_public',
+      objectId: typeof record.objectId === 'string' ? record.objectId : null,
+      objectSha256: typeof record.objectSha256 === 'string' ? record.objectSha256 : null,
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : nowIso(),
+      cachedAt: now,
+    };
+    for (const alias of iconDomainAliases(safeDomain)) {
+      const previous = canonicalIconCacheByDomain.get(alias);
+      const same =
+        previous &&
+        previous.dataUrl === cacheEntry.dataUrl &&
+        previous.objectClass === cacheEntry.objectClass &&
+        previous.objectId === cacheEntry.objectId &&
+        previous.objectSha256 === cacheEntry.objectSha256 &&
+        previous.updatedAt === cacheEntry.updatedAt;
+      canonicalIconCacheByDomain.set(alias, {
+        ...cacheEntry,
+        domain: alias,
+      });
+      if (!same) {
+        changed = true;
+      }
+    }
+    iconResolveMissByDomain.delete(safeDomain);
+  }
+
+  if (changed) {
+    scheduleCanonicalIconCachePersist();
+  }
+  lastIconsStateFailureAt = 0;
 }
 
 function collectProjectedDomains(items) {
@@ -3541,87 +4379,20 @@ function applyCachedIconsToProjection(items) {
   });
 }
 
-async function hydrateCanonicalIconsForDomains(domains) {
+async function hydrateCanonicalIconsForDomains(domains, projectedItems = []) {
   const apiClient = currentApiClient();
   if (!apiClient || !sessionToken || !Array.isArray(domains) || domains.length === 0) {
     return;
   }
-
-  const uniqueDomains = Array.from(
-    new Set(
-      domains
-        .map((domain) => sanitizeIconHost(String(domain ?? '')))
-        .filter((domain) => Boolean(domain)),
-    ),
-  );
-  if (uniqueDomains.length === 0) {
+  if (!isIconsStateSyncEnabled()) {
     return;
-  }
-  const now = Date.now();
-  const resolveableDomains = uniqueDomains.filter((domain) => {
-    if (iconCacheEntryForDomain(domain)) {
-      return false;
-    }
-    const lastMissAt = iconResolveMissByDomain.get(domain) ?? 0;
-    if (now - lastMissAt < ICON_RESOLVE_MISS_RETRY_MS) {
-      return false;
-    }
-    return true;
-  });
-  if (resolveableDomains.length === 0) {
-    return;
-  }
-
-  let resolvedIcons = [];
-  try {
-    const resolved = await apiClient.resolveSiteIcons({
-      bearerToken: sessionToken,
-      domains: resolveableDomains,
-    });
-    resolvedIcons = Array.isArray(resolved?.icons) ? resolved.icons : [];
-    cacheResolvedIcons(resolvedIcons);
-  } catch {
-    return;
-  }
-
-  const resolvedDomains = new Set(
-    resolvedIcons
-      .map((entry) => sanitizeIconHost(String(entry?.domain ?? '')))
-      .filter((entry) => Boolean(entry)),
-  );
-  for (const domain of resolveableDomains) {
-    if (!resolvedDomains.has(domain)) {
-      iconResolveMissByDomain.set(domain, now);
-    }
-  }
-  const discoverableDomains = resolveableDomains.filter((domain) => {
-    if (resolvedDomains.has(domain)) {
-      return false;
-    }
-    const lastAttemptAt = iconDiscoverLastAttemptByDomain.get(domain) ?? 0;
-    if (now - lastAttemptAt < ICON_DISCOVERY_RETRY_MS) {
-      return false;
-    }
-    return true;
-  });
-
-  if (discoverableDomains.length === 0) {
-    return;
-  }
-
-  for (const domain of discoverableDomains) {
-    iconDiscoverLastAttemptByDomain.set(domain, now);
   }
   try {
-    const discovered = await apiClient.discoverSiteIcons({
-      bearerToken: sessionToken,
-      domains: discoverableDomains,
-      forceRefresh: false,
-    });
-    cacheResolvedIcons(Array.isArray(discovered?.icons) ? discovered.icons : []);
+    await hydrateCanonicalIconsForDomainsFromState(domains, projectedItems);
   } catch {
-    // Best-effort discovery.
+    lastIconsStateFailureAt = Date.now();
   }
+  return;
 }
 
 async function ensureProjectedIconsHydrated(items) {
@@ -3632,13 +4403,14 @@ async function ensureProjectedIconsHydrated(items) {
   if (!sessionToken || !currentApiClient()) {
     return;
   }
-  if (Date.now() - lastIconHydrationStartedAt < ICON_HYDRATION_START_COOLDOWN_MS) {
+  const cooldownMs = isIconsStateSyncEnabled() ? ICON_STATE_HYDRATION_START_COOLDOWN_MS : ICON_HYDRATION_START_COOLDOWN_MS;
+  if (Date.now() - lastIconHydrationStartedAt < cooldownMs) {
     return;
   }
   if (!iconHydrationInFlight) {
     lastIconHydrationStartedAt = Date.now();
     void persistRuntimeState();
-    iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains).finally(() => {
+    iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains, items).finally(() => {
       iconHydrationInFlight = null;
     });
   }
@@ -3813,12 +4585,24 @@ async function hydrateManualIconsFromServerBestEffort() {
     try {
       const response = await apiClient.listManualSiteIcons({
         bearerToken: sessionToken,
+        etag: manualIconsEtag || undefined,
       });
-      if (!response || !Array.isArray(response.icons)) {
+      if (response?.status === 'not_modified') {
+        if (typeof response.etag === 'string' && response.etag.length > 0) {
+          manualIconsEtag = response.etag;
+        }
+        lastManualIconHydratedAt = Date.now();
+        void persistRuntimeState();
         return;
       }
+      if (!response || response.status !== 'ok' || !Array.isArray(response.payload?.icons)) {
+        return;
+      }
+      if (typeof response.etag === 'string' && response.etag.length > 0) {
+        manualIconsEtag = response.etag;
+      }
       const nextManualIconMap = {};
-      for (const entry of response.icons) {
+      for (const entry of response.payload.icons) {
         const safeHost = sanitizeIconHost(String(entry.domain ?? ''));
         const dataUrl = String(entry.dataUrl ?? '');
         if (!safeHost || !validateManualIconDataUrl(dataUrl)) {

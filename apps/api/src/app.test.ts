@@ -50,7 +50,10 @@ function getCookieValue(setCookies: string[], cookieName: string): string {
   throw new Error(`Missing cookie ${cookieName}`);
 }
 
-async function createAppFixture(startAt = '2026-03-17T12:00:00.000Z') {
+async function createAppFixture(
+  startAt = '2026-03-17T12:00:00.000Z',
+  options?: { enableIconsHttpFallback?: boolean },
+) {
   const storage = createTestStorage();
   const clock = new AdjustableClock(new Date(startAt));
   const idGenerator = new IncrementingIdGenerator();
@@ -67,6 +70,41 @@ async function createAppFixture(startAt = '2026-03-17T12:00:00.000Z') {
     secureCookies: true,
     accountKitPrivateKey: accountKitKeys.privateKey,
     accountKitPublicKey: accountKitKeys.publicKey,
+    ...(options?.enableIconsHttpFallback
+      ? {
+          realtime: {
+            enabled: false,
+            wsBaseUrl: 'wss://api.vaultlite.example.com',
+            connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+            connectTokenTtlSeconds: 45,
+            authLeaseSeconds: 600,
+            heartbeatIntervalMs: 25_000,
+            flags: {
+              realtime_ws_v1: false,
+              realtime_delta_vault_v1: false,
+              realtime_delta_icons_v1: false,
+              realtime_delta_history_v1: false,
+              realtime_delta_attachments_v1: false,
+              realtime_apply_web_v1: false,
+              realtime_apply_extension_v1: false,
+              icons_state_sync_v1: false,
+              icons_ws_apply_web_v1: false,
+              icons_ws_apply_extension_v1: false,
+              icons_discovery_v2_v1: false,
+              icons_fast_first_v1: false,
+              icons_best_later_v1: false,
+              icons_http_fallback_v1: true,
+              icons_manual_private_ticket_v1: false,
+              icons_provider_favicon_vemetric_enabled: false,
+              icons_provider_google_s2_enabled: false,
+              icons_provider_icon_horse_enabled: false,
+              icons_provider_duckduckgo_ip3_enabled: false,
+              icons_provider_faviconextractor_enabled: false,
+            },
+            hubNamespace: null,
+          },
+        }
+      : {}),
   });
 
   return { app, storage, clock };
@@ -144,10 +182,13 @@ describe('createVaultLiteApi', () => {
     const { app } = await createAppFixture();
     const response = await app.request('/api/runtime/metadata');
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      serverUrl: 'https://vaultlite.example.com',
-      deploymentFingerprint: 'deployment_fp_v1',
-    });
+    expect(await response.json()).toEqual(
+      expect.objectContaining({
+        serverUrl: 'https://vaultlite.example.com',
+        iconsAssetBaseUrl: 'https://vaultlite.example.com',
+        deploymentFingerprint: 'deployment_fp_v1',
+      }),
+    );
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
   });
 
@@ -784,7 +825,7 @@ describe('createVaultLiteApi', () => {
   });
 
   test('resolves manual site icon overrides with user precedence', async () => {
-    const { app } = await createAppFixture();
+    const { app } = await createAppFixture(undefined, { enableIconsHttpFallback: true });
     const { ownerCookies, ownerCsrf } = await initializeDeployment(app);
     const dataUrl = 'data:image/png;base64,AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD';
 
@@ -832,8 +873,608 @@ describe('createVaultLiteApi', () => {
     });
   });
 
+  test('accepts icons domains batch updates and marks stale revisions without rewinding', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        webAllowedOrigins: ['https://vaultlite.example.com'],
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: false,
+          realtime_delta_vault_v1: false,
+          realtime_delta_icons_v1: false,
+          realtime_delta_history_v1: false,
+          realtime_delta_attachments_v1: false,
+          realtime_apply_web_v1: false,
+          realtime_apply_extension_v1: false,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: true,
+          icons_ws_apply_extension_v1: true,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: true,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: true,
+          icons_provider_duckduckgo_ip3_enabled: true,
+          icons_provider_faviconextractor_enabled: true,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch() {
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_batch_1',
+      username: 'batch-user',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      updatedAt: '2026-03-24T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_batch_1',
+      userId: 'user_batch_1',
+      deviceName: 'Batch Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_batch_1',
+      userId: 'user_batch_1',
+      deviceId: 'device_batch_1',
+      csrfToken: 'csrf_batch_1',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      expiresAt: '2026-03-24T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    const first = await app.request('/api/icons/domains/batch', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_batch_1; vl_csrf=csrf_batch_1',
+        'x-csrf-token': 'csrf_batch_1',
+      },
+      body: JSON.stringify({
+        entries: [
+          {
+            itemId: 'item_login_1',
+            itemRevision: 3,
+            hosts: ['portal.example.com'],
+          },
+          {
+            itemId: 'item_login_2',
+            itemRevision: 2,
+            hosts: ['docs.example.com'],
+          },
+        ],
+      }),
+    });
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toEqual(
+      expect.objectContaining({
+        ok: true,
+        acceptedItems: 2,
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            itemId: 'item_login_1',
+            itemRevision: 3,
+            result: 'success_changed',
+            domainsChanged: true,
+          }),
+          expect.objectContaining({
+            itemId: 'item_login_2',
+            itemRevision: 2,
+            result: 'success_changed',
+            domainsChanged: true,
+          }),
+        ]),
+      }),
+    );
+
+    const stale = await app.request('/api/icons/domains/batch', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_batch_1; vl_csrf=csrf_batch_1',
+        'x-csrf-token': 'csrf_batch_1',
+      },
+      body: JSON.stringify({
+        entries: [
+          {
+            itemId: 'item_login_1',
+            itemRevision: 1,
+            hosts: ['stale.example.com'],
+          },
+        ],
+      }),
+    });
+    expect(stale.status).toBe(200);
+    await expect(stale.json()).resolves.toEqual(
+      expect.objectContaining({
+        ok: true,
+        acceptedItems: 0,
+        entries: [
+          expect.objectContaining({
+            itemId: 'item_login_1',
+            itemRevision: 1,
+            result: 'success_no_op_stale_revision',
+          }),
+        ],
+      }),
+    );
+  });
+
+  test('retries automatic discovery on no-op domain registrations when icon state is not ready', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      iconBlobBucket: {
+        async put() {
+          return null;
+        },
+        async get() {
+          return {
+            async arrayBuffer() {
+              return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]).buffer;
+            },
+            httpMetadata: {
+              contentType: 'image/png',
+            },
+          };
+        },
+        async delete() {
+          return;
+        },
+      },
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        webAllowedOrigins: ['https://vaultlite.example.com'],
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: false,
+          realtime_delta_vault_v1: false,
+          realtime_delta_icons_v1: false,
+          realtime_delta_history_v1: false,
+          realtime_delta_attachments_v1: false,
+          realtime_apply_web_v1: false,
+          realtime_apply_extension_v1: false,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: false,
+          icons_ws_apply_extension_v1: false,
+          icons_discovery_v2_v1: true,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: false,
+          icons_provider_favicon_vemetric_enabled: false,
+          icons_provider_google_s2_enabled: false,
+          icons_provider_icon_horse_enabled: false,
+          icons_provider_duckduckgo_ip3_enabled: false,
+          icons_provider_faviconextractor_enabled: false,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch() {
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_discovery_noop',
+      username: 'noop-user',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      updatedAt: '2026-03-24T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_discovery_noop',
+      userId: 'user_discovery_noop',
+      deviceName: 'Noop Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_discovery_noop',
+      userId: 'user_discovery_noop',
+      deviceId: 'device_discovery_noop',
+      csrfToken: 'csrf_discovery_noop',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      expiresAt: '2026-03-24T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    await storage.userIconItemDomains.replaceItemHosts({
+      userId: 'user_discovery_noop',
+      deviceId: 'device_discovery_noop',
+      surface: 'web',
+      itemId: 'item_login_noop',
+      itemRevision: 5,
+      hosts: ['portal.example.com', 'example.com'],
+      updatedAt: '2026-03-24T11:50:00.000Z',
+    });
+    await storage.userIconState.upsert({
+      userId: 'user_discovery_noop',
+      domain: 'portal.example.com',
+      status: 'pending',
+      objectId: null,
+      updatedAt: '2026-03-24T11:00:00.000Z',
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const target = String(input);
+      if (target === 'https://portal.example.com/') {
+        const response = new Response('<html><head><link rel="icon" href="/favicon.ico"></head></html>', {
+          status: 200,
+          headers: {
+            'content-type': 'text/html',
+          },
+        });
+        Object.defineProperty(response, 'url', {
+          configurable: true,
+          value: target,
+        });
+        return response;
+      }
+      if (target === 'https://portal.example.com/favicon.ico') {
+        const response = new Response(
+          new Uint8Array([
+            0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 104, 4,
+            0, 0, 22, 0, 0, 0,
+          ]),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'image/x-icon',
+            },
+          },
+        );
+        Object.defineProperty(response, 'url', {
+          configurable: true,
+          value: target,
+        });
+        return response;
+      }
+      return new Response('not_found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const response = await app.request('/api/icons/domains/batch', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: 'vl_session=session_discovery_noop; vl_csrf=csrf_discovery_noop',
+          'x-csrf-token': 'csrf_discovery_noop',
+        },
+        body: JSON.stringify({
+          entries: [
+            {
+              itemId: 'item_login_noop',
+              itemRevision: 5,
+              hosts: ['portal.example.com'],
+            },
+          ],
+        }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual(
+        expect.objectContaining({
+          ok: true,
+          acceptedItems: 1,
+          entries: [
+            expect.objectContaining({
+              itemId: 'item_login_noop',
+              result: 'success_no_op',
+            }),
+          ],
+        }),
+      );
+
+      let iconState = await storage.userIconState.findByUserIdAndDomain(
+        'user_discovery_noop',
+        'portal.example.com',
+      );
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (iconState?.status === 'ready' && iconState.objectId) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        iconState = await storage.userIconState.findByUserIdAndDomain(
+          'user_discovery_noop',
+          'portal.example.com',
+        );
+      }
+
+      expect(iconState?.status).toBe('ready');
+      expect(iconState?.objectId).toBeTruthy();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('serves icon objects with CORS headers compatible with web fetches', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+    const blobBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+    const automaticSha256 = 'a'.repeat(64);
+    const manualSha256 = 'b'.repeat(64);
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      iconBlobBucket: {
+        async put() {
+          return null;
+        },
+        async get(key: string) {
+          if (
+            key === `icons/automatic/${automaticSha256}` ||
+            key === `icons/manual/user_icons_1/${manualSha256}`
+          ) {
+            return {
+              async arrayBuffer() {
+                return blobBytes.slice().buffer;
+              },
+              httpMetadata: {
+                contentType: 'image/png',
+              },
+            };
+          }
+          return null;
+        },
+        async delete() {
+          return;
+        },
+      },
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        webAllowedOrigins: ['http://127.0.0.1:5173'],
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: false,
+          realtime_delta_vault_v1: false,
+          realtime_delta_icons_v1: false,
+          realtime_delta_history_v1: false,
+          realtime_delta_attachments_v1: false,
+          realtime_apply_web_v1: false,
+          realtime_apply_extension_v1: false,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: true,
+          icons_ws_apply_extension_v1: true,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: true,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: true,
+          icons_provider_duckduckgo_ip3_enabled: true,
+          icons_provider_faviconextractor_enabled: true,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch() {
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_icons_1',
+      username: 'icons-user',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      updatedAt: '2026-03-24T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_icons_1',
+      userId: 'user_icons_1',
+      deviceName: 'Icons Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_icons_1',
+      userId: 'user_icons_1',
+      deviceId: 'device_icons_1',
+      csrfToken: 'csrf_icons_1',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      expiresAt: '2026-03-24T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    await storage.iconObjects.create({
+      objectId: 'icon_object_auto_1',
+      objectClass: 'automatic_public',
+      ownerUserId: null,
+      sha256: automaticSha256,
+      r2Key: `icons/automatic/${automaticSha256}`,
+      contentType: 'image/png',
+      byteLength: blobBytes.byteLength,
+      createdAt: '2026-03-24T12:00:00.000Z',
+      updatedAt: '2026-03-24T12:00:00.000Z',
+    });
+    await storage.iconObjects.create({
+      objectId: 'icon_object_manual_1',
+      objectClass: 'manual_private',
+      ownerUserId: 'user_icons_1',
+      sha256: manualSha256,
+      r2Key: `icons/manual/user_icons_1/${manualSha256}`,
+      contentType: 'image/png',
+      byteLength: blobBytes.byteLength,
+      createdAt: '2026-03-24T12:00:00.000Z',
+      updatedAt: '2026-03-24T12:00:00.000Z',
+    });
+
+    const automaticResponse = await app.request(`/icons/a/${automaticSha256}`, {
+      method: 'GET',
+      headers: {
+        origin: 'http://127.0.0.1:5173',
+      },
+    });
+    expect(automaticResponse.status).toBe(200);
+    expect(automaticResponse.headers.get('access-control-allow-origin')).toBe('*');
+
+    const ticketResponse = await app.request('/api/icons/object-tickets', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'vl_session=session_icons_1; vl_csrf=csrf_icons_1',
+        'x-csrf-token': 'csrf_icons_1',
+      },
+      body: JSON.stringify({
+        objectIds: ['icon_object_manual_1'],
+      }),
+    });
+    expect(ticketResponse.status).toBe(200);
+    const ticketPayload = (await ticketResponse.json()) as {
+      tickets: Array<{ objectId: string; ticket: string }>;
+    };
+    const ticket = ticketPayload.tickets[0]?.ticket ?? '';
+    expect(ticket.length).toBeGreaterThan(10);
+
+    const manualResponse = await app.request(`/icons/m/icon_object_manual_1?ticket=${encodeURIComponent(ticket)}`, {
+      method: 'GET',
+      headers: {
+        origin: 'http://127.0.0.1:5173',
+      },
+    });
+    expect(manualResponse.status).toBe(200);
+    expect(manualResponse.headers.get('access-control-allow-origin')).toBe('http://127.0.0.1:5173');
+
+    const manualDisallowedOrigin = await app.request(
+      `/icons/m/icon_object_manual_1?ticket=${encodeURIComponent(ticket)}`,
+      {
+        method: 'GET',
+        headers: {
+          origin: 'https://malicious.example.com',
+        },
+      },
+    );
+    expect(manualDisallowedOrigin.status).toBe(200);
+    expect(manualDisallowedOrigin.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
   test('discovers and caches automatic site icons server-side', async () => {
-    const { app } = await createAppFixture();
+    const { app } = await createAppFixture(undefined, { enableIconsHttpFallback: true });
     const { ownerCookies } = await initializeDeployment(app);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -965,6 +1606,19 @@ describe('createVaultLiteApi', () => {
           realtime_delta_attachments_v1: true,
           realtime_apply_web_v1: true,
           realtime_apply_extension_v1: true,
+          icons_state_sync_v1: false,
+          icons_ws_apply_web_v1: false,
+          icons_ws_apply_extension_v1: false,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: false,
+          icons_provider_favicon_vemetric_enabled: false,
+          icons_provider_google_s2_enabled: false,
+          icons_provider_icon_horse_enabled: false,
+          icons_provider_duckduckgo_ip3_enabled: false,
+          icons_provider_faviconextractor_enabled: false,
         },
         hubNamespace: {
           idFromName(name: string) {
@@ -1094,6 +1748,19 @@ describe('createVaultLiteApi', () => {
           realtime_delta_attachments_v1: true,
           realtime_apply_web_v1: true,
           realtime_apply_extension_v1: true,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: true,
+          icons_ws_apply_extension_v1: true,
+          icons_discovery_v2_v1: true,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: true,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: true,
+          icons_provider_duckduckgo_ip3_enabled: true,
+          icons_provider_faviconextractor_enabled: true,
         },
         hubNamespace: {
           idFromName(name: string) {

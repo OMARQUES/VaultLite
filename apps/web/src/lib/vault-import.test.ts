@@ -48,7 +48,11 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     rotatePassword: vi.fn(),
     resolveSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [] })),
     discoverSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [], unresolved: [] })),
-    listManualSiteIcons: vi.fn(async () => ({ ok: true as const, icons: [] })),
+    listManualSiteIcons: vi.fn(async () => ({
+      status: 'ok' as const,
+      payload: { ok: true as const, icons: [] },
+      etag: null,
+    })),
     upsertManualSiteIcon: vi.fn(async () => ({ ok: true as const, result: 'success_changed' as const })),
     removeManualSiteIcon: vi.fn(async () => ({ ok: true as const, result: 'success_changed' as const })),
     listPasswordGeneratorHistory: vi.fn(async () => ({ ok: true as const, entries: [] })),
@@ -59,7 +63,42 @@ function createSessionStoreStub(username = 'alice'): SessionStore {
     getRuntimeMetadata: vi.fn(async () => ({
       serverUrl: 'https://vaultlite.local',
       deploymentFingerprint: 'development_deployment',
+      realtime: {
+        enabled: false,
+        wsBaseUrl: 'wss://vaultlite.local',
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25000,
+        flags: {
+          realtime_ws_v1: false,
+          realtime_delta_vault_v1: false,
+          realtime_delta_icons_v1: false,
+          realtime_delta_history_v1: false,
+          realtime_delta_attachments_v1: false,
+          realtime_apply_web_v1: false,
+          realtime_apply_extension_v1: false,
+          icons_state_sync_v1: false,
+          icons_ws_apply_web_v1: false,
+          icons_ws_apply_extension_v1: false,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: false,
+          icons_provider_favicon_vemetric_enabled: false,
+          icons_provider_google_s2_enabled: false,
+          icons_provider_icon_horse_enabled: false,
+          icons_provider_duckduckgo_ip3_enabled: false,
+          icons_provider_faviconextractor_enabled: false,
+        },
+      },
     })),
+    getIconsState: vi.fn(),
+    putIconDomainsBatch: vi.fn(),
+    putIconDomainsItem: vi.fn(),
+    startIconDomainsReindex: vi.fn(),
+    sendIconDomainsReindexChunk: vi.fn(),
+    commitIconDomainsReindex: vi.fn(),
+    issueIconObjectTickets: vi.fn(),
     handleUnauthorized: vi.fn(),
     setAutoLockAfterMs: vi.fn(),
     lock: vi.fn(),
@@ -510,5 +549,263 @@ describe('vault import', () => {
 
     expect(result.skipped).toBe(1);
     expect(result.records[0]?.status).toBe('skipped_review_required');
+  });
+
+  test('uses icons domain batch sync during import when icons state sync flag is enabled', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const getRuntimeMetadata = vi.mocked(sessionStore.getRuntimeMetadata);
+    const putIconDomainsBatch = vi.mocked(sessionStore.putIconDomainsBatch);
+    const putIconDomainsItem = vi.mocked(sessionStore.putIconDomainsItem);
+    const createItem = vi.mocked(vaultClient.createItem);
+
+    getRuntimeMetadata.mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://vaultlite.local',
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25000,
+        flags: {
+          realtime_ws_v1: true,
+          realtime_delta_vault_v1: true,
+          realtime_delta_icons_v1: true,
+          realtime_delta_history_v1: true,
+          realtime_delta_attachments_v1: true,
+          realtime_apply_web_v1: true,
+          realtime_apply_extension_v1: true,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: true,
+          icons_ws_apply_extension_v1: true,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: true,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: true,
+          icons_provider_duckduckgo_ip3_enabled: true,
+          icons_provider_faviconextractor_enabled: true,
+        },
+      },
+    });
+    createItem.mockResolvedValue({
+      itemId: 'item_created_batch_1',
+      itemType: 'login',
+      revision: 7,
+      encryptedPayload: 'payload',
+      createdAt: '2026-03-19T00:00:00.000Z',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    });
+    putIconDomainsBatch.mockResolvedValue({
+      ok: true,
+      acceptedItems: 1,
+      entries: [
+        {
+          itemId: 'item_created_batch_1',
+          itemRevision: 7,
+          result: 'success_changed',
+          domainsChanged: true,
+        },
+      ],
+      updatedAt: '2026-03-19T00:00:10.000Z',
+    });
+
+    const preview: VaultImportPreview = {
+      format: 'vaultlite_json_export_v1',
+      totalRows: 1,
+      validRows: 1,
+      duplicateRows: 0,
+      invalidRows: 0,
+      unsupportedRows: 0,
+      reviewRequiredRows: 0,
+      attachmentRows: 0,
+      attachmentCount: 0,
+      rows: [
+        {
+          rowIndex: 1,
+          sourceFormat: 'vaultlite_json_export_v1',
+          sourceRef: 'vaultlite_json_export_v1:item_1',
+          itemType: 'login',
+          title: 'Portal',
+          username: 'alice@example.com',
+          firstUrl: 'https://portal.example.com/login',
+          attachmentCount: 0,
+          status: 'valid',
+          reason: null,
+        },
+      ],
+      candidates: [
+        {
+          sourceFormat: 'vaultlite_json_export_v1',
+          sourceRef: 'vaultlite_json_export_v1:item_1',
+          sourceItemId: 'item_1',
+          itemType: 'login',
+          title: 'Portal',
+          notes: '',
+          content: '',
+          username: 'alice@example.com',
+          password: 'secret',
+          totp: '',
+          urls: ['https://portal.example.com/login'],
+          favoriteHint: false,
+          folderHint: null,
+          archivedHint: false,
+          customFields: [],
+          attachments: [],
+          provenance: {},
+          dedupeKey: 'login|portal|alice@example.com|https://portal.example.com/login',
+          status: 'valid',
+          reason: null,
+          rowIndex: 1,
+          existingItemId: null,
+        },
+      ],
+    };
+
+    await executeVaultImport({
+      preview,
+      sessionStore,
+      vaultClient,
+    });
+
+    expect(putIconDomainsBatch).toHaveBeenCalledTimes(1);
+    expect(putIconDomainsBatch).toHaveBeenCalledWith({
+      entries: [
+        {
+          itemId: 'item_created_batch_1',
+          itemRevision: 7,
+          hosts: ['portal.example.com'],
+        },
+      ],
+    });
+    expect(putIconDomainsItem).not.toHaveBeenCalled();
+  });
+
+  test('falls back to per-item icon domain sync when batch request fails', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const getRuntimeMetadata = vi.mocked(sessionStore.getRuntimeMetadata);
+    const putIconDomainsBatch = vi.mocked(sessionStore.putIconDomainsBatch);
+    const putIconDomainsItem = vi.mocked(sessionStore.putIconDomainsItem);
+    const createItem = vi.mocked(vaultClient.createItem);
+
+    getRuntimeMetadata.mockResolvedValue({
+      serverUrl: 'https://vaultlite.local',
+      deploymentFingerprint: 'development_deployment',
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://vaultlite.local',
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25000,
+        flags: {
+          realtime_ws_v1: true,
+          realtime_delta_vault_v1: true,
+          realtime_delta_icons_v1: true,
+          realtime_delta_history_v1: true,
+          realtime_delta_attachments_v1: true,
+          realtime_apply_web_v1: true,
+          realtime_apply_extension_v1: true,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: true,
+          icons_ws_apply_extension_v1: true,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: true,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: true,
+          icons_provider_duckduckgo_ip3_enabled: true,
+          icons_provider_faviconextractor_enabled: true,
+        },
+      },
+    });
+    createItem.mockResolvedValue({
+      itemId: 'item_created_batch_fallback_1',
+      itemType: 'login',
+      revision: 2,
+      encryptedPayload: 'payload',
+      createdAt: '2026-03-19T00:00:00.000Z',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    });
+    putIconDomainsBatch.mockRejectedValue(new Error('batch_down'));
+    putIconDomainsItem.mockResolvedValue({
+      ok: true,
+      result: 'success_changed',
+      domainsChanged: true,
+      itemId: 'item_created_batch_fallback_1',
+      itemRevision: 2,
+      updatedAt: '2026-03-19T00:00:10.000Z',
+    });
+
+    const preview: VaultImportPreview = {
+      format: 'vaultlite_json_export_v1',
+      totalRows: 1,
+      validRows: 1,
+      duplicateRows: 0,
+      invalidRows: 0,
+      unsupportedRows: 0,
+      reviewRequiredRows: 0,
+      attachmentRows: 0,
+      attachmentCount: 0,
+      rows: [
+        {
+          rowIndex: 1,
+          sourceFormat: 'vaultlite_json_export_v1',
+          sourceRef: 'vaultlite_json_export_v1:item_1',
+          itemType: 'login',
+          title: 'Portal',
+          username: 'alice@example.com',
+          firstUrl: 'https://portal.example.com/login',
+          attachmentCount: 0,
+          status: 'valid',
+          reason: null,
+        },
+      ],
+      candidates: [
+        {
+          sourceFormat: 'vaultlite_json_export_v1',
+          sourceRef: 'vaultlite_json_export_v1:item_1',
+          sourceItemId: 'item_1',
+          itemType: 'login',
+          title: 'Portal',
+          notes: '',
+          content: '',
+          username: 'alice@example.com',
+          password: 'secret',
+          totp: '',
+          urls: ['https://portal.example.com/login'],
+          favoriteHint: false,
+          folderHint: null,
+          archivedHint: false,
+          customFields: [],
+          attachments: [],
+          provenance: {},
+          dedupeKey: 'login|portal|alice@example.com|https://portal.example.com/login',
+          status: 'valid',
+          reason: null,
+          rowIndex: 1,
+          existingItemId: null,
+        },
+      ],
+    };
+
+    await executeVaultImport({
+      preview,
+      sessionStore,
+      vaultClient,
+    });
+
+    expect(putIconDomainsBatch).toHaveBeenCalledTimes(1);
+    expect(putIconDomainsItem).toHaveBeenCalledTimes(1);
+    expect(putIconDomainsItem).toHaveBeenCalledWith({
+      itemId: 'item_created_batch_fallback_1',
+      itemRevision: 2,
+      hosts: ['portal.example.com'],
+    });
   });
 });

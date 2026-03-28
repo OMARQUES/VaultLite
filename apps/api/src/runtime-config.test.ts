@@ -27,6 +27,17 @@ describe('createWorkerRuntimeConfig', () => {
       'http://localhost:5173',
       'http://127.0.0.1:8787',
     ]);
+    expect(config.realtime.flags.icons_state_sync_v1).toBe(true);
+    expect(config.realtime.flags.icons_discovery_v2_v1).toBe(true);
+  });
+
+  test('allows disabling icon discovery v2 explicitly', () => {
+    const config = createWorkerRuntimeConfig({
+      VAULTLITE_RUNTIME_MODE: 'development',
+      VAULTLITE_ICONS_FLAG_DISCOVERY_V2_V1: 'false',
+    });
+
+    expect(config.realtime.flags.icons_discovery_v2_v1).toBe(false);
   });
 
   test('accepts explicit environment overrides', () => {

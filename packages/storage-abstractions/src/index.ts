@@ -185,11 +185,93 @@ export interface SiteIconCacheRecord {
   fetchedAt: string;
 }
 
+export type AutomaticIconRegistryStatus = 'pending' | 'ready' | 'absent';
+
+export interface AutomaticIconRegistryRecord {
+  domain: string;
+  status: AutomaticIconRegistryStatus;
+  objectId: string | null;
+  sourceUrl: string | null;
+  failCount: number;
+  lastCheckedAt: string;
+  nextEligibleAt: string;
+  updatedAt: string;
+}
+
 export interface ManualSiteIconOverrideRecord {
   userId: string;
   domain: string;
   dataUrl: string;
   source: 'url' | 'file';
+  updatedAt: string;
+}
+
+export type IconObjectClass = 'automatic_public' | 'manual_private';
+export type UserIconStateStatus = 'pending' | 'ready' | 'absent' | 'removed';
+
+export interface IconObjectRecord {
+  objectId: string;
+  objectClass: IconObjectClass;
+  ownerUserId: string | null;
+  sha256: string;
+  r2Key: string;
+  contentType: string;
+  byteLength: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserIconStateRecord {
+  userId: string;
+  domain: string;
+  status: UserIconStateStatus;
+  objectId: string | null;
+  updatedAt: string;
+}
+
+export interface UserIconItemDomainHeadRecord {
+  userId: string;
+  deviceId: string;
+  surface: 'web' | 'extension';
+  itemId: string;
+  itemRevision: number;
+  generationId: string | null;
+  lastSeenAt: string;
+  updatedAt: string;
+}
+
+export interface UserIconItemDomainRecord {
+  userId: string;
+  deviceId: string;
+  surface: 'web' | 'extension';
+  itemId: string;
+  host: string;
+  itemRevision: number;
+  generationId: string | null;
+  lastSeenAt: string;
+  updatedAt: string;
+}
+
+export interface UserIconReindexSessionRecord {
+  userId: string;
+  deviceId: string;
+  surface: 'web' | 'extension';
+  generationId: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface IconIngestJobRecord {
+  jobId: string;
+  userId: string;
+  domain: string;
+  objectClass: IconObjectClass;
+  status: 'staged' | 'uploading' | 'uploaded_uncommitted' | 'committed' | 'upload_failed' | 'aborted';
+  sha256: string;
+  r2Key: string;
+  objectId: string | null;
+  errorCode: string | null;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -507,12 +589,105 @@ export interface SiteIconCacheRepository {
   upsert(record: SiteIconCacheRecord): Promise<SiteIconCacheRecord>;
 }
 
+export interface AutomaticIconRegistryRepository {
+  findByDomain(domain: string): Promise<AutomaticIconRegistryRecord | null>;
+  upsert(record: AutomaticIconRegistryRecord): Promise<AutomaticIconRegistryRecord>;
+}
+
 export interface ManualSiteIconOverrideRepository {
   listByUserId(userId: string): Promise<ManualSiteIconOverrideRecord[]>;
   listByUserIdAndDomains(userId: string, domains: string[]): Promise<ManualSiteIconOverrideRecord[]>;
   findByUserIdAndDomain(userId: string, domain: string): Promise<ManualSiteIconOverrideRecord | null>;
   upsert(record: ManualSiteIconOverrideRecord): Promise<ManualSiteIconOverrideRecord>;
   remove(userId: string, domain: string): Promise<boolean>;
+}
+
+export interface IconObjectRepository {
+  create(record: IconObjectRecord): Promise<IconObjectRecord>;
+  findByObjectId(objectId: string): Promise<IconObjectRecord | null>;
+  findByClassAndSha256(input: {
+    objectClass: IconObjectClass;
+    sha256: string;
+    ownerUserId?: string | null;
+  }): Promise<IconObjectRecord | null>;
+  removeByObjectId(objectId: string): Promise<boolean>;
+  listOrphanCandidates(input: {
+    notReferencedAfterIso: string;
+    limit: number;
+  }): Promise<IconObjectRecord[]>;
+}
+
+export interface UserIconStateRepository {
+  listByUserId(userId: string): Promise<UserIconStateRecord[]>;
+  listByUserIdAndDomains(userId: string, domains: string[]): Promise<UserIconStateRecord[]>;
+  findByUserIdAndDomain(userId: string, domain: string): Promise<UserIconStateRecord | null>;
+  upsert(record: UserIconStateRecord): Promise<{ record: UserIconStateRecord; changed: boolean }>;
+  remove(input: {
+    userId: string;
+    domain: string;
+    updatedAt: string;
+  }): Promise<boolean>;
+  getVersion(userId: string): Promise<number>;
+  bumpVersion(input: {
+    userId: string;
+    updatedAt: string;
+  }): Promise<number>;
+}
+
+export interface UserIconItemDomainRepository {
+  replaceItemHosts(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    itemId: string;
+    itemRevision: number;
+    hosts: string[];
+    generationId?: string | null;
+    updatedAt: string;
+  }): Promise<{
+    result: 'success_changed' | 'success_no_op' | 'success_no_op_stale_revision';
+    changed: boolean;
+  }>;
+  startReindex(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    startedAt: string;
+  }): Promise<UserIconReindexSessionRecord>;
+  upsertReindexChunk(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    entries: Array<{ itemId: string; itemRevision: number; hosts: string[] }>;
+    updatedAt: string;
+  }): Promise<{ acceptedItems: number }>;
+  commitReindex(input: {
+    userId: string;
+    deviceId: string;
+    surface: 'web' | 'extension';
+    generationId: string;
+    updatedAt: string;
+  }): Promise<{ changed: boolean }>;
+  listEffectiveHostsByUserId(userId: string): Promise<string[]>;
+}
+
+export interface IconIngestJobRepository {
+  create(record: IconIngestJobRecord): Promise<IconIngestJobRecord>;
+  updateStatus(input: {
+    jobId: string;
+    status: IconIngestJobRecord['status'];
+    objectId?: string | null;
+    errorCode?: string | null;
+    updatedAt: string;
+  }): Promise<IconIngestJobRecord | null>;
+  findByJobId(jobId: string): Promise<IconIngestJobRecord | null>;
+  listByStatus(input: {
+    status: IconIngestJobRecord['status'];
+    limit: number;
+  }): Promise<IconIngestJobRecord[]>;
+  delete(jobId: string): Promise<boolean>;
 }
 
 export interface PasswordGeneratorHistoryRepository {
@@ -672,7 +847,12 @@ export interface VaultLiteStorage {
   webBootstrapGrants: WebBootstrapGrantRepository;
   extensionSessionRecoverSecrets: ExtensionSessionRecoverSecretRepository;
   siteIconCache: SiteIconCacheRepository;
+  automaticIconRegistry: AutomaticIconRegistryRepository;
   manualSiteIconOverrides: ManualSiteIconOverrideRepository;
+  iconObjects: IconObjectRepository;
+  userIconState: UserIconStateRepository;
+  userIconItemDomains: UserIconItemDomainRepository;
+  iconIngestJobs: IconIngestJobRepository;
   passwordGeneratorHistory: PasswordGeneratorHistoryRepository;
   realtimeOutbox: RealtimeOutboxRepository;
   realtimeOneTimeTokens: RealtimeOneTimeTokenRepository;
@@ -706,7 +886,15 @@ export function createInMemoryVaultLiteStorage(input: {
   const webBootstrapGrants = new Map<string, WebBootstrapGrantRecord>();
   const extensionSessionRecoverSecrets = new Map<string, ExtensionSessionRecoverSecretRecord>();
   const siteIconCache = new Map<string, SiteIconCacheRecord>();
+  const automaticIconRegistry = new Map<string, AutomaticIconRegistryRecord>();
   const manualSiteIconOverrides = new Map<string, ManualSiteIconOverrideRecord>();
+  const iconObjects = new Map<string, IconObjectRecord>();
+  const userIconState = new Map<string, UserIconStateRecord>();
+  const userIconVersions = new Map<string, number>();
+  const userIconItemDomainHeads = new Map<string, UserIconItemDomainHeadRecord>();
+  const userIconItemDomainRows = new Map<string, UserIconItemDomainRecord>();
+  const userIconReindexSessions = new Map<string, UserIconReindexSessionRecord>();
+  const iconIngestJobs = new Map<string, IconIngestJobRecord>();
   const passwordGeneratorHistory = new Map<string, PasswordGeneratorHistoryRecord>();
   const realtimeOutbox = new Map<string, RealtimeOutboxRecord>();
   const realtimeOneTimeTokens = new Map<string, RealtimeOneTimeTokenRecord>();
@@ -1378,6 +1566,28 @@ export function createInMemoryVaultLiteStorage(input: {
         return { ...normalized };
       },
     },
+    automaticIconRegistry: {
+      async findByDomain(domain) {
+        const normalized = domain.trim().toLowerCase();
+        if (!normalized) {
+          return null;
+        }
+        const record = automaticIconRegistry.get(normalized);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        const normalized: AutomaticIconRegistryRecord = {
+          ...record,
+          domain: record.domain.trim().toLowerCase(),
+          status: record.status === 'ready' ? 'ready' : record.status === 'absent' ? 'absent' : 'pending',
+          objectId: record.objectId ?? null,
+          sourceUrl: record.sourceUrl ?? null,
+          failCount: Math.max(0, Math.trunc(record.failCount)),
+        };
+        automaticIconRegistry.set(normalized.domain, normalized);
+        return { ...normalized };
+      },
+    },
     manualSiteIconOverrides: {
       async listByUserId(userId) {
         return Array.from(manualSiteIconOverrides.values())
@@ -1417,6 +1627,365 @@ export function createInMemoryVaultLiteStorage(input: {
       async remove(userId, domain) {
         const key = `${userId}:${domain.trim().toLowerCase()}`;
         return manualSiteIconOverrides.delete(key);
+      },
+    },
+    iconObjects: {
+      async create(record) {
+        const normalized: IconObjectRecord = {
+          ...record,
+          objectId: record.objectId.trim(),
+          ownerUserId: record.ownerUserId ?? null,
+          sha256: record.sha256.trim().toLowerCase(),
+          r2Key: record.r2Key.trim(),
+          contentType: record.contentType.trim().toLowerCase(),
+          byteLength: Math.max(0, Math.trunc(record.byteLength)),
+        };
+        iconObjects.set(normalized.objectId, normalized);
+        return { ...normalized };
+      },
+      async findByObjectId(objectId) {
+        const record = iconObjects.get(objectId.trim());
+        return record ? { ...record } : null;
+      },
+      async findByClassAndSha256(inputRecord) {
+        const targetSha = inputRecord.sha256.trim().toLowerCase();
+        for (const record of iconObjects.values()) {
+          if (record.objectClass !== inputRecord.objectClass || record.sha256 !== targetSha) {
+            continue;
+          }
+          if (record.objectClass === 'manual_private') {
+            const ownerUserId = inputRecord.ownerUserId ?? null;
+            if (record.ownerUserId !== ownerUserId) {
+              continue;
+            }
+          }
+          return { ...record };
+        }
+        return null;
+      },
+      async removeByObjectId(objectId) {
+        return iconObjects.delete(objectId.trim());
+      },
+      async listOrphanCandidates(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(2_000, Math.trunc(inputRecord.limit)))
+          : 200;
+        const referenced = new Set<string>();
+        for (const stateRecord of userIconState.values()) {
+          if (stateRecord.objectId) {
+            referenced.add(stateRecord.objectId);
+          }
+        }
+        return Array.from(iconObjects.values())
+          .filter((record) => record.updatedAt <= inputRecord.notReferencedAfterIso && !referenced.has(record.objectId))
+          .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+          .slice(0, safeLimit)
+          .map((record) => ({ ...record }));
+      },
+    },
+    userIconState: {
+      async listByUserId(userId) {
+        return Array.from(userIconState.values())
+          .filter((record) => record.userId === userId)
+          .sort((left, right) => left.domain.localeCompare(right.domain))
+          .map((record) => ({ ...record }));
+      },
+      async listByUserIdAndDomains(userId, domains) {
+        const normalizedDomains = new Set(
+          domains
+            .filter((domain): domain is string => typeof domain === 'string')
+            .map((domain) => domain.trim().toLowerCase())
+            .filter((domain) => domain.length > 0),
+        );
+        if (normalizedDomains.size === 0) {
+          return [];
+        }
+        return Array.from(userIconState.values())
+          .filter((record) => record.userId === userId && normalizedDomains.has(record.domain))
+          .sort((left, right) => left.domain.localeCompare(right.domain))
+          .map((record) => ({ ...record }));
+      },
+      async findByUserIdAndDomain(userId, domain) {
+        const normalizedDomain = domain.trim().toLowerCase();
+        if (!normalizedDomain) {
+          return null;
+        }
+        const record = userIconState.get(`${userId}:${normalizedDomain}`);
+        return record ? { ...record } : null;
+      },
+      async upsert(record) {
+        const normalized: UserIconStateRecord = {
+          ...record,
+          domain: record.domain.trim().toLowerCase(),
+          status: record.status,
+          objectId: record.objectId ?? null,
+        };
+        const key = `${normalized.userId}:${normalized.domain}`;
+        const existing = userIconState.get(key);
+        const changed =
+          !existing ||
+          existing.status !== normalized.status ||
+          existing.objectId !== normalized.objectId ||
+          existing.updatedAt !== normalized.updatedAt;
+        userIconState.set(key, normalized);
+        return {
+          record: { ...normalized },
+          changed,
+        };
+      },
+      async remove(inputRecord) {
+        const key = `${inputRecord.userId}:${inputRecord.domain.trim().toLowerCase()}`;
+        return userIconState.delete(key);
+      },
+      async getVersion(userId) {
+        return userIconVersions.get(userId) ?? 0;
+      },
+      async bumpVersion(inputRecord) {
+        const current = userIconVersions.get(inputRecord.userId) ?? 0;
+        const next = current + 1;
+        userIconVersions.set(inputRecord.userId, next);
+        return next;
+      },
+    },
+    userIconItemDomains: {
+      async replaceItemHosts(inputRecord) {
+        const normalizedItemId = inputRecord.itemId.trim();
+        const normalizedHosts = Array.from(
+          new Set(
+            inputRecord.hosts
+              .filter((host): host is string => typeof host === 'string')
+              .map((host) => host.trim().toLowerCase())
+              .filter((host) => host.length > 0),
+          ),
+        );
+        const headKey = `${inputRecord.userId}:${inputRecord.deviceId}:${normalizedItemId}`;
+        const existingHead = userIconItemDomainHeads.get(headKey);
+        if (existingHead && inputRecord.itemRevision < existingHead.itemRevision) {
+          return {
+            result: 'success_no_op_stale_revision' as const,
+            changed: false,
+          };
+        }
+
+        const existingHosts = Array.from(userIconItemDomainRows.values())
+          .filter(
+            (record) =>
+              record.userId === inputRecord.userId &&
+              record.deviceId === inputRecord.deviceId &&
+              record.itemId === normalizedItemId,
+          )
+          .map((record) => record.host)
+          .sort();
+        const nextHosts = [...normalizedHosts].sort();
+        const hostsChanged =
+          existingHosts.length !== nextHosts.length ||
+          existingHosts.some((value, index) => value !== nextHosts[index]);
+        const revisionChanged = !existingHead || existingHead.itemRevision !== inputRecord.itemRevision;
+
+        for (const [rowKey, row] of userIconItemDomainRows.entries()) {
+          if (
+            row.userId === inputRecord.userId &&
+            row.deviceId === inputRecord.deviceId &&
+            row.itemId === normalizedItemId
+          ) {
+            userIconItemDomainRows.delete(rowKey);
+          }
+        }
+        for (const host of normalizedHosts) {
+          const row: UserIconItemDomainRecord = {
+            userId: inputRecord.userId,
+            deviceId: inputRecord.deviceId,
+            surface: inputRecord.surface,
+            itemId: normalizedItemId,
+            host,
+            itemRevision: inputRecord.itemRevision,
+            generationId: inputRecord.generationId ?? existingHead?.generationId ?? null,
+            lastSeenAt: inputRecord.updatedAt,
+            updatedAt: inputRecord.updatedAt,
+          };
+          userIconItemDomainRows.set(`${row.userId}:${row.deviceId}:${row.itemId}:${row.host}`, row);
+        }
+        userIconItemDomainHeads.set(headKey, {
+          userId: inputRecord.userId,
+          deviceId: inputRecord.deviceId,
+          surface: inputRecord.surface,
+          itemId: normalizedItemId,
+          itemRevision: inputRecord.itemRevision,
+          generationId: inputRecord.generationId ?? existingHead?.generationId ?? null,
+          lastSeenAt: inputRecord.updatedAt,
+          updatedAt: inputRecord.updatedAt,
+        });
+        const changed = hostsChanged || revisionChanged;
+        return {
+          result: changed ? ('success_changed' as const) : ('success_no_op' as const),
+          changed,
+        };
+      },
+      async startReindex(inputRecord) {
+        const sessionKey = `${inputRecord.userId}:${inputRecord.deviceId}`;
+        const session: UserIconReindexSessionRecord = {
+          userId: inputRecord.userId,
+          deviceId: inputRecord.deviceId,
+          surface: inputRecord.surface,
+          generationId: inputRecord.generationId,
+          startedAt: inputRecord.startedAt,
+          updatedAt: inputRecord.startedAt,
+        };
+        userIconReindexSessions.set(sessionKey, session);
+        return { ...session };
+      },
+      async upsertReindexChunk(inputRecord) {
+        const sessionKey = `${inputRecord.userId}:${inputRecord.deviceId}`;
+        const session = userIconReindexSessions.get(sessionKey);
+        if (!session || session.generationId !== inputRecord.generationId) {
+          return { acceptedItems: 0 };
+        }
+        let acceptedItems = 0;
+        for (const entry of inputRecord.entries) {
+          const normalizedItemId = entry.itemId.trim();
+          const headKey = `${inputRecord.userId}:${inputRecord.deviceId}:${normalizedItemId}`;
+          const existingHead = userIconItemDomainHeads.get(headKey);
+          if (existingHead && entry.itemRevision < existingHead.itemRevision) {
+            continue;
+          }
+          const normalizedHosts = Array.from(
+            new Set(
+              entry.hosts
+                .filter((host): host is string => typeof host === 'string')
+                .map((host) => host.trim().toLowerCase())
+                .filter((host) => host.length > 0),
+            ),
+          );
+          for (const [rowKey, row] of userIconItemDomainRows.entries()) {
+            if (
+              row.userId === inputRecord.userId &&
+              row.deviceId === inputRecord.deviceId &&
+              row.itemId === normalizedItemId
+            ) {
+              userIconItemDomainRows.delete(rowKey);
+            }
+          }
+          for (const host of normalizedHosts) {
+            const row: UserIconItemDomainRecord = {
+              userId: inputRecord.userId,
+              deviceId: inputRecord.deviceId,
+              surface: inputRecord.surface,
+              itemId: normalizedItemId,
+              host,
+              itemRevision: entry.itemRevision,
+              generationId: inputRecord.generationId,
+              lastSeenAt: inputRecord.updatedAt,
+              updatedAt: inputRecord.updatedAt,
+            };
+            userIconItemDomainRows.set(`${row.userId}:${row.deviceId}:${row.itemId}:${row.host}`, row);
+          }
+          acceptedItems += 1;
+          userIconItemDomainHeads.set(headKey, {
+            userId: inputRecord.userId,
+            deviceId: inputRecord.deviceId,
+            surface: inputRecord.surface,
+            itemId: normalizedItemId,
+            itemRevision: entry.itemRevision,
+            generationId: inputRecord.generationId,
+            lastSeenAt: inputRecord.updatedAt,
+            updatedAt: inputRecord.updatedAt,
+          });
+        }
+        userIconReindexSessions.set(sessionKey, {
+          ...session,
+          updatedAt: inputRecord.updatedAt,
+        });
+        return { acceptedItems };
+      },
+      async commitReindex(inputRecord) {
+        const sessionKey = `${inputRecord.userId}:${inputRecord.deviceId}`;
+        const session = userIconReindexSessions.get(sessionKey);
+        if (!session || session.generationId !== inputRecord.generationId) {
+          return { changed: false };
+        }
+        let changed = false;
+        for (const [headKey, head] of userIconItemDomainHeads.entries()) {
+          if (head.userId !== inputRecord.userId || head.deviceId !== inputRecord.deviceId) {
+            continue;
+          }
+          if (head.generationId === inputRecord.generationId) {
+            continue;
+          }
+          userIconItemDomainHeads.delete(headKey);
+          changed = true;
+          for (const [rowKey, row] of userIconItemDomainRows.entries()) {
+            if (
+              row.userId === inputRecord.userId &&
+              row.deviceId === inputRecord.deviceId &&
+              row.itemId === head.itemId
+            ) {
+              userIconItemDomainRows.delete(rowKey);
+            }
+          }
+        }
+        userIconReindexSessions.delete(sessionKey);
+        return { changed };
+      },
+      async listEffectiveHostsByUserId(userId) {
+        return Array.from(
+          new Set(
+            Array.from(userIconItemDomainRows.values())
+              .filter((record) => record.userId === userId)
+              .map((record) => record.host),
+          ),
+        ).sort();
+      },
+    },
+    iconIngestJobs: {
+      async create(record) {
+        const normalized: IconIngestJobRecord = {
+          ...record,
+          domain: record.domain.trim().toLowerCase(),
+          sha256: record.sha256.trim().toLowerCase(),
+          r2Key: record.r2Key.trim(),
+          objectId: record.objectId ?? null,
+          errorCode: record.errorCode ?? null,
+        };
+        iconIngestJobs.set(normalized.jobId, normalized);
+        return { ...normalized };
+      },
+      async updateStatus(inputRecord) {
+        const current = iconIngestJobs.get(inputRecord.jobId);
+        if (!current) {
+          return null;
+        }
+        const updated: IconIngestJobRecord = {
+          ...current,
+          status: inputRecord.status,
+          objectId:
+            Object.prototype.hasOwnProperty.call(inputRecord, 'objectId') && inputRecord.objectId !== undefined
+              ? (inputRecord.objectId ?? null)
+              : current.objectId,
+          errorCode:
+            Object.prototype.hasOwnProperty.call(inputRecord, 'errorCode') && inputRecord.errorCode !== undefined
+              ? (inputRecord.errorCode ?? null)
+              : current.errorCode,
+          updatedAt: inputRecord.updatedAt,
+        };
+        iconIngestJobs.set(updated.jobId, updated);
+        return { ...updated };
+      },
+      async findByJobId(jobId) {
+        const record = iconIngestJobs.get(jobId);
+        return record ? { ...record } : null;
+      },
+      async listByStatus(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(5_000, Math.trunc(inputRecord.limit)))
+          : 200;
+        return Array.from(iconIngestJobs.values())
+          .filter((record) => record.status === inputRecord.status)
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .slice(0, safeLimit)
+          .map((record) => ({ ...record }));
+      },
+      async delete(jobId) {
+        return iconIngestJobs.delete(jobId);
       },
     },
     passwordGeneratorHistory: {
