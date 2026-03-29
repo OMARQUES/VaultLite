@@ -12,7 +12,23 @@ const HEARTBEAT_IDLE_MS = 25_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const HIDDEN_CLOSE_AFTER_MS = 5 * 60_000;
 
-type RealtimeDomains = Array<'vault' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'>;
+export type RealtimeDomains = Array<'vault' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'>;
+
+export function domainsForRealtimeTopic(topic: string): RealtimeDomains | null {
+  if (topic.startsWith('icons.manual.')) {
+    return ['icons_manual', 'icons_state'];
+  }
+  if (topic.startsWith('icons.')) {
+    return ['icons_state'];
+  }
+  if (topic.startsWith('password_history.')) {
+    return ['password_history'];
+  }
+  if (topic.startsWith('vault.attachment.')) {
+    return ['attachments'];
+  }
+  return null;
+}
 
 export interface WebRealtimeClient {
   start(): void;
@@ -221,12 +237,9 @@ export function createWebRealtimeClient(input: {
       input.onVaultDelta();
       return;
     }
-    if (
-      message.event.topic.startsWith('icons.') ||
-      message.event.topic.startsWith('password_history.') ||
-      message.event.topic.startsWith('vault.attachment.')
-    ) {
-      input.onDomainResync(['icons_manual', 'icons_state', 'password_history', 'attachments']);
+    const resyncDomains = domainsForRealtimeTopic(message.event.topic);
+    if (resyncDomains) {
+      input.onDomainResync(resyncDomains);
     }
   }
 

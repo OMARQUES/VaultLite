@@ -155,6 +155,9 @@ const ICON_DOMAIN_SYNC_BATCH_SIZE = 120;
 const ICON_DOMAIN_SYNC_BACKOFF_BASE_MS = 3_000;
 const ICON_DOMAIN_SYNC_BACKOFF_MAX_MS = 60_000;
 const REALTIME_WATCHDOG_MS = 15 * 60_000;
+const ATTACHMENTS_STATE_PAGE_SIZE = 200;
+const ATTACHMENTS_STATE_SYNC_DEBOUNCE_MS = 300;
+const ATTACHMENTS_STATE_SYNC_COOLDOWN_MS = 10_000;
 const attachmentObjectUrls = new Set<string>();
 const realtimeEnabled = ref(false);
 const realtimeHealthy = ref(false);
@@ -168,6 +171,11 @@ let lastIconHydrationHostsSignature = '';
 let lastIconHydrationHostsAt = 0;
 let iconDomainSyncBackoffUntil = 0;
 let iconDomainSyncBackoffAttempt = 0;
+let attachmentStateSyncInFlight: Promise<void> | null = null;
+let attachmentStateSyncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let attachmentStateSyncScheduledForce = false;
+let lastAttachmentStateSyncAt = 0;
+let attachmentStateHydratedAtLeastOnce = false;
 
 const loginDraft = reactive<LoginVaultItemPayload>({
   title: '',
@@ -388,6 +396,130 @@ function scheduleIconsStateHydration(
   }, ICONS_STATE_HYDRATION_DEBOUNCE_MS);
 }
 
+function buildAttachmentViewFromStateChangeEntry(entry: {
+  uploadId: string;
+  itemId: string;
+  contentType: string;
+  size: number;
+  uploadedAt: string;
+  updatedAt: string;
+}): AttachmentUploadView {
+  return {
+    uploadId: entry.uploadId,
+    itemId: entry.itemId,
+    lifecycleState: 'attached',
+    contentType: entry.contentType,
+    size: Math.max(0, Math.trunc(entry.size)),
+    expiresAt: entry.updatedAt,
+    uploadedAt: entry.uploadedAt,
+    createdAt: entry.uploadedAt,
+    updatedAt: entry.updatedAt,
+  };
+}
+
+function upsertAttachmentUploadInCache(upload: AttachmentUploadView) {
+  const current = attachmentsByItemId.value[upload.itemId] ?? [];
+  const existingIndex = current.findIndex((entry) => entry.uploadId === upload.uploadId);
+  const nextItemUploads =
+    existingIndex >= 0
+      ? current.map((entry, index) => (index === existingIndex ? upload : entry))
+      : [upload, ...current];
+  nextItemUploads.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  attachmentsByItemId.value = {
+    ...attachmentsByItemId.value,
+    [upload.itemId]: nextItemUploads,
+  };
+}
+
+async function syncAttachmentStateFromServer(options: { force?: boolean } = {}) {
+  if (
+    !options.force &&
+    Date.now() - lastAttachmentStateSyncAt < ATTACHMENTS_STATE_SYNC_COOLDOWN_MS
+  ) {
+    return;
+  }
+  if (attachmentStateSyncInFlight) {
+    return attachmentStateSyncInFlight;
+  }
+
+  attachmentStateSyncInFlight = (async () => {
+    attachmentError.value = null;
+    try {
+      const nextByItemId: Record<string, AttachmentUploadView[]> = {};
+      let cursor: string | undefined;
+      while (true) {
+        const page = await vaultClient.listAttachmentState({
+          cursor,
+          pageSize: ATTACHMENTS_STATE_PAGE_SIZE,
+        });
+        for (const entry of page.entries) {
+          if (entry.entryType === 'state_changed') {
+            const upload = buildAttachmentViewFromStateChangeEntry({
+              uploadId: entry.uploadId,
+              itemId: entry.itemId,
+              contentType: entry.contentType,
+              size: entry.size,
+              uploadedAt: entry.uploadedAt,
+              updatedAt: entry.updatedAt,
+            });
+            const bucket = nextByItemId[upload.itemId] ?? [];
+            bucket.push(upload);
+            nextByItemId[upload.itemId] = bucket;
+            continue;
+          }
+          if (entry.entryType === 'removed') {
+            const bucket = nextByItemId[entry.itemId];
+            if (bucket) {
+              nextByItemId[entry.itemId] = bucket.filter((upload) => upload.uploadId !== entry.uploadId);
+            }
+          }
+        }
+        cursor = page.cursor ?? undefined;
+        if (!cursor) {
+          break;
+        }
+      }
+
+      for (const itemId of Object.keys(nextByItemId)) {
+        nextByItemId[itemId] = nextByItemId[itemId].sort((left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt),
+        );
+      }
+      attachmentsByItemId.value = nextByItemId;
+      lastAttachmentStateSyncAt = Date.now();
+      attachmentStateHydratedAtLeastOnce = true;
+    } catch (error) {
+      attachmentError.value = toHumanErrorMessage(error);
+    } finally {
+      attachmentStateSyncInFlight = null;
+    }
+  })();
+
+  return attachmentStateSyncInFlight;
+}
+
+function scheduleAttachmentStateSync(options: { force?: boolean } = {}) {
+  if (options.force === true) {
+    if (attachmentStateSyncDebounceTimer) {
+      clearTimeout(attachmentStateSyncDebounceTimer);
+      attachmentStateSyncDebounceTimer = null;
+    }
+    attachmentStateSyncScheduledForce = false;
+    void syncAttachmentStateFromServer({ force: true }).catch(() => undefined);
+    return;
+  }
+  attachmentStateSyncScheduledForce = attachmentStateSyncScheduledForce || Boolean(options.force);
+  if (attachmentStateSyncDebounceTimer) {
+    return;
+  }
+  attachmentStateSyncDebounceTimer = setTimeout(() => {
+    attachmentStateSyncDebounceTimer = null;
+    const force = attachmentStateSyncScheduledForce;
+    attachmentStateSyncScheduledForce = false;
+    void syncAttachmentStateFromServer({ force }).catch(() => undefined);
+  }, ATTACHMENTS_STATE_SYNC_DEBOUNCE_MS);
+}
+
 function handleManualIconRefreshOnFocus() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
     return;
@@ -463,10 +595,7 @@ async function handleRealtimeDomainResync(
     });
   }
   if (domains.includes('attachments')) {
-    const itemId = selectedAttachmentItem.value?.itemId ?? null;
-    if (itemId) {
-      void loadAttachmentUploads(itemId);
-    }
+    scheduleAttachmentStateSync({ force: true });
   }
 }
 
@@ -1465,6 +1594,9 @@ watch(
     manualIconsEtag.value = null;
     iconObjectDataUrlByKey.value = {};
     iconDomainsSyncedByItem.value = {};
+    attachmentsByItemId.value = {};
+    lastAttachmentStateSyncAt = 0;
+    attachmentStateHydratedAtLeastOnce = false;
   },
   { immediate: true },
 );
@@ -1500,12 +1632,18 @@ watch(
 
 watch(
   () => [selectedAttachmentItem.value?.itemId ?? null, isTrashContext.value] as const,
-  async ([itemId, trash]) => {
+  ([itemId, trash]) => {
     if (!itemId || trash) {
       attachmentError.value = null;
       return;
     }
-    await loadAttachmentUploads(itemId);
+    if (attachmentsByItemId.value[itemId]) {
+      return;
+    }
+    if (attachmentStateHydratedAtLeastOnce) {
+      return;
+    }
+    scheduleAttachmentStateSync();
   },
   { immediate: true },
 );
@@ -2544,7 +2682,8 @@ async function uploadQueuedDraftAttachments(itemId: string, itemLabel: string) {
 
   for (const attachment of queuedAttachments) {
     try {
-      await uploadAttachmentFile(attachment.file, itemId);
+      const uploadedRecord = await uploadAttachmentFile(attachment.file, itemId);
+      upsertAttachmentUploadInCache(uploadedRecord);
     } catch (error) {
       failedUploads += 1;
       if (!firstUploadError) {
@@ -2561,7 +2700,7 @@ async function uploadQueuedDraftAttachments(itemId: string, itemLabel: string) {
     showToast('Attachment uploaded');
   }
 
-  await loadAttachmentUploads(itemId);
+  scheduleAttachmentStateSync();
 }
 
 async function saveCurrent() {
@@ -2752,19 +2891,6 @@ async function restoreFromRow(itemId: string) {
   }
 }
 
-async function loadAttachmentUploads(itemId: string) {
-  attachmentError.value = null;
-  try {
-    const response = await vaultClient.listAttachmentUploads(itemId);
-    attachmentsByItemId.value = {
-      ...attachmentsByItemId.value,
-      [itemId]: response.uploads.map((upload) => ({ ...upload })),
-    };
-  } catch (error) {
-    attachmentError.value = toHumanErrorMessage(error);
-  }
-}
-
 function openAttachmentFilePicker() {
   if (isTrashContext.value) {
     return;
@@ -2812,8 +2938,9 @@ async function onAttachmentSelected(event: Event) {
   const itemId = selectedAttachmentItem.value.itemId;
 
   try {
-    await uploadAttachmentFile(file, itemId);
-    await loadAttachmentUploads(itemId);
+    const uploadedRecord = await uploadAttachmentFile(file, itemId);
+    upsertAttachmentUploadInCache(uploadedRecord);
+    scheduleAttachmentStateSync();
     showToast('Attachment uploaded');
   } catch (error) {
     attachmentError.value = toHumanErrorMessage(error);
@@ -2823,7 +2950,7 @@ async function onAttachmentSelected(event: Event) {
   }
 }
 
-async function uploadAttachmentFile(file: File, itemId: string) {
+async function uploadAttachmentFile(file: File, itemId: string): Promise<AttachmentUploadView> {
   const initResponse = await vaultClient.initAttachmentUpload({
     itemId,
     fileName: file.name || `${itemId}.bin`,
@@ -2843,6 +2970,18 @@ async function uploadAttachmentFile(file: File, itemId: string) {
   });
   await vaultClient.finalizeAttachmentUpload(initResponse.uploadId, itemId);
   registerUploadAsset(initResponse.uploadId, file);
+  const timestamp = new Date().toISOString();
+  return {
+    uploadId: initResponse.uploadId,
+    itemId,
+    lifecycleState: 'attached',
+    contentType: file.type || 'application/octet-stream',
+    size: file.size,
+    expiresAt: timestamp,
+    uploadedAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function handleGlobalKeydown(event: KeyboardEvent) {
@@ -2938,6 +3077,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
   refreshManualSiteIcons();
   void refreshManualSiteIconsFromServer({ force: true });
+  scheduleAttachmentStateSync({ force: true });
   void loadVault();
   workspace.startSync();
   void initializeRealtimeClient();
@@ -2964,6 +3104,11 @@ onBeforeUnmount(() => {
     clearTimeout(iconHydrationDebounceTimer);
     iconHydrationDebounceTimer = null;
   }
+  if (attachmentStateSyncDebounceTimer) {
+    clearTimeout(attachmentStateSyncDebounceTimer);
+    attachmentStateSyncDebounceTimer = null;
+  }
+  attachmentStateSyncInFlight = null;
   iconObjectFetchInFlightByKey.clear();
   for (const objectUrl of attachmentObjectUrls) {
     URL.revokeObjectURL(objectUrl);

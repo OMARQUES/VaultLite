@@ -94,6 +94,7 @@ const attachmentClientMock = {
   finalizeAttachmentUpload: vi.fn(),
   getAttachmentEnvelope: vi.fn(),
   listAttachmentUploads: vi.fn(),
+  listAttachmentState: vi.fn(),
 };
 
 vi.mock('../lib/vault-client', () => ({
@@ -269,7 +270,13 @@ describe('VaultShellPage', () => {
     attachmentClientMock.finalizeAttachmentUpload.mockReset();
     attachmentClientMock.getAttachmentEnvelope.mockReset();
     attachmentClientMock.listAttachmentUploads.mockReset();
+    attachmentClientMock.listAttachmentState.mockReset();
     attachmentClientMock.listAttachmentUploads.mockResolvedValue({ uploads: [] });
+    attachmentClientMock.listAttachmentState.mockResolvedValue({
+      cursor: null,
+      pageSize: 200,
+      entries: [],
+    });
     attachmentClientMock.finalizeAttachmentUpload.mockResolvedValue({
       ok: true,
       result: 'success_changed',
@@ -874,20 +881,20 @@ describe('VaultShellPage', () => {
   });
 
   test('renders attachment lifecycle states for document detail', async () => {
-    attachmentClientMock.listAttachmentUploads.mockResolvedValueOnce({
-      uploads: [
+    attachmentClientMock.listAttachmentState.mockResolvedValueOnce({
+      cursor: null,
+      pageSize: 200,
+      entries: [
         {
+          entryType: 'state_changed',
           uploadId: 'attachment_1',
           itemId: 'item_doc_1',
-          fileName: 'document.pdf',
-          lifecycleState: 'uploaded',
+          lifecycleState: 'attached',
           contentType: 'application/pdf',
           size: 1024,
-          expiresAt: '2026-03-15T12:15:00.000Z',
           uploadedAt: '2026-03-15T12:00:30.000Z',
-          attachedAt: null,
-          createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:30.000Z',
+          attachedAt: '2026-03-15T12:00:31.000Z',
+          updatedAt: '2026-03-15T12:00:31.000Z',
         },
       ],
     });
@@ -908,9 +915,9 @@ describe('VaultShellPage', () => {
 
     await flushPromises();
 
-    expect(attachmentClientMock.listAttachmentUploads).toHaveBeenCalledWith('item_doc_1');
+    expect(attachmentClientMock.listAttachmentState).toHaveBeenCalled();
     expect(wrapper.text()).toContain('Attachments');
-    expect(wrapper.text()).toContain('Uploaded');
+    expect(wrapper.text()).toContain('Attached');
     expect(wrapper.text()).toContain('application/pdf');
     expect(wrapper.text()).toContain('attachment_1');
     expect(wrapper.find('button[aria-label="Download attachment_1"]').exists()).toBe(true);
@@ -1057,20 +1064,20 @@ describe('VaultShellPage', () => {
   });
 
   test('shows attachments for login item detail', async () => {
-    attachmentClientMock.listAttachmentUploads.mockResolvedValueOnce({
-      uploads: [
+    attachmentClientMock.listAttachmentState.mockResolvedValueOnce({
+      cursor: null,
+      pageSize: 200,
+      entries: [
         {
+          entryType: 'state_changed',
           uploadId: 'attachment_login_1',
           itemId: 'item_login_1',
-          fileName: 'login.txt',
-          lifecycleState: 'uploaded',
+          lifecycleState: 'attached',
           contentType: 'text/plain',
           size: 64,
-          expiresAt: '2026-03-15T12:15:00.000Z',
           uploadedAt: '2026-03-15T12:00:30.000Z',
-          attachedAt: null,
-          createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:30.000Z',
+          attachedAt: '2026-03-15T12:00:31.000Z',
+          updatedAt: '2026-03-15T12:00:31.000Z',
         },
       ],
     });
@@ -1095,9 +1102,9 @@ describe('VaultShellPage', () => {
 
     await flushPromises();
 
-    expect(attachmentClientMock.listAttachmentUploads).toHaveBeenCalledWith('item_login_1');
+    expect(attachmentClientMock.listAttachmentState).toHaveBeenCalled();
     expect(wrapper.text()).toContain('Attachments');
-    expect(wrapper.text()).toContain('Uploaded');
+    expect(wrapper.text()).toContain('Attached');
   });
 
   test('queues attachments during document creation and uploads them after save', async () => {
@@ -1148,24 +1155,6 @@ describe('VaultShellPage', () => {
         updatedAt: '2026-03-15T12:00:12.000Z',
       },
     });
-    attachmentClientMock.listAttachmentUploads.mockResolvedValue({
-      uploads: [
-        {
-          uploadId: 'attachment_queued_1',
-          itemId: 'item_doc_created_1',
-          fileName: 'notes.txt',
-          lifecycleState: 'attached',
-          contentType: 'text/plain',
-          size: 12,
-          expiresAt: '2026-03-15T12:15:00.000Z',
-          uploadedAt: '2026-03-15T12:00:10.000Z',
-          attachedAt: '2026-03-15T12:00:12.000Z',
-          createdAt: '2026-03-15T12:00:00.000Z',
-          updatedAt: '2026-03-15T12:00:12.000Z',
-        },
-      ],
-    });
-
     const { wrapper, workspace, router } = await mountVaultAt('/vault/new/document', []);
 
     workspace.createDocument.mockImplementation(async (payload: {
@@ -1281,26 +1270,6 @@ describe('VaultShellPage', () => {
         updatedAt: '2026-03-15T12:00:12.000Z',
       },
     });
-    attachmentClientMock.listAttachmentUploads
-      .mockResolvedValueOnce({ uploads: [] })
-      .mockResolvedValueOnce({
-        uploads: [
-          {
-            uploadId: 'attachment_1',
-            itemId: 'item_doc_1',
-            fileName: 'note.txt',
-            lifecycleState: 'attached',
-            contentType: 'text/plain',
-            size: 5,
-            expiresAt: '2026-03-15T12:15:00.000Z',
-            uploadedAt: '2026-03-15T12:00:10.000Z',
-            attachedAt: '2026-03-15T12:00:12.000Z',
-            createdAt: '2026-03-15T12:00:00.000Z',
-            updatedAt: '2026-03-15T12:00:12.000Z',
-          },
-        ],
-      });
-
     const { wrapper } = await mountVaultAt('/vault/item/item_doc_1/edit', [
       {
         itemId: 'item_doc_1',

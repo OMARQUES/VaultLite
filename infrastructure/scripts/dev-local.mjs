@@ -20,6 +20,40 @@ function formatLogTimestamp(date = new Date()) {
   return `${year}${month}${day}-${hour}${minute}${second}`;
 }
 
+function formatLogLinePrefix(date = new Date()) {
+  return `[${date.toISOString()}]`;
+}
+
+function writeTimestampedLogLine(logStream, line) {
+  logStream.write(`${formatLogLinePrefix()} ${line}\n`);
+}
+
+function createTimestampedChunkLogger(logStream) {
+  const pendingBySource = new Map();
+  return {
+    write(source, chunk) {
+      const previous = pendingBySource.get(source) ?? '';
+      const merged = `${previous}${String(chunk)}`;
+      const segments = merged.split('\n');
+      const pendingTail = segments.pop() ?? '';
+      pendingBySource.set(source, pendingTail);
+      for (const segment of segments) {
+        const normalized = segment.endsWith('\r') ? segment.slice(0, -1) : segment;
+        writeTimestampedLogLine(logStream, normalized);
+      }
+    },
+    flushAll() {
+      for (const [source, pending] of pendingBySource.entries()) {
+        if (pending.length > 0) {
+          const normalized = pending.endsWith('\r') ? pending.slice(0, -1) : pending;
+          writeTimestampedLogLine(logStream, normalized);
+        }
+        pendingBySource.set(source, '');
+      }
+    },
+  };
+}
+
 function resolveLogFilePath() {
   const explicit = process.env.VAULTLITE_DEV_LOCAL_LOG_FILE;
   if (typeof explicit === 'string' && explicit.trim().length > 0) {
@@ -29,7 +63,7 @@ function resolveLogFilePath() {
   return join(process.cwd(), 'logs', `dev-local-${timestamp}.log`);
 }
 
-function createRunner(command, args, name, logStream) {
+function createRunner(command, args, name, logStream, chunkLogger) {
   const child = spawn(command, args, {
     cwd: process.cwd(),
     env: process.env,
@@ -40,28 +74,28 @@ function createRunner(command, args, name, logStream) {
   child.stdout.on('data', (chunk) => {
     const output = `[${name}] ${chunk}`;
     process.stdout.write(output);
-    if (logStream) {
-      logStream.write(output);
+    if (logStream && chunkLogger) {
+      chunkLogger.write(`${name}:stdout`, output);
     }
   });
 
   child.stderr.on('data', (chunk) => {
     const output = `[${name}] ${chunk}`;
     process.stderr.write(output);
-    if (logStream) {
-      logStream.write(output);
+    if (logStream && chunkLogger) {
+      chunkLogger.write(`${name}:stderr`, output);
     }
   });
 
   return child;
 }
 
-function createNpmRunner(args, name, logStream) {
+function createNpmRunner(args, name, logStream, chunkLogger) {
   if (process.platform === 'win32') {
-    return createRunner('cmd.exe', ['/d', '/s', '/c', 'npm', ...args], name, logStream);
+    return createRunner('cmd.exe', ['/d', '/s', '/c', 'npm', ...args], name, logStream, chunkLogger);
   }
 
-  return createRunner('npm', args, name, logStream);
+  return createRunner('npm', args, name, logStream, chunkLogger);
 }
 
 async function stopRunner(child) {
@@ -98,11 +132,12 @@ async function main() {
   const logFilePath = resolveLogFilePath();
   mkdirSync(join(process.cwd(), 'logs'), { recursive: true });
   const logStream = createWriteStream(logFilePath, { flags: 'a' });
+  const chunkLogger = createTimestampedChunkLogger(logStream);
   process.stdout.write(`[dev-local] Writing logs to ${logFilePath}\n`);
-  logStream.write(`[dev-local] started_at=${new Date().toISOString()}\n`);
+  writeTimestampedLogLine(logStream, `[dev-local] started_at=${new Date().toISOString()}`);
 
-  const api = createNpmRunner(['run', 'dev:api'], 'api', logStream);
-  const web = createNpmRunner(['run', 'dev:web'], 'web', logStream);
+  const api = createNpmRunner(['run', 'dev:api'], 'api', logStream, chunkLogger);
+  const web = createNpmRunner(['run', 'dev:web'], 'web', logStream, chunkLogger);
   const runners = [api, web];
   let shuttingDown = false;
 
@@ -113,7 +148,8 @@ async function main() {
 
     shuttingDown = true;
     await Promise.allSettled(runners.map((runner) => stopRunner(runner)));
-    logStream.write(`[dev-local] stopped_at=${new Date().toISOString()} exit_code=${exitCode}\n`);
+    chunkLogger.flushAll();
+    writeTimestampedLogLine(logStream, `[dev-local] stopped_at=${new Date().toISOString()} exit_code=${exitCode}`);
     await new Promise((resolve) => logStream.end(resolve));
     process.exit(exitCode);
   }
@@ -140,7 +176,7 @@ async function main() {
     const signalText = firstExit.signal ? ` (signal: ${String(firstExit.signal)})` : '';
     const output = `[dev-local] ${firstExit.name} exited with code ${firstExit.code}${signalText}. Stopping remaining processes.\n`;
     process.stderr.write(output);
-    logStream.write(output);
+    chunkLogger.write('dev-local:stderr', output);
     await shutdown(firstExit.code);
   }
 }

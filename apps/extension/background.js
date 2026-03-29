@@ -33,7 +33,6 @@ import {
   normalizeVaultItemPayload,
 } from './runtime-crypto.js';
 import { diagnoseCredentialCache } from './credential-cache-diagnostics.js';
-import { buildFaviconCandidates } from './favicon-candidates.js';
 import {
   clearExtensionProjectionCache,
   clearExtensionVaultCache,
@@ -168,6 +167,7 @@ let lastIconHydrationStartedAt = 0;
 let lastIconsStateFailureAt = 0;
 let iconsStateEtag = null;
 let manualIconsEtag = null;
+const iconObjectFetchInFlightByKey = new Map();
 let lastManualIconHydratedAt = 0;
 let manualIconHydrationInFlight = null;
 let iconCachePersistTimer = null;
@@ -1001,6 +1001,20 @@ function isLocalRealtimeEventSource(sourceDeviceId) {
   );
 }
 
+function collectRealtimePayloadDomains(eventEnvelope) {
+  const payloadDomains = [];
+  const eventPayload = eventEnvelope?.payload;
+  if (eventPayload && typeof eventPayload === 'object') {
+    if (typeof eventPayload.domain === 'string') {
+      payloadDomains.push(eventPayload.domain);
+    }
+    if (Array.isArray(eventPayload.domains)) {
+      payloadDomains.push(...eventPayload.domains);
+    }
+  }
+  return payloadDomains;
+}
+
 function queueRealtimeIconsResync(input = {}) {
   if (Array.isArray(input.domains)) {
     for (const domain of input.domains) {
@@ -1099,11 +1113,17 @@ function handleRealtimeServerEvent(eventEnvelope) {
   if (!eventEnvelope || typeof eventEnvelope !== 'object') {
     return;
   }
-  if (isLocalRealtimeEventSource(eventEnvelope.sourceDeviceId)) {
-    return;
-  }
   const topic = typeof eventEnvelope.topic === 'string' ? eventEnvelope.topic : '';
   if (!topic) {
+    return;
+  }
+  if (isLocalRealtimeEventSource(eventEnvelope.sourceDeviceId)) {
+    if (topic.startsWith('icons.manual.')) {
+      queueRealtimeIconsResync({
+        domains: collectRealtimePayloadDomains(eventEnvelope),
+        includeManual: true,
+      });
+    }
     return;
   }
   if (topic.startsWith('vault.item.')) {
@@ -1120,16 +1140,7 @@ function handleRealtimeServerEvent(eventEnvelope) {
     return;
   }
   if (topic.startsWith('icons.')) {
-    const payloadDomains = [];
-    const eventPayload = eventEnvelope.payload;
-    if (eventPayload && typeof eventPayload === 'object') {
-      if (typeof eventPayload.domain === 'string') {
-        payloadDomains.push(eventPayload.domain);
-      }
-      if (Array.isArray(eventPayload.domains)) {
-        payloadDomains.push(...eventPayload.domains);
-      }
-    }
+    const payloadDomains = collectRealtimePayloadDomains(eventEnvelope);
     queueRealtimeIconsResync({
       domains: payloadDomains,
       includeManual: topic.startsWith('icons.manual.'),
@@ -3584,10 +3595,7 @@ function projectCredentialForPopup(credential, pageUrl) {
     subtitle: buildItemSubtitle(credential),
     searchText: buildItemSearchText(credential),
     firstUrl,
-    faviconCandidates: [
-      ...(manualIconDataUrl ? [manualIconDataUrl] : []),
-      ...buildFaviconCandidates(firstUrl),
-    ],
+    faviconCandidates: manualIconDataUrl ? [manualIconDataUrl] : [],
     urlHostSummary,
     matchFlags: {
       exactOrigin,
@@ -3899,28 +3907,48 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-async function fetchIconObjectDataUrl(objectUrl) {
-  try {
-    const response = await fetch(objectUrl, {
-      method: 'GET',
-      credentials: 'omit',
-      cache: 'no-store',
-    });
-    if (!response.ok) {
+function iconObjectFetchCacheModeForRecord(record) {
+  return record?.objectClass === 'automatic_public' ? 'force-cache' : 'no-store';
+}
+
+async function fetchIconObjectDataUrl(objectUrl, input = {}) {
+  const cacheMode = input.cacheMode === 'force-cache' ? 'force-cache' : 'no-store';
+  const fetchOnce = async () => {
+    try {
+      const response = await fetch(objectUrl, {
+        method: 'GET',
+        credentials: 'omit',
+        cache: cacheMode,
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const contentTypeHeader = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+      const contentType = contentTypeHeader.startsWith('image/') ? contentTypeHeader : 'image/png';
+      const arrayBuffer = await response.arrayBuffer();
+      if (!arrayBuffer || arrayBuffer.byteLength <= 0) {
+        return null;
+      }
+      const base64 = bytesToBase64(new Uint8Array(arrayBuffer));
+      const dataUrl = `data:${contentType};base64,${base64}`;
+      return validateAutomaticIconDataUrl(dataUrl) ? dataUrl : null;
+    } catch {
       return null;
     }
-    const contentTypeHeader = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-    const contentType = contentTypeHeader.startsWith('image/') ? contentTypeHeader : 'image/png';
-    const arrayBuffer = await response.arrayBuffer();
-    if (!arrayBuffer || arrayBuffer.byteLength <= 0) {
-      return null;
-    }
-    const base64 = bytesToBase64(new Uint8Array(arrayBuffer));
-    const dataUrl = `data:${contentType};base64,${base64}`;
-    return validateAutomaticIconDataUrl(dataUrl) ? dataUrl : null;
-  } catch {
-    return null;
+  };
+  const objectKey = typeof input.objectKey === 'string' && input.objectKey.length > 0 ? input.objectKey : null;
+  if (!objectKey) {
+    return fetchOnce();
   }
+  const inFlight = iconObjectFetchInFlightByKey.get(objectKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const nextPromise = fetchOnce().finally(() => {
+    iconObjectFetchInFlightByKey.delete(objectKey);
+  });
+  iconObjectFetchInFlightByKey.set(objectKey, nextPromise);
+  return nextPromise;
 }
 
 function collectIconHostsFromCredential(credential) {
@@ -4287,7 +4315,10 @@ async function hydrateCanonicalIconsForDomainsFromState(domains, projectedItems)
       if (!objectUrl) {
         continue;
       }
-      dataUrl = await fetchIconObjectDataUrl(objectUrl);
+      dataUrl = await fetchIconObjectDataUrl(objectUrl, {
+        objectKey: objectCacheKey,
+        cacheMode: iconObjectFetchCacheModeForRecord(record),
+      });
       if (!dataUrl) {
         continue;
       }
@@ -4885,10 +4916,7 @@ function projectCredentialIndexForPage(entry, pageUrl) {
     subtitle: entry?.subtitle ?? '—',
     searchText: entry?.searchText ?? entry?.title ?? '',
     firstUrl,
-    faviconCandidates: mergeUniqueIconCandidates([
-      ...(manualIconDataUrl ? [manualIconDataUrl] : []),
-      ...buildFaviconCandidates(firstUrl),
-    ]),
+    faviconCandidates: mergeUniqueIconCandidates([...(manualIconDataUrl ? [manualIconDataUrl] : [])]),
     urlHostSummary: typeof entry?.urlHostSummary === 'string' ? entry.urlHostSummary : 'No URL',
     matchFlags: {
       exactOrigin,
