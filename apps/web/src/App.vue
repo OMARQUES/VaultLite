@@ -6,6 +6,7 @@ import AppShell from './components/layout/AppShell.vue';
 import PublicTopbar from './components/layout/PublicTopbar.vue';
 import SidebarNav from './components/layout/SidebarNav.vue';
 import { useSessionStore } from './composables/useSessionStore';
+import { foregroundRefreshCoordinator, withIntervalJitter } from './lib/foreground-refresh-coordinator';
 import { VAULT_UNAUTHORIZED_EVENT, type VaultUnauthorizedEventDetail } from './lib/http-events';
 import { toHumanErrorMessage } from './lib/human-error';
 import { resolveNavigationTarget } from './router';
@@ -19,6 +20,8 @@ const phaseRedirectInFlight = ref(false);
 const sessionSyncInFlight = ref(false);
 const fastRestoreInFlight = ref(false);
 const lastFastRestoreKey = ref<string | null>(null);
+const SESSION_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+const SESSION_REFRESH_FALLBACK_INTERVAL_MS = 20 * 60 * 1000;
 const isAuthenticatedRoute = computed(
   () => route.path.startsWith('/vault') || route.path.startsWith('/settings') || route.path.startsWith('/admin'),
 );
@@ -149,6 +152,13 @@ async function refreshSessionBestEffort() {
   }
 }
 
+function requestSessionRefresh(options: { force?: boolean } = {}) {
+  void foregroundRefreshCoordinator.run('session', refreshSessionBestEffort, {
+    force: options.force === true,
+    cooldownMs: SESSION_REFRESH_COOLDOWN_MS,
+  });
+}
+
 function handleActivity() {
   sessionStore.markActivity();
 }
@@ -198,15 +208,15 @@ async function handleUnauthorizedEvent(event: Event) {
 }
 
 let autoLockInterval: number | undefined;
-let sessionRefreshInterval: number | undefined;
-function handleVisibilityChange() {
-  if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-    void refreshSessionBestEffort();
+let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePeriodicSessionRefresh() {
+  if (sessionRefreshTimer !== null) {
+    clearTimeout(sessionRefreshTimer);
   }
-}
-
-function handleWindowFocus() {
-  void refreshSessionBestEffort();
+  sessionRefreshTimer = setTimeout(() => {
+    requestSessionRefresh();
+    schedulePeriodicSessionRefresh();
+  }, withIntervalJitter(SESSION_REFRESH_FALLBACK_INTERVAL_MS));
 }
 
 onMounted(() => {
@@ -227,15 +237,11 @@ onMounted(() => {
   })();
   window.addEventListener('pointerdown', handleActivity);
   window.addEventListener('keydown', handleActivity);
-  window.addEventListener('focus', handleWindowFocus);
-  document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
   autoLockInterval = window.setInterval(() => {
     sessionStore.enforceAutoLock();
   }, 15000);
-  sessionRefreshInterval = window.setInterval(() => {
-    void refreshSessionBestEffort();
-  }, 10 * 60 * 1000);
+  schedulePeriodicSessionRefresh();
 });
 
 watch(
@@ -255,17 +261,28 @@ watch(
   { flush: 'post' },
 );
 
+watch(
+  () => sessionStore.state.phase,
+  (phase, previousPhase) => {
+    if (!sessionRestoreResolved.value) {
+      return;
+    }
+    if (phase === 'ready' && previousPhase !== 'ready') {
+      requestSessionRefresh();
+    }
+  },
+);
+
 onUnmounted(() => {
   if (autoLockInterval !== undefined) {
     window.clearInterval(autoLockInterval);
   }
-  if (sessionRefreshInterval !== undefined) {
-    window.clearInterval(sessionRefreshInterval);
+  if (sessionRefreshTimer !== null) {
+    clearTimeout(sessionRefreshTimer);
+    sessionRefreshTimer = null;
   }
   window.removeEventListener('pointerdown', handleActivity);
   window.removeEventListener('keydown', handleActivity);
-  window.removeEventListener('focus', handleWindowFocus);
-  document.removeEventListener('visibilitychange', handleVisibilityChange);
   window.removeEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
 });
 </script>

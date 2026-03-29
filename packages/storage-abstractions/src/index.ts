@@ -590,6 +590,7 @@ export interface SiteIconCacheRepository {
 }
 
 export interface AutomaticIconRegistryRepository {
+  listByDomains(domains: string[]): Promise<AutomaticIconRegistryRecord[]>;
   findByDomain(domain: string): Promise<AutomaticIconRegistryRecord | null>;
   upsert(record: AutomaticIconRegistryRecord): Promise<AutomaticIconRegistryRecord>;
 }
@@ -1567,6 +1568,20 @@ export function createInMemoryVaultLiteStorage(input: {
       },
     },
     automaticIconRegistry: {
+      async listByDomains(domains) {
+        const normalized = domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0);
+        if (normalized.length === 0) {
+          return [];
+        }
+        const deduped = Array.from(new Set(normalized));
+        return deduped
+          .map((domain) => automaticIconRegistry.get(domain))
+          .filter((record): record is AutomaticIconRegistryRecord => Boolean(record))
+          .map((record) => ({ ...record }));
+      },
       async findByDomain(domain) {
         const normalized = domain.trim().toLowerCase();
         if (!normalized) {

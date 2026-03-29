@@ -191,6 +191,17 @@ describe('App shell', () => {
     expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
   });
 
+  test('does not trigger session restore on window focus or visibility events', async () => {
+    const { sessionStore } = await mountAppAt('/vault', 'ready');
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+
+    expect(sessionStore.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
   test('does not render authenticated vault shell when session is not ready on /vault', async () => {
     const { wrapper, sessionStore } = await mountAppAt('/vault', 'anonymous');
 

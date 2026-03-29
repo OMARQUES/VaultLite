@@ -198,6 +198,7 @@ let iconDomainRegistrationPersistInFlight = null;
 let lastIconDomainBatchFallbackLogAt = 0;
 let iconDomainSyncBackoffUntil = 0;
 let iconDomainSyncBackoffAttempt = 0;
+let lastIconDomainSyncFingerprint = '';
 let realtimeMetadataLoadedAt = 0;
 const realtimeRuntime = {
   enabled: false,
@@ -1578,6 +1579,7 @@ async function clearExtensionSessionToken() {
   realtimeConnection.cursor = 0;
   clearRealtimeCursorPersistTimer();
   iconDomainRegistrationByItemId.clear();
+  lastIconDomainSyncFingerprint = '';
   await clearPersistedIconDomainRegistrationCacheBestEffort();
   if (!hadSessionToken) {
     void persistRuntimeState();
@@ -2293,6 +2295,7 @@ async function loadPersistedState() {
   }
 
   iconDomainRegistrationByItemId.clear();
+  lastIconDomainSyncFingerprint = '';
   const expectedIconRegistrationCacheKey = iconDomainRegistrationCacheKey();
   if (
     expectedIconRegistrationCacheKey &&
@@ -3557,9 +3560,20 @@ async function refreshCredentialCache(options = {}) {
     return cacheWarmupInFlight;
   }
 
-  cacheWarmupInFlight = performCredentialCacheWarmup(options).finally(() => {
-    cacheWarmupInFlight = null;
-  });
+  cacheWarmupInFlight = performCredentialCacheWarmup(options)
+    .then(async (result) => {
+      if (result?.ok) {
+        try {
+          await syncIconStateDomainRegistrations();
+        } catch {
+          // Best effort only; vault list must remain responsive.
+        }
+      }
+      return result;
+    })
+    .finally(() => {
+      cacheWarmupInFlight = null;
+    });
 
   if (!shouldWaitForWarmup(options)) {
     return ok();
@@ -4032,6 +4046,21 @@ function markIconDomainSyncSuccess() {
   iconDomainSyncBackoffUntil = 0;
 }
 
+function iconDomainSyncFingerprintForCredentials(credentials) {
+  if (!Array.isArray(credentials) || credentials.length === 0) {
+    return '';
+  }
+  const signatures = [];
+  for (const credential of credentials) {
+    if (!credential || credential.itemType !== 'login') {
+      continue;
+    }
+    const hosts = collectIconHostsFromCredential(credential);
+    signatures.push(`${credential.itemId}:${credential.revision}:${hosts.join(',')}`);
+  }
+  return signatures.sort((left, right) => left.localeCompare(right)).join('|');
+}
+
 function selectDomainsForIconsState(domains) {
   const uniqueDomains = Array.from(
     new Set(
@@ -4056,7 +4085,7 @@ function selectDomainsForIconsState(domains) {
   return [...missing, ...known].slice(0, ICONS_STATE_QUERY_DOMAINS_MAX);
 }
 
-async function syncIconStateDomainRegistrations(projectedItems) {
+async function syncIconStateDomainRegistrations() {
   const apiClient = currentApiClient();
   if (!apiClient || !sessionToken || !isIconsStateSyncEnabled()) {
     return;
@@ -4064,11 +4093,19 @@ async function syncIconStateDomainRegistrations(projectedItems) {
   if (Date.now() < iconDomainSyncBackoffUntil) {
     return;
   }
+  const loginCredentials = credentialsCache.credentials.filter(
+    (credential) => credential && credential.itemType === 'login',
+  );
+  const nextFingerprint = iconDomainSyncFingerprintForCredentials(loginCredentials);
+  if (nextFingerprint === lastIconDomainSyncFingerprint) {
+    return;
+  }
   const credentialById = new Map();
-  for (const credential of credentialsCache.credentials) {
+  for (const credential of loginCredentials) {
     credentialById.set(credential.itemId, credential);
   }
   let registrationChanged = false;
+  let interruptedByBackoff = false;
   for (const itemId of Array.from(iconDomainRegistrationByItemId.keys())) {
     if (!credentialById.has(itemId)) {
       iconDomainRegistrationByItemId.delete(itemId);
@@ -4076,13 +4113,12 @@ async function syncIconStateDomainRegistrations(projectedItems) {
     }
   }
   const pendingEntries = [];
-  for (const projected of projectedItems) {
-    const credential = credentialById.get(projected?.itemId);
-    if (!credential || credential.itemType !== 'login') {
-      continue;
-    }
+  for (const credential of loginCredentials) {
     const hosts = collectIconHostsFromCredential(credential);
     if (hosts.length === 0) {
+      if (iconDomainRegistrationByItemId.delete(credential.itemId)) {
+        registrationChanged = true;
+      }
       continue;
     }
     const signature = `${credential.revision}:${hosts.join(',')}`;
@@ -4184,6 +4220,7 @@ async function syncIconStateDomainRegistrations(projectedItems) {
       }
       if (shouldBackoffIconDomainSync(error)) {
         iconDomainSyncBackoffUntil = Date.now() + nextIconDomainSyncBackoffMs();
+        interruptedByBackoff = true;
         break;
       }
       await fallbackPerItemSync(chunk);
@@ -4192,9 +4229,12 @@ async function syncIconStateDomainRegistrations(projectedItems) {
   if (registrationChanged) {
     scheduleIconDomainRegistrationCachePersist();
   }
+  if (!interruptedByBackoff) {
+    lastIconDomainSyncFingerprint = nextFingerprint;
+  }
 }
 
-async function hydrateCanonicalIconsForDomainsFromState(domains, projectedItems) {
+async function hydrateCanonicalIconsForDomainsFromState(domains) {
   const apiClient = currentApiClient();
   if (!apiClient || !sessionToken || !Array.isArray(domains) || domains.length === 0) {
     return;
@@ -4202,7 +4242,6 @@ async function hydrateCanonicalIconsForDomainsFromState(domains, projectedItems)
   if (Date.now() - lastIconsStateFailureAt < ICONS_STATE_RETRY_COOLDOWN_MS) {
     return;
   }
-  await syncIconStateDomainRegistrations(projectedItems);
   const uniqueDomains = selectDomainsForIconsState(domains);
   if (uniqueDomains.length === 0) {
     return;
@@ -4410,7 +4449,7 @@ function applyCachedIconsToProjection(items) {
   });
 }
 
-async function hydrateCanonicalIconsForDomains(domains, projectedItems = []) {
+async function hydrateCanonicalIconsForDomains(domains) {
   const apiClient = currentApiClient();
   if (!apiClient || !sessionToken || !Array.isArray(domains) || domains.length === 0) {
     return;
@@ -4419,7 +4458,7 @@ async function hydrateCanonicalIconsForDomains(domains, projectedItems = []) {
     return;
   }
   try {
-    await hydrateCanonicalIconsForDomainsFromState(domains, projectedItems);
+    await hydrateCanonicalIconsForDomainsFromState(domains);
   } catch {
     lastIconsStateFailureAt = Date.now();
   }
@@ -4441,7 +4480,7 @@ async function ensureProjectedIconsHydrated(items) {
   if (!iconHydrationInFlight) {
     lastIconHydrationStartedAt = Date.now();
     void persistRuntimeState();
-    iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains, items).finally(() => {
+    iconHydrationInFlight = hydrateCanonicalIconsForDomains(domains).finally(() => {
       iconHydrationInFlight = null;
     });
   }

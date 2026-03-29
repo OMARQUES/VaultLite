@@ -278,15 +278,6 @@ export function createVaultWorkspace(input: {
   let syncBackoffIndex = 0;
   let cachedDeploymentFingerprint: string | null = null;
 
-  const onWindowFocus = () => {
-    void triggerSync('focus').catch(() => undefined);
-  };
-  const onVisibilityChange = () => {
-    if (document.visibilityState === 'visible') {
-      void triggerSync('visibility').catch(() => undefined);
-    }
-  };
-
   function rebuildIndex() {
     searchIndex.value = buildVaultSearchIndex(state.items);
   }
@@ -820,12 +811,6 @@ export function createVaultWorkspace(input: {
         return;
       }
       syncStarted = true;
-      if (typeof window !== 'undefined') {
-        window.addEventListener('focus', onWindowFocus);
-      }
-      if (typeof document !== 'undefined') {
-        document.addEventListener('visibilitychange', onVisibilityChange);
-      }
       scheduleNextSync(withIntervalJitter(SYNC_INTERVAL_MS));
       void triggerSync('start').catch(() => undefined);
     },
@@ -840,12 +825,6 @@ export function createVaultWorkspace(input: {
       activePullPromise = null;
       activePullGeneration = null;
       pendingPull = false;
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('focus', onWindowFocus);
-      }
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-      }
     },
     triggerSync,
     searchQuery: readonly(searchQuery),

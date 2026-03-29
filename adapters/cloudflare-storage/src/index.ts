@@ -2217,6 +2217,43 @@ class CloudflareSiteIconCacheRepository implements SiteIconCacheRepository {
 class CloudflareAutomaticIconRegistryRepository implements AutomaticIconRegistryRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
+  async listByDomains(domains: string[]): Promise<AutomaticIconRegistryRecord[]> {
+    const normalized = Array.from(
+      new Set(
+        domains
+          .filter((domain) => typeof domain === 'string')
+          .map((domain) => domain.trim().toLowerCase())
+          .filter((domain) => domain.length > 0),
+      ),
+    );
+    if (normalized.length === 0) {
+      return [];
+    }
+    const records = new Map<string, AutomaticIconRegistryRecord>();
+    for (let index = 0; index < normalized.length; index += D1_SAFE_IN_CLAUSE_CHUNK) {
+      const chunk = normalized.slice(index, index + D1_SAFE_IN_CLAUSE_CHUNK);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await selectMany<AutomaticIconRegistryRecord>(
+        this.db,
+        `SELECT domain AS domain,
+                status AS status,
+                object_id AS objectId,
+                source_url AS sourceUrl,
+                fail_count AS failCount,
+                last_checked_at AS lastCheckedAt,
+                next_eligible_at AS nextEligibleAt,
+                updated_at AS updatedAt
+         FROM automatic_icon_registry
+         WHERE domain IN (${placeholders})`,
+        chunk,
+      );
+      for (const row of rows) {
+        records.set(row.domain, row);
+      }
+    }
+    return Array.from(records.values()).sort((left, right) => left.domain.localeCompare(right.domain));
+  }
+
   async findByDomain(domain: string): Promise<AutomaticIconRegistryRecord | null> {
     const normalized = domain.trim().toLowerCase();
     if (!normalized) {

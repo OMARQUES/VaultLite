@@ -39,6 +39,7 @@ import {
   sanitizeIconHost,
   type ManualSiteIconMap,
 } from '../lib/manual-site-icons';
+import { foregroundRefreshCoordinator, withIntervalJitter } from '../lib/foreground-refresh-coordinator';
 import { encryptAttachmentBlobPayload } from '../lib/browser-crypto';
 import { createWebRealtimeClient, type WebRealtimeClient } from '../lib/realtime-client';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
@@ -150,6 +151,10 @@ const ICONS_STATE_RETRY_COOLDOWN_MS = 10_000;
 const ICONS_STATE_QUERY_DOMAINS_MAX = 500;
 const ICONS_STATE_HYDRATION_DEBOUNCE_MS = 500;
 const ICONS_STATE_REVALIDATE_WINDOW_MS = 20_000;
+const ICONS_STATE_STALE_MS = 5 * 60 * 1000;
+const FOREGROUND_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+const FOREGROUND_REFRESH_FALLBACK_INTERVAL_MS = 20 * 60 * 1000;
+const ICON_DOMAIN_SYNC_SIGNATURES_STORAGE_PREFIX = 'vaultlite:web:icon-domain-sync-signatures:v1';
 const ICON_DOMAIN_SYNC_CONCURRENCY = 6;
 const ICON_DOMAIN_SYNC_BATCH_SIZE = 120;
 const ICON_DOMAIN_SYNC_BACKOFF_BASE_MS = 3_000;
@@ -169,13 +174,17 @@ let iconHydrationScheduledForce = false;
 let iconHydrationScheduledHosts: string[] = [];
 let lastIconHydrationHostsSignature = '';
 let lastIconHydrationHostsAt = 0;
+let lastIconsStateHydratedAt = 0;
+let iconsStateHydratedAtLeastOnce = false;
 let iconDomainSyncBackoffUntil = 0;
 let iconDomainSyncBackoffAttempt = 0;
+let iconDomainSyncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let attachmentStateSyncInFlight: Promise<void> | null = null;
 let attachmentStateSyncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let attachmentStateSyncScheduledForce = false;
 let lastAttachmentStateSyncAt = 0;
 let attachmentStateHydratedAtLeastOnce = false;
+let foregroundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const loginDraft = reactive<LoginVaultItemPayload>({
   title: '',
@@ -313,6 +322,52 @@ function mergeManualIconsIntoCanonicalCache(manualIcons: ManualSiteIconMap) {
   canonicalSiteIconsByHost.value = nextCanonical;
 }
 
+function iconDomainSyncStorageKey(username: string | null): string | null {
+  if (!username || username.trim().length === 0) {
+    return null;
+  }
+  return `${ICON_DOMAIN_SYNC_SIGNATURES_STORAGE_PREFIX}:${username.trim().toLowerCase()}`;
+}
+
+function loadPersistedIconDomainSyncSignatures(username: string | null): Record<string, string> {
+  const storageKey = iconDomainSyncStorageKey(username);
+  if (!storageKey) {
+    return {};
+  }
+  try {
+    const raw = globalThis.localStorage?.getItem(storageKey);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const next: Record<string, string> = {};
+    for (const [itemId, signature] of Object.entries(parsed)) {
+      if (typeof itemId !== 'string' || typeof signature !== 'string') {
+        continue;
+      }
+      if (itemId.trim().length === 0 || signature.trim().length === 0) {
+        continue;
+      }
+      next[itemId] = signature;
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+function persistIconDomainSyncSignatures(username: string | null, signatures: Record<string, string>) {
+  const storageKey = iconDomainSyncStorageKey(username);
+  if (!storageKey) {
+    return;
+  }
+  try {
+    globalThis.localStorage?.setItem(storageKey, JSON.stringify(signatures));
+  } catch {
+    // Best effort only.
+  }
+}
+
 async function refreshManualSiteIconsFromServer(options: { force?: boolean } = {}) {
   const now = Date.now();
   if (!options.force && now - lastManualIconRemoteRefreshAt < MANUAL_ICON_REMOTE_REFRESH_COOLDOWN_MS) {
@@ -392,7 +447,18 @@ function scheduleIconsStateHydration(
     }
     lastIconHydrationHostsSignature = signature;
     lastIconHydrationHostsAt = now;
-    void hydrateCanonicalSiteIconsForHosts(nextHosts).catch(() => undefined);
+    void foregroundRefreshCoordinator
+      .run(
+        'icons_state',
+        async () => {
+          await hydrateCanonicalSiteIconsForHosts(nextHosts);
+        },
+        {
+          force,
+          cooldownMs: FOREGROUND_REFRESH_COOLDOWN_MS,
+        },
+      )
+      .catch(() => undefined);
   }, ICONS_STATE_HYDRATION_DEBOUNCE_MS);
 }
 
@@ -520,24 +586,79 @@ function scheduleAttachmentStateSync(options: { force?: boolean } = {}) {
   }, ATTACHMENTS_STATE_SYNC_DEBOUNCE_MS);
 }
 
-function handleManualIconRefreshOnFocus() {
-  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+function shouldHydrateIconsState(options: { force?: boolean } = {}): boolean {
+  if (options.force === true) {
+    return true;
+  }
+  if (!iconsStateSyncEnabled.value) {
+    return false;
+  }
+  if (!iconsStateHydratedAtLeastOnce) {
+    return true;
+  }
+  if (!realtimeHealthy.value) {
+    return true;
+  }
+  return Date.now() - lastIconsStateHydratedAt >= ICONS_STATE_STALE_MS;
+}
+
+function requestManualSiteIconRefresh(options: { force?: boolean } = {}) {
+  void foregroundRefreshCoordinator
+    .run(
+      'icons_manual',
+      async () => {
+        await refreshManualSiteIconsFromServer({
+          force: options.force === true,
+        });
+      },
+      {
+        force: options.force === true,
+        cooldownMs: FOREGROUND_REFRESH_COOLDOWN_MS,
+      },
+    )
+    .catch(() => undefined);
+}
+
+function requestIconsStateHydration(hosts: string[], options: { force?: boolean } = {}) {
+  if (!shouldHydrateIconsState(options)) {
     return;
   }
-  void refreshManualSiteIconsFromServer({ force: true });
-  scheduleIconsStateHydration(iconHydrationHosts.value, {
-    force: !realtimeHealthy.value,
+  scheduleIconsStateHydration(hosts, {
+    force: options.force === true,
   });
 }
 
-function handleManualIconRefreshOnVisibilityChange() {
-  realtimeClient?.setVisibilityState(document.visibilityState);
-  if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-    void refreshManualSiteIconsFromServer({ force: true });
-    scheduleIconsStateHydration(iconHydrationHosts.value, {
-      force: !realtimeHealthy.value,
-    });
+function requestAttachmentStateSync(options: { force?: boolean } = {}) {
+  void foregroundRefreshCoordinator
+    .run(
+      'attachments_state',
+      async () => {
+        await syncAttachmentStateFromServer({
+          force: options.force === true,
+        });
+      },
+      {
+        force: options.force === true,
+        cooldownMs: FOREGROUND_REFRESH_COOLDOWN_MS,
+      },
+    )
+    .catch(() => undefined);
+}
+
+function scheduleForegroundRefreshFallback() {
+  if (foregroundRefreshTimer !== null) {
+    clearTimeout(foregroundRefreshTimer);
   }
+  foregroundRefreshTimer = setTimeout(() => {
+    requestManualSiteIconRefresh();
+    requestIconsStateHydration(iconHydrationHosts.value);
+    requestAttachmentStateSync();
+    scheduleForegroundRefreshFallback();
+  }, withIntervalJitter(FOREGROUND_REFRESH_FALLBACK_INTERVAL_MS));
+}
+
+function handleVisibilityChange() {
+  realtimeClient?.setVisibilityState(document.visibilityState);
 }
 
 function clearRealtimeWatchdog() {
@@ -587,15 +708,13 @@ async function handleRealtimeDomainResync(
     void workspace.triggerSync('realtime_vault_resync').catch(() => undefined);
   }
   if (domains.includes('icons_manual')) {
-    void refreshManualSiteIconsFromServer({ force: true });
+    requestManualSiteIconRefresh({ force: true });
   }
   if (domains.includes('icons_state')) {
-    scheduleIconsStateHydration(iconHydrationHosts.value, {
-      force: true,
-    });
+    requestIconsStateHydration(iconHydrationHosts.value, { force: true });
   }
   if (domains.includes('attachments')) {
-    scheduleAttachmentStateSync({ force: true });
+    requestAttachmentStateSync({ force: true });
   }
 }
 
@@ -633,9 +752,7 @@ async function initializeRealtimeClient() {
   if (typeof document !== 'undefined') {
     realtimeClient.setVisibilityState(document.visibilityState);
   }
-  scheduleIconsStateHydration(iconHydrationHosts.value, {
-    force: true,
-  });
+  requestIconsStateHydration(iconHydrationHosts.value, { force: true });
   if (sessionStore.state.phase === 'ready') {
     realtimeClient.start();
   }
@@ -729,19 +846,28 @@ const selectedTrashEntry = computed(
 const iconHydrationItems = computed(() => {
   const seen = new Set<string>();
   const items: VaultWorkspaceItem[] = [];
-  for (const entry of filteredItems.value) {
+  for (const entry of allItems.value) {
     if (seen.has(entry.itemId)) {
       continue;
     }
     seen.add(entry.itemId);
     items.push(entry);
   }
-  if (selectedItem.value && !seen.has(selectedItem.value.itemId)) {
-    items.push(selectedItem.value);
-  }
   return items;
 });
 const iconHydrationHosts = computed(() => loginHostsForItems(iconHydrationItems.value));
+const iconDomainSyncItems = computed(() => {
+  const seen = new Set<string>();
+  const items: VaultWorkspaceItem[] = [];
+  for (const entry of allItems.value) {
+    if (seen.has(entry.itemId)) {
+      continue;
+    }
+    seen.add(entry.itemId);
+    items.push(entry);
+  }
+  return items;
+});
 
 const selectedItemInContext = computed(() => {
   const current = selectedItem.value;
@@ -1593,8 +1719,10 @@ watch(
     iconsStateEtag.value = null;
     manualIconsEtag.value = null;
     iconObjectDataUrlByKey.value = {};
-    iconDomainsSyncedByItem.value = {};
+    iconDomainsSyncedByItem.value = loadPersistedIconDomainSyncSignatures(sessionStore.state.username);
     attachmentsByItemId.value = {};
+    iconsStateHydratedAtLeastOnce = false;
+    lastIconsStateHydratedAt = 0;
     lastAttachmentStateSyncAt = 0;
     attachmentStateHydratedAtLeastOnce = false;
   },
@@ -1625,7 +1753,15 @@ watch(
 watch(
   () => iconHydrationHosts.value,
   (hosts) => {
-    scheduleIconsStateHydration(hosts);
+    requestIconsStateHydration(hosts);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => iconDomainSyncFingerprint(iconDomainSyncItems.value),
+  () => {
+    scheduleIconDomainSync(iconDomainSyncItems.value);
   },
   { immediate: true },
 );
@@ -2194,6 +2330,29 @@ function nextIconDomainSyncBackoffMs(): number {
   return baseMs + jitterMs;
 }
 
+function iconDomainSyncFingerprint(items: VaultWorkspaceItem[]): string {
+  const signatures: string[] = [];
+  for (const item of items) {
+    if (item.itemType !== 'login') {
+      continue;
+    }
+    const hosts = loginHostsForItem(item);
+    signatures.push(`${item.itemId}:${item.revision}:${hosts.join(',')}`);
+  }
+  return signatures.sort((left, right) => left.localeCompare(right)).join('|');
+}
+
+function scheduleIconDomainSync(items: VaultWorkspaceItem[]) {
+  const nextItems = items.slice();
+  if (iconDomainSyncDebounceTimer !== null) {
+    clearTimeout(iconDomainSyncDebounceTimer);
+  }
+  iconDomainSyncDebounceTimer = setTimeout(() => {
+    iconDomainSyncDebounceTimer = null;
+    void syncIconDomainIndexForItems(nextItems).catch(() => undefined);
+  }, 400);
+}
+
 async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
   if (!iconsStateSyncEnabled.value) {
     return;
@@ -2201,7 +2360,19 @@ async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
   if (Date.now() < iconDomainSyncBackoffUntil) {
     return;
   }
+  const previousSerializedSignatures = JSON.stringify(iconDomainsSyncedByItem.value);
   const nextSignatures: Record<string, string> = { ...iconDomainsSyncedByItem.value };
+  const activeItemIds = new Set<string>();
+  for (const item of items) {
+    if (item.itemType === 'login') {
+      activeItemIds.add(item.itemId);
+    }
+  }
+  for (const itemId of Object.keys(nextSignatures)) {
+    if (!activeItemIds.has(itemId)) {
+      delete nextSignatures[itemId];
+    }
+  }
   const pendingEntries: Array<{
     itemId: string;
     itemRevision: number;
@@ -2214,6 +2385,7 @@ async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
     }
     const hosts = loginHostsForItem(item);
     if (hosts.length === 0) {
+      delete nextSignatures[item.itemId];
       continue;
     }
     const signature = `${item.revision}:${hosts.join(',')}`;
@@ -2228,6 +2400,11 @@ async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
     });
   }
   if (pendingEntries.length === 0) {
+    const nextSerializedSignatures = JSON.stringify(nextSignatures);
+    if (nextSerializedSignatures !== previousSerializedSignatures) {
+      iconDomainsSyncedByItem.value = nextSignatures;
+      persistIconDomainSyncSignatures(sessionStore.state.username, nextSignatures);
+    }
     return;
   }
 
@@ -2300,6 +2477,7 @@ async function syncIconDomainIndexForItems(items: VaultWorkspaceItem[]) {
     }
   }
   iconDomainsSyncedByItem.value = nextSignatures;
+  persistIconDomainSyncSignatures(sessionStore.state.username, nextSignatures);
 }
 
 function setCanonicalSiteIcons(
@@ -2440,7 +2618,6 @@ async function hydrateCanonicalSiteIconsFromState(hosts: string[]) {
   if (stateDomains.length === 0) {
     return;
   }
-  await syncIconDomainIndexForItems(iconHydrationItems.value);
   const response = await sessionStore.getIconsState({
     domains: stateDomains,
     etag: iconsStateEtag.value ?? undefined,
@@ -2449,6 +2626,8 @@ async function hydrateCanonicalSiteIconsFromState(hosts: string[]) {
     if (response.etag) {
       iconsStateEtag.value = response.etag;
     }
+    lastIconsStateHydratedAt = Date.now();
+    iconsStateHydratedAtLeastOnce = true;
     return;
   }
   const payload = response.payload;
@@ -2571,6 +2750,8 @@ async function hydrateCanonicalSiteIconsFromState(hosts: string[]) {
     canonicalSiteIconsByHost.value = nextByHost;
     faviconSourceIndexByItemAndHost.value = {};
   }
+  lastIconsStateHydratedAt = Date.now();
+  iconsStateHydratedAtLeastOnce = true;
   lastIconsStateFailureAt = 0;
 }
 
@@ -3072,12 +3253,12 @@ onMounted(() => {
   }
 
   window.addEventListener('keydown', handleGlobalKeydown);
-  window.addEventListener('focus', handleManualIconRefreshOnFocus);
   window.addEventListener('online', onRealtimeNetworkOnline);
-  document.addEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
   refreshManualSiteIcons();
-  void refreshManualSiteIconsFromServer({ force: true });
-  scheduleAttachmentStateSync({ force: true });
+  requestManualSiteIconRefresh();
+  requestAttachmentStateSync({ force: true });
+  scheduleForegroundRefreshFallback();
   void loadVault();
   workspace.startSync();
   void initializeRealtimeClient();
@@ -3097,16 +3278,23 @@ onBeforeUnmount(() => {
   mobileQuery = null;
   compactDesktopQuery = null;
   window.removeEventListener('keydown', handleGlobalKeydown);
-  window.removeEventListener('focus', handleManualIconRefreshOnFocus);
   window.removeEventListener('online', onRealtimeNetworkOnline);
-  document.removeEventListener('visibilitychange', handleManualIconRefreshOnVisibilityChange);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
   if (iconHydrationDebounceTimer) {
     clearTimeout(iconHydrationDebounceTimer);
     iconHydrationDebounceTimer = null;
   }
+  if (iconDomainSyncDebounceTimer) {
+    clearTimeout(iconDomainSyncDebounceTimer);
+    iconDomainSyncDebounceTimer = null;
+  }
   if (attachmentStateSyncDebounceTimer) {
     clearTimeout(attachmentStateSyncDebounceTimer);
     attachmentStateSyncDebounceTimer = null;
+  }
+  if (foregroundRefreshTimer !== null) {
+    clearTimeout(foregroundRefreshTimer);
+    foregroundRefreshTimer = null;
   }
   attachmentStateSyncInFlight = null;
   iconObjectFetchInFlightByKey.clear();

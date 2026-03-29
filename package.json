@@ -7,6 +7,7 @@
     "dev:local": "node infrastructure/scripts/dev-local.mjs",
     "local:invite": "node infrastructure/scripts/local-issue-invite.mjs",
     "reset:local-state": "node infrastructure/scripts/reset-local-state.mjs",
+    "analyze:dev-log": "node infrastructure/scripts/analyze-dev-local-log.mjs",
     "validate:migrations": "node infrastructure/scripts/validate-migrations.mjs",
     "smoke:local-flow": "node infrastructure/scripts/smoke-local-flow.mjs",
     "test": "npm run test --workspaces --if-present"

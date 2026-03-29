@@ -124,7 +124,13 @@ import type {
   IdGenerator,
   MutableRequestCsrfValidator,
 } from '@vaultlite/runtime-abstractions';
-import type { DeviceRecord, SessionRecord, UserAccountRecord, VaultLiteStorage } from '@vaultlite/storage-abstractions';
+import type {
+  AutomaticIconRegistryRecord,
+  DeviceRecord,
+  SessionRecord,
+  UserAccountRecord,
+  VaultLiteStorage,
+} from '@vaultlite/storage-abstractions';
 import {
   createDefaultSecurityHeaders,
   createSessionCookieBundle,
@@ -621,6 +627,32 @@ function shouldQueueIconDiscovery(input: {
     return true;
   }
   return nowMillis - updatedMillis >= ICONS_DISCOVERY_RETRY_COOLDOWN_MS;
+}
+
+function isIconDiscoveryEligibleByRegistry(input: {
+  registry: AutomaticIconRegistryRecord | null;
+  domainsChanged: boolean;
+  nowIso: string;
+}): boolean {
+  if (!input.registry) {
+    return true;
+  }
+  const nextEligibleMillis = Date.parse(input.registry.nextEligibleAt);
+  const nowMillis = Date.parse(input.nowIso);
+  if (!Number.isFinite(nextEligibleMillis) || !Number.isFinite(nowMillis)) {
+    return true;
+  }
+  if (nowMillis >= nextEligibleMillis) {
+    return true;
+  }
+  const hasValidAutomaticMapping =
+    input.registry.status === 'ready' &&
+    typeof input.registry.objectId === 'string' &&
+    input.registry.objectId.length > 0;
+  if (input.domainsChanged && !hasValidAutomaticMapping) {
+    return true;
+  }
+  return false;
 }
 
 function resolveExecutionWaitUntil(
@@ -5743,11 +5775,45 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       Array.from(pendingHosts),
     );
     const existingStateByDomain = new Map(existingStates.map((entry) => [entry.domain, entry]));
+    const registryByDomain = new Map<string, AutomaticIconRegistryRecord>();
+    if (realtimeConfig.flags.icons_discovery_v2_v1 && pendingHosts.size > 0) {
+      const registryEntries = await options.storage.automaticIconRegistry.listByDomains(
+        Array.from(pendingHosts),
+      );
+      for (const entry of registryEntries) {
+        registryByDomain.set(entry.domain, entry);
+      }
+    }
 
     if (replaceResult.result !== 'success_no_op_stale_revision') {
       for (const host of pendingHosts) {
         const existingState = existingStateByDomain.get(host) ?? null;
-        if (!existingState) {
+        const registry = registryByDomain.get(host) ?? null;
+        const hasReusableReadyRegistryState =
+          registry?.status === 'ready' &&
+          typeof registry.objectId === 'string' &&
+          registry.objectId.length > 0;
+        const hasReusableAbsentRegistryState = registry?.status === 'absent';
+
+        if (hasReusableReadyRegistryState && existingState?.status !== 'ready') {
+          await upsertIconStateAndPublish({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domain: host,
+            status: 'ready',
+            objectId: registry.objectId,
+            occurredAt: nowIso,
+          });
+        } else if (hasReusableAbsentRegistryState && existingState?.status !== 'absent') {
+          await upsertIconStateAndPublish({
+            userId: sessionContext.user.userId,
+            sourceDeviceId: sessionContext.device.deviceId,
+            domain: host,
+            status: 'absent',
+            objectId: null,
+            occurredAt: nowIso,
+          });
+        } else if (!existingState) {
           await upsertIconStateAndPublish({
             userId: sessionContext.user.userId,
             sourceDeviceId: sessionContext.device.deviceId,
@@ -5757,7 +5823,37 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
             occurredAt: nowIso,
           });
         }
+
+        if (!existingState) {
+          existingStateByDomain.set(host, {
+            userId: sessionContext.user.userId,
+            domain: host,
+            status: hasReusableReadyRegistryState
+              ? 'ready'
+              : hasReusableAbsentRegistryState
+                ? 'absent'
+                : 'pending',
+            objectId: hasReusableReadyRegistryState ? (registry?.objectId ?? null) : null,
+            updatedAt: nowIso,
+          });
+        } else if (hasReusableReadyRegistryState || hasReusableAbsentRegistryState) {
+          existingStateByDomain.set(host, {
+            ...existingState,
+            status: hasReusableReadyRegistryState ? 'ready' : 'absent',
+            objectId: hasReusableReadyRegistryState ? (registry?.objectId ?? null) : null,
+            updatedAt: nowIso,
+          });
+        }
         if (!realtimeConfig.flags.icons_discovery_v2_v1) {
+          continue;
+        }
+        if (
+          !isIconDiscoveryEligibleByRegistry({
+            registry,
+            domainsChanged: replaceResult.changed,
+            nowIso,
+          })
+        ) {
           continue;
         }
         if (!existingState) {
@@ -5887,9 +5983,43 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       Array.from(pendingHosts),
     );
     const existingStateByDomain = new Map(existingStates.map((entry) => [entry.domain, entry]));
+    const registryByDomain = new Map<string, AutomaticIconRegistryRecord>();
+    if (realtimeConfig.flags.icons_discovery_v2_v1 && pendingHosts.size > 0) {
+      const registryEntries = await options.storage.automaticIconRegistry.listByDomains(
+        Array.from(pendingHosts),
+      );
+      for (const entry of registryEntries) {
+        registryByDomain.set(entry.domain, entry);
+      }
+    }
     for (const host of pendingHosts) {
       const existingState = existingStateByDomain.get(host) ?? null;
-      if (!existingState) {
+      const registry = registryByDomain.get(host) ?? null;
+      const hasReusableReadyRegistryState =
+        registry?.status === 'ready' &&
+        typeof registry.objectId === 'string' &&
+        registry.objectId.length > 0;
+      const hasReusableAbsentRegistryState = registry?.status === 'absent';
+
+      if (hasReusableReadyRegistryState && existingState?.status !== 'ready') {
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: host,
+          status: 'ready',
+          objectId: registry.objectId,
+          occurredAt: nowIso,
+        });
+      } else if (hasReusableAbsentRegistryState && existingState?.status !== 'absent') {
+        await upsertIconStateAndPublish({
+          userId: sessionContext.user.userId,
+          sourceDeviceId: sessionContext.device.deviceId,
+          domain: host,
+          status: 'absent',
+          objectId: null,
+          occurredAt: nowIso,
+        });
+      } else if (!existingState) {
         await upsertIconStateAndPublish({
           userId: sessionContext.user.userId,
           sourceDeviceId: sessionContext.device.deviceId,
@@ -5899,7 +6029,38 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
           occurredAt: nowIso,
         });
       }
+
+      if (!existingState) {
+        existingStateByDomain.set(host, {
+          userId: sessionContext.user.userId,
+          domain: host,
+          status: hasReusableReadyRegistryState
+            ? 'ready'
+            : hasReusableAbsentRegistryState
+              ? 'absent'
+              : 'pending',
+          objectId: hasReusableReadyRegistryState ? (registry?.objectId ?? null) : null,
+          updatedAt: nowIso,
+        });
+      } else if (hasReusableReadyRegistryState || hasReusableAbsentRegistryState) {
+        existingStateByDomain.set(host, {
+          ...existingState,
+          status: hasReusableReadyRegistryState ? 'ready' : 'absent',
+          objectId: hasReusableReadyRegistryState ? (registry?.objectId ?? null) : null,
+          updatedAt: nowIso,
+        });
+      }
       if (!realtimeConfig.flags.icons_discovery_v2_v1) {
+        continue;
+      }
+      const domainsChanged = hostsWithChangedDomains.has(host);
+      if (
+        !isIconDiscoveryEligibleByRegistry({
+          registry,
+          domainsChanged,
+          nowIso,
+        })
+      ) {
         continue;
       }
       if (!existingState) {
@@ -5910,7 +6071,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         shouldQueueIconDiscovery({
           status: existingState.status,
           updatedAt: existingState.updatedAt,
-          domainsChanged: hostsWithChangedDomains.has(host),
+          domainsChanged,
           nowIso,
         })
       ) {

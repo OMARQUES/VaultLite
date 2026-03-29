@@ -227,6 +227,7 @@ async function mountVaultAt(
   } = {},
 ) {
   currentWorkspace = createWorkspace(items, options.tombstones ?? []);
+  const sessionStore = createSessionStore(options.role);
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -248,7 +249,7 @@ async function mountVaultAt(
     global: {
       plugins: [router],
       provide: {
-        [sessionStoreKey as symbol]: createSessionStore(options.role),
+        [sessionStoreKey as symbol]: sessionStore,
       },
     },
     attachTo: document.body,
@@ -256,7 +257,7 @@ async function mountVaultAt(
 
   await flushPromises();
 
-  return { wrapper, router, workspace: currentWorkspace };
+  return { wrapper, router, workspace: currentWorkspace, sessionStore };
 }
 
 describe('VaultShellPage', () => {
@@ -313,6 +314,17 @@ describe('VaultShellPage', () => {
     expect(wrapper.text()).toContain('New secure note');
     expect(wrapper.findAll('.vault-empty-create-card')).toHaveLength(4);
     expect(wrapper.text()).not.toContain('Reissue Account Kit');
+  });
+
+  test('does not refresh manual icons on focus or visibility-only events', async () => {
+    const { sessionStore } = await mountVaultAt('/vault', []);
+    const initialCalls = sessionStore.listManualSiteIcons.mock.calls.length;
+
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+
+    expect(sessionStore.listManualSiteIcons).toHaveBeenCalledTimes(initialCalls);
   });
 
   test('keeps card-style empty state when search has no matches', async () => {

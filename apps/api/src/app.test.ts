@@ -1275,6 +1275,174 @@ describe('createVaultLiteApi', () => {
     }
   });
 
+  test('skips icon discovery enqueue when registry nextEligibleAt is still in cooldown window', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        webAllowedOrigins: ['https://vaultlite.example.com'],
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: false,
+          realtime_delta_vault_v1: false,
+          realtime_delta_icons_v1: false,
+          realtime_delta_history_v1: false,
+          realtime_delta_attachments_v1: false,
+          realtime_apply_web_v1: false,
+          realtime_apply_extension_v1: false,
+          icons_state_sync_v1: true,
+          icons_ws_apply_web_v1: false,
+          icons_ws_apply_extension_v1: false,
+          icons_discovery_v2_v1: true,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: false,
+          icons_provider_favicon_vemetric_enabled: true,
+          icons_provider_google_s2_enabled: true,
+          icons_provider_icon_horse_enabled: false,
+          icons_provider_duckduckgo_ip3_enabled: false,
+          icons_provider_faviconextractor_enabled: false,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch() {
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_discovery_gate',
+      username: 'gate-user',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      updatedAt: '2026-03-24T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_discovery_gate',
+      userId: 'user_discovery_gate',
+      deviceName: 'Gate Browser',
+      platform: 'web',
+      deviceState: 'active',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      revokedAt: null,
+    });
+    await storage.sessions.create({
+      sessionId: 'session_discovery_gate',
+      userId: 'user_discovery_gate',
+      deviceId: 'device_discovery_gate',
+      csrfToken: 'csrf_discovery_gate',
+      createdAt: '2026-03-24T10:00:00.000Z',
+      expiresAt: '2026-03-24T20:00:00.000Z',
+      recentReauthAt: null,
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+    await storage.iconObjects.create({
+      objectId: 'icon_object_gate',
+      objectClass: 'automatic_public',
+      ownerUserId: null,
+      sha256: 'c'.repeat(64),
+      r2Key: 'icons/automatic/test_gate',
+      contentType: 'image/png',
+      byteLength: 16,
+      createdAt: '2026-03-24T11:59:00.000Z',
+      updatedAt: '2026-03-24T11:59:00.000Z',
+    });
+    await storage.automaticIconRegistry.upsert({
+      domain: 'portal.example.com',
+      status: 'ready',
+      objectId: 'icon_object_gate',
+      sourceUrl: null,
+      failCount: 0,
+      lastCheckedAt: '2026-03-24T11:59:00.000Z',
+      nextEligibleAt: '2026-03-24T12:30:00.000Z',
+      updatedAt: '2026-03-24T11:59:00.000Z',
+    });
+    await storage.automaticIconRegistry.upsert({
+      domain: 'example.com',
+      status: 'ready',
+      objectId: 'icon_object_gate',
+      sourceUrl: null,
+      failCount: 0,
+      lastCheckedAt: '2026-03-24T11:59:00.000Z',
+      nextEligibleAt: '2026-03-24T12:30:00.000Z',
+      updatedAt: '2026-03-24T11:59:00.000Z',
+    });
+
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async () => new Response('not_found', { status: 404 }));
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    try {
+      const response = await app.request('/api/icons/domains/batch', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: 'vl_session=session_discovery_gate; vl_csrf=csrf_discovery_gate',
+          'x-csrf-token': 'csrf_discovery_gate',
+        },
+        body: JSON.stringify({
+          entries: [
+            {
+              itemId: 'item_login_gate',
+              itemRevision: 2,
+              hosts: ['portal.example.com'],
+            },
+          ],
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const iconState = await storage.userIconState.findByUserIdAndDomain(
+        'user_discovery_gate',
+        'portal.example.com',
+      );
+      expect(iconState?.status).toBe('ready');
+      expect(iconState?.objectId ?? null).toBe('icon_object_gate');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('serves icon objects with CORS headers compatible with web fetches', async () => {
     const storage = createTestStorage();
     const clock = new AdjustableClock(new Date('2026-03-24T12:00:00.000Z'));
