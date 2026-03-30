@@ -58,6 +58,7 @@ import { toHumanErrorMessage } from '../lib/human-error';
 type VaultScope = 'all' | 'favorites' | 'trash';
 type VaultTypeFilter = 'all' | 'login' | 'document' | 'card' | 'secure_note';
 type AttachmentUploadState = 'pending' | 'uploaded' | 'attached' | 'deleted' | 'orphaned';
+const PASSWORD_HISTORY_REALTIME_EVENT = 'vaultlite.password_history.updated';
 
 interface AttachmentUploadView {
   uploadId: string;
@@ -715,6 +716,9 @@ async function handleRealtimeDomainResync(
   }
   if (domains.includes('attachments')) {
     requestAttachmentStateSync({ force: true });
+  }
+  if (domains.includes('password_history') && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(PASSWORD_HISTORY_REALTIME_EVENT));
   }
 }
 
@@ -4076,9 +4080,11 @@ onBeforeUnmount(() => {
                 <AppIcon name="edit" :size="16" />
               </button>
             </span>
-            <div>
+            <div class="detail-card__identity-text">
               <p class="eyebrow">{{ detailMetaType }}</p>
-              <h2>{{ selectedItemInContext.payload.title }}</h2>
+              <h2 class="detail-card__title" :title="selectedItemInContext.payload.title">
+                {{ selectedItemInContext.payload.title }}
+              </h2>
             </div>
           </div>
           <div v-if="!isMobileViewport" class="detail-card__actions-layout">

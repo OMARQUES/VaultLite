@@ -101,6 +101,26 @@ export function hasSameRenderableRows(previousItems, nextItems, input) {
   return previousItems.length > 0;
 }
 
+export function shouldRenderVaultSkeleton(input) {
+  const warmupState = typeof input?.warmupState === 'string' ? input.warmupState : '';
+  const warmupRunning =
+    warmupState === 'running' || warmupState === 'syncing' || warmupState === 'loading_local';
+  const hasReadySnapshot = input?.hasReadySnapshot === true;
+  const suppressSkeleton = input?.suppressSkeleton === true;
+  const vaultLoading = input?.vaultLoading === true;
+
+  if (suppressSkeleton) {
+    return false;
+  }
+  if (vaultLoading) {
+    return true;
+  }
+  if (!warmupRunning) {
+    return false;
+  }
+  return !hasReadySnapshot;
+}
+
 export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }

@@ -8,6 +8,7 @@ import {
   resolvePopupPhase,
   hasSameItemOrder,
   hasSameRenderableRows,
+  shouldRenderVaultSkeleton,
   toNavigableUrl,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
@@ -114,6 +115,33 @@ describe('popup view model helpers', () => {
 
     expect(hasSameRenderableRows(base, same, { pageEligible: true, fillDisabledReason: null })).toBe(true);
     expect(hasSameRenderableRows(base, changedFavicon, { pageEligible: true, fillDisabledReason: null })).toBe(true);
+  });
+
+  test('renders skeleton only when loading/warmup needs first paint', () => {
+    expect(
+      shouldRenderVaultSkeleton({
+        vaultLoading: true,
+        warmupState: 'running',
+        hasReadySnapshot: false,
+        suppressSkeleton: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRenderVaultSkeleton({
+        vaultLoading: false,
+        warmupState: 'running',
+        hasReadySnapshot: true,
+        suppressSkeleton: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRenderVaultSkeleton({
+        vaultLoading: false,
+        warmupState: 'running',
+        hasReadySnapshot: false,
+        suppressSkeleton: true,
+      }),
+    ).toBe(false);
   });
 
   test('prefers quick fill action for suggested login on eligible page', () => {

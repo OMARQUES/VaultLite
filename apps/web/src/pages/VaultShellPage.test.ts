@@ -717,6 +717,34 @@ describe('VaultShellPage', () => {
     expect(wrapper.find('.detail-actions.detail-actions--keep-row').exists()).toBe(true);
   });
 
+  test('truncates long detail title and exposes full value in tooltip without hiding header actions', async () => {
+    mediaQueryMatches = false;
+    compactDesktopQueryMatches = true;
+    installMatchMediaStub();
+    const longTitle = 'Email Joao (Primo) Conta Microsoft com titulo extremamente longo para validar truncamento';
+    const { wrapper } = await mountVaultAt('/vault/item/item_1', [
+      {
+        itemId: 'item_1',
+        itemType: 'login',
+        revision: 1,
+        createdAt: '2026-03-15T10:00:00.000Z',
+        updatedAt: '2026-03-15T10:00:00.000Z',
+        payload: {
+          title: longTitle,
+          username: 'alice',
+          password: 'secret',
+          urls: ['https://hub.example'],
+          notes: '',
+        },
+      },
+    ]);
+
+    const detailTitle = wrapper.get('.detail-card__title');
+    expect(detailTitle.attributes('title')).toBe(longTitle);
+    expect(wrapper.find('.detail-actions.detail-actions--keep-row').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="vault-compact-back-button"]').exists()).toBe(true);
+  });
+
   test('syncs search state with q in route query and keeps q while opening item detail', async () => {
     const { wrapper, router } = await mountVaultAt('/vault?scope=all&type=all&folder=all&q=hub', [
       {

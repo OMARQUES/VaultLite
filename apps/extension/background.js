@@ -34,15 +34,20 @@ import {
 } from './runtime-crypto.js';
 import { diagnoseCredentialCache } from './credential-cache-diagnostics.js';
 import {
+  beginExtensionVaultCachePending,
   clearExtensionProjectionCache,
   clearExtensionVaultCache,
+  discardExtensionVaultCachePending,
+  finalizeExtensionVaultCachePending,
   loadExtensionProjectionCache,
   loadExtensionVaultCache,
+  promoteExtensionVaultCachePending,
   saveExtensionProjectionCache,
   saveExtensionVaultCache,
+  writeExtensionVaultCachePending,
 } from './local-vault-cache.js';
 
-const CREDENTIAL_CACHE_TTL_MS = 60_000;
+const CREDENTIAL_CACHE_TTL_MS = 10 * 60 * 1000;
 const RESTORE_THROTTLE_MS = 15_000;
 const DEFAULT_DEVICE_NAME = 'VaultLite Extension';
 const MEMORY_IDLE_LOCK_DEFAULT_MS = 5 * 60 * 1000;
@@ -59,7 +64,8 @@ const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
 const ICON_RESOLVE_MISS_RETRY_MS = 15 * 60 * 1000;
 const ICON_HYDRATION_START_COOLDOWN_MS = 5 * 60 * 1000;
-const ICON_STATE_HYDRATION_START_COOLDOWN_MS = 10_000;
+const ICON_STATE_HYDRATION_HEALTHY_COOLDOWN_MS = 5 * 60 * 1000;
+const ICON_STATE_HYDRATION_DEGRADED_COOLDOWN_MS = 30_000;
 const ICONS_STATE_RETRY_COOLDOWN_MS = 10_000;
 const ICONS_STATE_QUERY_DOMAINS_MAX = 500;
 const ICON_DOMAIN_SYNC_CONCURRENCY = 6;
@@ -82,6 +88,9 @@ const UNLOCK_GRANT_TTL_SECONDS = 120;
 const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
 const MANUAL_ICON_SYNC_QUEUE_STORAGE_KEY = 'vaultlite.manual_icon_sync_queue.v1';
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
+const PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY = 'vaultlite.password_generator_history.cache.v1';
+const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.password_generator_history.synced_at.v1';
+const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
 const REALTIME_CONNECT_INITIAL_JITTER_MAX_MS = 750;
 const REALTIME_RECONNECT_BASE_DELAY_MS = 500;
@@ -121,6 +130,10 @@ let sessionToken = null;
 let unlockedContext = null;
 let manualIconMap = {};
 let manualIconSyncQueue = {};
+let passwordGeneratorHistoryCache = [];
+let passwordGeneratorHistoryCacheLoaded = false;
+let passwordGeneratorHistoryCacheLastSyncedAt = 0;
+let passwordGeneratorHistorySyncInFlight = null;
 let credentialsCache = {
   loadedAt: 0,
   credentials: [],
@@ -1108,6 +1121,14 @@ function refreshFromRealtimeDomains(domains) {
   if (domains.includes('icons_state')) {
     queueRealtimeIconsResync();
   }
+  if (domains.includes('password_history')) {
+    void syncPasswordGeneratorHistoryCacheFromServer({
+      force: true,
+      awaitCompletion: true,
+    }).then(() => {
+      schedulePopupRealtimeNotification(['password_history']);
+    });
+  }
 }
 
 function handleRealtimeServerEvent(eventEnvelope) {
@@ -1148,7 +1169,16 @@ function handleRealtimeServerEvent(eventEnvelope) {
     });
     return;
   }
-  if (topic.startsWith('password_history.') || topic.startsWith('vault.attachment.')) {
+  if (topic.startsWith('password_history.')) {
+    void syncPasswordGeneratorHistoryCacheFromServer({
+      force: true,
+      awaitCompletion: true,
+    }).then(() => {
+      schedulePopupRealtimeNotification(['password_history']);
+    });
+    return;
+  }
+  if (topic.startsWith('vault.attachment.')) {
     // Advisory in extension V1; existing APIs refresh lazily from popup actions.
   }
 }
@@ -1616,6 +1646,7 @@ async function clearTrustedStateForReconnect(reasonMessage) {
   });
   await clearCredentialCacheForIdentityBestEffort(cacheIdentity);
   await clearPersistedSessionListProjectionCacheBestEffort();
+  await clearPasswordGeneratorHistoryCache();
   clearSensitiveMemory();
   setPhase('pairing_required', reasonMessage);
 }
@@ -3386,13 +3417,12 @@ async function decryptSnapshotEntriesInChunks(entries, accountKey, options = {})
         }
       }
     }
-    credentialsCache = {
-      loadedAt: credentialsCache.loadedAt,
-      credentials: [...decrypted],
-    };
-    if (typeof options.onChunk === 'function') {
+    if (typeof options.onChunkComplete === 'function') {
       try {
-        await options.onChunk(decrypted);
+        await options.onChunkComplete({
+          decryptedCount: decrypted.length,
+          totalCount: entries.length,
+        });
       } catch {
         // Best effort hook only.
       }
@@ -3404,6 +3434,11 @@ async function decryptSnapshotEntriesInChunks(entries, accountKey, options = {})
     loginEntriesSeen,
     decryptFailures,
   };
+}
+
+function createPendingCredentialSyncId() {
+  const randomSuffix = Math.random().toString(36).slice(2, 10);
+  return `sync_${Date.now()}_${randomSuffix}`;
 }
 
 async function performCredentialCacheWarmup(options = {}) {
@@ -3438,12 +3473,32 @@ async function performCredentialCacheWarmup(options = {}) {
   cacheWarmupError = null;
   projectionCacheDiagnostics.lastNetworkSyncStartedAt = nowIso();
 
+  const cacheIdentity = extensionCacheIdentity();
+  const pendingSyncId = cacheIdentity ? createPendingCredentialSyncId() : null;
+
   try {
+    if (cacheIdentity && pendingSyncId) {
+      await beginExtensionVaultCachePending({
+        username: cacheIdentity.username,
+        deviceId: cacheIdentity.deviceId,
+        deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+        syncId: pendingSyncId,
+      });
+    }
+
     const allEntries = [];
     let snapshotToken;
     let cursor;
     while (true) {
       if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
+        if (cacheIdentity && pendingSyncId) {
+          await discardExtensionVaultCachePending({
+            username: cacheIdentity.username,
+            deviceId: cacheIdentity.deviceId,
+            deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+            syncId: pendingSyncId,
+          }).catch(() => undefined);
+        }
         cacheWarmupState = 'idle';
         projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
         return ok();
@@ -3470,11 +3525,6 @@ async function performCredentialCacheWarmup(options = {}) {
     const { decrypted, loginEntriesSeen, decryptFailures } = await decryptSnapshotEntriesInChunks(
       allEntries,
       unlockedContext.accountKey,
-      {
-        onChunk: async () => {
-          await persistCredentialCacheToLocalBestEffort(snapshotToken ?? null);
-        },
-      },
     );
     const diagnostic = diagnoseCredentialCache({
       loginEntriesSeen,
@@ -3482,12 +3532,55 @@ async function performCredentialCacheWarmup(options = {}) {
       decryptFailures,
     });
     if (diagnostic) {
+      if (cacheIdentity && pendingSyncId) {
+        await discardExtensionVaultCachePending({
+          username: cacheIdentity.username,
+          deviceId: cacheIdentity.deviceId,
+          deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+          syncId: pendingSyncId,
+        }).catch(() => undefined);
+      }
       cacheWarmupState = 'sync_failed';
       cacheWarmupError = diagnostic.message;
       if (credentialsCache.credentials.length > 0) {
         return ok();
       }
       return fail(diagnostic.code, diagnostic.message);
+    }
+
+    if (cacheIdentity && pendingSyncId) {
+      await writeExtensionVaultCachePending({
+        username: cacheIdentity.username,
+        deviceId: cacheIdentity.deviceId,
+        deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+        accountKey: cacheIdentity.accountKey,
+        syncId: pendingSyncId,
+        snapshotToken: snapshotToken ?? null,
+        credentials: decrypted,
+        progress: 1,
+      });
+      const pendingValidation = await finalizeExtensionVaultCachePending({
+        username: cacheIdentity.username,
+        deviceId: cacheIdentity.deviceId,
+        deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+        accountKey: cacheIdentity.accountKey,
+        syncId: pendingSyncId,
+        expectedItemCount: decrypted.length,
+      });
+      if (!pendingValidation?.ok) {
+        await discardExtensionVaultCachePending({
+          username: cacheIdentity.username,
+          deviceId: cacheIdentity.deviceId,
+          deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+          syncId: pendingSyncId,
+        }).catch(() => undefined);
+        cacheWarmupState = 'sync_failed';
+        cacheWarmupError = 'Could not validate local vault cache.';
+        if (credentialsCache.credentials.length > 0) {
+          return ok();
+        }
+        return fail('cache_validation_failed', cacheWarmupError);
+      }
     }
 
     credentialsCache = {
@@ -3497,13 +3590,40 @@ async function performCredentialCacheWarmup(options = {}) {
     lastCredentialCacheSource = 'network';
     projectionCacheDiagnostics.networkSyncCount += 1;
     projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
-    await persistCredentialCacheToLocalBestEffort(snapshotToken ?? null);
+    if (cacheIdentity && pendingSyncId) {
+      const promoteResult = await promoteExtensionVaultCachePending({
+        username: cacheIdentity.username,
+        deviceId: cacheIdentity.deviceId,
+        deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+        syncId: pendingSyncId,
+      });
+      if (!promoteResult?.ok) {
+        await discardExtensionVaultCachePending({
+          username: cacheIdentity.username,
+          deviceId: cacheIdentity.deviceId,
+          deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+          syncId: pendingSyncId,
+        }).catch(() => undefined);
+      }
+    } else {
+      await persistCredentialCacheToLocalBestEffort(snapshotToken ?? null);
+    }
+    hydrateSessionListProjectionCacheFromCredentials();
+    void persistSessionListProjectionCacheBestEffort();
     cacheWarmupState = 'completed';
     cacheWarmupError = null;
     return ok();
   } catch (error) {
     const described = describeError(error, 'snapshot_failed');
     projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
+    if (cacheIdentity && pendingSyncId) {
+      await discardExtensionVaultCachePending({
+        username: cacheIdentity.username,
+        deviceId: cacheIdentity.deviceId,
+        deploymentFingerprint: cacheIdentity.deploymentFingerprint,
+        syncId: pendingSyncId,
+      }).catch(() => undefined);
+    }
     if (
       described.code === 'unauthorized' ||
       described.code === 'request_failed_401' ||
@@ -3715,7 +3835,7 @@ function normalizePersistedIconCacheEntry(entry) {
   }
   const cachedAtRaw = Number(entry.cachedAt ?? 0);
   const cachedAt = Number.isFinite(cachedAtRaw) ? Math.max(0, Math.trunc(cachedAtRaw)) : 0;
-  if (!cachedAt || Date.now() - cachedAt > ICON_CACHE_TTL_MS) {
+  if (!cachedAt) {
     return null;
   }
   return {
@@ -3811,12 +3931,10 @@ function iconCacheEntryForDomain(domain) {
     if (!entry) {
       continue;
     }
-    if (Date.now() - entry.cachedAt > ICON_CACHE_TTL_MS) {
-      canonicalIconCacheByDomain.delete(alias);
-      scheduleCanonicalIconCachePersist();
-      continue;
-    }
-    return entry;
+    return {
+      ...entry,
+      stale: Date.now() - entry.cachedAt > ICON_CACHE_TTL_MS,
+    };
   }
   return null;
 }
@@ -3868,6 +3986,19 @@ function cacheResolvedIcons(icons) {
 
 function isIconsStateSyncEnabled() {
   return realtimeRuntime?.flags?.icons_state_sync_v1 === true;
+}
+
+function isRealtimeHealthyForIconsHydration() {
+  const socket = realtimeConnection.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  const heartbeatIntervalMs =
+    Number.isFinite(realtimeRuntime?.heartbeatIntervalMs) && realtimeRuntime.heartbeatIntervalMs > 0
+      ? realtimeRuntime.heartbeatIntervalMs
+      : REALTIME_HEARTBEAT_IDLE_MS;
+  const staleWindowMs = Math.max(REALTIME_HEARTBEAT_IDLE_MS, heartbeatIntervalMs * 2);
+  return Date.now() - realtimeConnection.lastReceivedAt <= staleWindowMs;
 }
 
 function iconObjectCacheKeyFromStateRecord(record) {
@@ -4473,7 +4604,11 @@ async function ensureProjectedIconsHydrated(items) {
   if (!sessionToken || !currentApiClient()) {
     return;
   }
-  const cooldownMs = isIconsStateSyncEnabled() ? ICON_STATE_HYDRATION_START_COOLDOWN_MS : ICON_HYDRATION_START_COOLDOWN_MS;
+  const cooldownMs = isIconsStateSyncEnabled()
+    ? isRealtimeHealthyForIconsHydration()
+      ? ICON_STATE_HYDRATION_HEALTHY_COOLDOWN_MS
+      : ICON_STATE_HYDRATION_DEGRADED_COOLDOWN_MS
+    : ICON_HYDRATION_START_COOLDOWN_MS;
   if (Date.now() - lastIconHydrationStartedAt < cooldownMs) {
     return;
   }
@@ -4779,50 +4914,196 @@ function normalizePasswordGeneratorHistoryEntry(candidate) {
   };
 }
 
+function sortPasswordGeneratorHistoryEntries(entries) {
+  return [...entries]
+    .sort((left, right) => {
+      if (left.createdAt !== right.createdAt) {
+        return right.createdAt - left.createdAt;
+      }
+      return String(right.id).localeCompare(String(left.id));
+    })
+    .slice(0, PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES);
+}
+
+async function hydratePasswordGeneratorHistoryCacheFromStorage() {
+  if (passwordGeneratorHistoryCacheLoaded) {
+    return;
+  }
+  passwordGeneratorHistoryCacheLoaded = true;
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    passwordGeneratorHistoryCache = [];
+    passwordGeneratorHistoryCacheLastSyncedAt = 0;
+    return;
+  }
+  try {
+    const stored = await sessionStorage.get([
+      PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY,
+      PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY,
+    ]);
+    const rawEntries = Array.isArray(stored?.[PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY])
+      ? stored[PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY]
+      : [];
+    const normalized = rawEntries
+      .map((entry) => normalizePasswordGeneratorHistoryEntry(entry))
+      .filter((entry) => Boolean(entry));
+    passwordGeneratorHistoryCache = sortPasswordGeneratorHistoryEntries(normalized);
+    const rawSyncedAt = Number(stored?.[PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY]);
+    passwordGeneratorHistoryCacheLastSyncedAt = Number.isFinite(rawSyncedAt) ? Math.max(0, rawSyncedAt) : 0;
+  } catch {
+    passwordGeneratorHistoryCache = [];
+    passwordGeneratorHistoryCacheLastSyncedAt = 0;
+  }
+}
+
+async function persistPasswordGeneratorHistoryCacheToStorage() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  try {
+    await sessionStorage.set({
+      [PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY]: passwordGeneratorHistoryCache,
+      [PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY]: passwordGeneratorHistoryCacheLastSyncedAt,
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+async function clearPasswordGeneratorHistoryCache() {
+  passwordGeneratorHistoryCache = [];
+  passwordGeneratorHistoryCacheLastSyncedAt = 0;
+  passwordGeneratorHistorySyncInFlight = null;
+  passwordGeneratorHistoryCacheLoaded = true;
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  try {
+    await sessionStorage.remove([
+      PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY,
+      PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY,
+    ]);
+  } catch {
+    // Best effort only.
+  }
+}
+
+function setPasswordGeneratorHistoryCache(entries, input = {}) {
+  const normalizedEntries = Array.isArray(entries)
+    ? entries.map((entry) => normalizePasswordGeneratorHistoryEntry(entry)).filter((entry) => Boolean(entry))
+    : [];
+  passwordGeneratorHistoryCache = sortPasswordGeneratorHistoryEntries(normalizedEntries);
+  if (Number.isFinite(input.syncedAt)) {
+    passwordGeneratorHistoryCacheLastSyncedAt = Math.max(0, Math.trunc(input.syncedAt));
+  }
+  if (input.persist !== false) {
+    void persistPasswordGeneratorHistoryCacheToStorage();
+  }
+}
+
+function upsertPasswordGeneratorHistoryCacheEntry(entry) {
+  const normalized = normalizePasswordGeneratorHistoryEntry(entry);
+  if (!normalized) {
+    return;
+  }
+  const filtered = passwordGeneratorHistoryCache.filter((candidate) => candidate.id !== normalized.id);
+  setPasswordGeneratorHistoryCache([normalized, ...filtered], {
+    syncedAt: Date.now(),
+  });
+}
+
+async function syncPasswordGeneratorHistoryCacheFromServer(options = {}) {
+  await hydratePasswordGeneratorHistoryCacheFromStorage();
+  const force = options?.force === true;
+  const awaitCompletion = options?.awaitCompletion !== false;
+
+  if (passwordGeneratorHistorySyncInFlight) {
+    if (!awaitCompletion) {
+      return ok({ entries: passwordGeneratorHistoryCache });
+    }
+    return passwordGeneratorHistorySyncInFlight;
+  }
+
+  if (!force && Date.now() - passwordGeneratorHistoryCacheLastSyncedAt < PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS) {
+    return ok({ entries: passwordGeneratorHistoryCache });
+  }
+
+  if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
+    return ok({ entries: passwordGeneratorHistoryCache });
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient) {
+    return ok({ entries: passwordGeneratorHistoryCache });
+  }
+
+  passwordGeneratorHistorySyncInFlight = (async () => {
+    try {
+      const response = await apiClient.listPasswordGeneratorHistory({
+        bearerToken: sessionToken,
+      });
+      const entries = [];
+      const records = Array.isArray(response?.entries) ? response.entries : [];
+      for (const record of records) {
+        try {
+          const payload = await decryptVaultItemPayload({
+            accountKey: unlockedContext.accountKey,
+            encryptedPayload: String(record.encryptedPayload ?? ''),
+          });
+          const normalized = normalizePasswordGeneratorHistoryEntry({
+            id: record.entryId,
+            createdAt: Number(payload?.createdAt) || Date.parse(String(record.createdAt ?? '')),
+            password: typeof payload?.password === 'string' ? payload.password : '',
+            pageUrl: typeof payload?.pageUrl === 'string' ? payload.pageUrl : '',
+            pageHost: typeof payload?.pageHost === 'string' ? payload.pageHost : '',
+          });
+          if (normalized) {
+            entries.push(normalized);
+          }
+        } catch {
+          // Skip malformed or undecryptable history records.
+        }
+      }
+      setPasswordGeneratorHistoryCache(entries, {
+        syncedAt: Date.now(),
+      });
+      return ok({ entries: passwordGeneratorHistoryCache });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      if (passwordGeneratorHistoryCache.length > 0) {
+        return ok({ entries: passwordGeneratorHistoryCache });
+      }
+      return fail('password_generator_history_unavailable', 'Password history is unavailable right now.');
+    } finally {
+      passwordGeneratorHistorySyncInFlight = null;
+    }
+  })();
+
+  if (!awaitCompletion) {
+    return ok({ entries: passwordGeneratorHistoryCache });
+  }
+  return passwordGeneratorHistorySyncInFlight;
+}
+
 async function listPasswordGeneratorHistoryInternal() {
   if (state.phase !== 'ready' || !sessionToken || !unlockedContext?.accountKey) {
     return ok({ entries: [] });
   }
-  const apiClient = currentApiClient();
-  if (!apiClient) {
-    return ok({ entries: [] });
-  }
-  try {
-    const response = await apiClient.listPasswordGeneratorHistory({
-      bearerToken: sessionToken,
+  await hydratePasswordGeneratorHistoryCacheFromStorage();
+  if (passwordGeneratorHistoryCache.length > 0) {
+    void syncPasswordGeneratorHistoryCacheFromServer({
+      force: false,
+      awaitCompletion: false,
     });
-    const entries = [];
-    const records = Array.isArray(response?.entries) ? response.entries : [];
-    for (const record of records) {
-      try {
-        const payload = await decryptVaultItemPayload({
-          accountKey: unlockedContext.accountKey,
-          encryptedPayload: String(record.encryptedPayload ?? ''),
-        });
-        const normalized = normalizePasswordGeneratorHistoryEntry({
-          id: record.entryId,
-          createdAt: Number(payload?.createdAt) || Date.parse(String(record.createdAt ?? '')),
-          password: typeof payload?.password === 'string' ? payload.password : '',
-          pageUrl: typeof payload?.pageUrl === 'string' ? payload.pageUrl : '',
-          pageHost: typeof payload?.pageHost === 'string' ? payload.pageHost : '',
-        });
-        if (normalized) {
-          entries.push(normalized);
-        }
-      } catch {
-        // Skip malformed or undecryptable history records.
-      }
-    }
-    entries.sort((left, right) => right.createdAt - left.createdAt);
-    return ok({
-      entries: entries.slice(0, PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES),
-    });
-  } catch (error) {
-    if (isUnauthorizedApiError(error)) {
-      await clearExtensionSessionToken();
-    }
-    return fail('password_generator_history_unavailable', 'Password history is unavailable right now.');
+    return ok({ entries: passwordGeneratorHistoryCache });
   }
+  return syncPasswordGeneratorHistoryCacheFromServer({
+    force: true,
+    awaitCompletion: true,
+  });
 }
 
 async function upsertPasswordGeneratorHistoryEntryInternal(input) {
@@ -4871,6 +5152,14 @@ async function upsertPasswordGeneratorHistoryEntryInternal(input) {
       encryptedPayload,
       createdAt: new Date(createdAt).toISOString(),
     });
+    upsertPasswordGeneratorHistoryCacheEntry({
+      id,
+      createdAt,
+      password,
+      pageUrl: rawPageUrl,
+      pageHost,
+    });
+    schedulePopupRealtimeNotification(['password_history']);
     return ok({
       entry: {
         id,
@@ -5624,6 +5913,7 @@ async function initializeBackgroundRuntimeCore() {
 
   await loadPersistedState();
   void hydrateCanonicalIconCacheFromStorage().catch(() => {});
+  void hydratePasswordGeneratorHistoryCacheFromStorage().catch(() => {});
   void processManualIconSyncQueueBestEffort().catch(() => {});
   await reconcileUnlockGrantApprovalAlarm();
   void reconcileAutoPairBridgeScript()

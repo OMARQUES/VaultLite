@@ -1,9 +1,11 @@
 const DATABASE_NAME = 'vaultlite-local-vault-cache';
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const STORE_NAME = 'vault_cache_v1';
-const CACHE_SCHEMA_VERSION = 1;
+const CACHE_SCHEMA_VERSION = 2;
+const CACHE_PAYLOAD_SCHEMA_VERSION = 1;
 const CACHE_AAD_VERSION = 'v1';
 const CACHE_KEY_CONTEXT = 'vaultlite.local-cache.v1';
+const PENDING_LEASE_MAX_AGE_MS = 15 * 60 * 1000;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -50,7 +52,45 @@ export interface LocalVaultCacheRecordV1 {
   encryptedPayload: string;
   payloadNonce: string;
   payloadAadVersion: typeof CACHE_AAD_VERSION;
+  schemaVersion: number;
+}
+
+interface StoredCacheRecordV2 {
+  cacheKey: string;
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
   schemaVersion: typeof CACHE_SCHEMA_VERSION;
+  activeSnapshotToken: string | null;
+  activeEtag: string | null;
+  activeGeneratedAt: string | null;
+  activeItemCount: number;
+  activeEncryptedPayload: string | null;
+  activePayloadNonce: string | null;
+  activePayloadAadVersion: typeof CACHE_AAD_VERSION | null;
+  pendingSyncId: string | null;
+  pendingStartedAt: string | null;
+  pendingBaseSnapshotToken: string | null;
+  pendingProgress: number | null;
+  pendingSnapshotToken: string | null;
+  pendingEtag: string | null;
+  pendingGeneratedAt: string | null;
+  pendingItemCount: number;
+  pendingEncryptedPayload: string | null;
+  pendingPayloadNonce: string | null;
+  pendingPayloadAadVersion: typeof CACHE_AAD_VERSION | null;
+}
+
+export interface LocalVaultPendingFinalizeResult {
+  ok: boolean;
+  reason?: string;
+  itemCount?: number;
+  snapshotToken?: string | null;
+  etag?: string | null;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -159,11 +199,267 @@ async function withStore<T>(
   });
 }
 
-async function listAllRecords(): Promise<LocalVaultCacheRecordV1[]> {
+async function listAllRecords(): Promise<Array<StoredCacheRecordV2 | Record<string, unknown>>> {
   return (
-    (await withStore<LocalVaultCacheRecordV1[]>('readonly', (store) =>
-      store.getAll() as IDBRequest<LocalVaultCacheRecordV1[]>,
+    (await withStore<Array<StoredCacheRecordV2 | Record<string, unknown>>>('readonly', (store) =>
+      store.getAll() as IDBRequest<Array<StoredCacheRecordV2 | Record<string, unknown>>>,
     )) ?? []
+  );
+}
+
+async function getRecord(cacheKey: string): Promise<StoredCacheRecordV2 | Record<string, unknown> | null> {
+  return (await withStore<StoredCacheRecordV2 | Record<string, unknown> | null>('readonly', (store) =>
+    store.get(cacheKey),
+  )) ?? null;
+}
+
+function buildEmptyStoredRecord(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+}): StoredCacheRecordV2 {
+  return {
+    cacheKey: buildCacheKey(input),
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint: input.deploymentFingerprint,
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    activeSnapshotToken: null,
+    activeEtag: null,
+    activeGeneratedAt: null,
+    activeItemCount: 0,
+    activeEncryptedPayload: null,
+    activePayloadNonce: null,
+    activePayloadAadVersion: null,
+    pendingSyncId: null,
+    pendingStartedAt: null,
+    pendingBaseSnapshotToken: null,
+    pendingProgress: null,
+    pendingSnapshotToken: null,
+    pendingEtag: null,
+    pendingGeneratedAt: null,
+    pendingItemCount: 0,
+    pendingEncryptedPayload: null,
+    pendingPayloadNonce: null,
+    pendingPayloadAadVersion: null,
+  };
+}
+
+function parseIsoTimestamp(value: string | null | undefined): number {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeStoredRecord(
+  rawRecord: StoredCacheRecordV2 | Record<string, unknown> | null,
+  identity: { userId: string; deviceId: string; deploymentFingerprint: string },
+): StoredCacheRecordV2 {
+  if (!rawRecord || typeof rawRecord !== 'object') {
+    return buildEmptyStoredRecord(identity);
+  }
+  const legacy = rawRecord as Record<string, unknown>;
+  const next = buildEmptyStoredRecord(identity);
+  next.userId = typeof legacy.userId === 'string' ? legacy.userId : identity.userId;
+  next.deviceId = typeof legacy.deviceId === 'string' ? legacy.deviceId : identity.deviceId;
+  next.deploymentFingerprint =
+    typeof legacy.deploymentFingerprint === 'string'
+      ? legacy.deploymentFingerprint
+      : identity.deploymentFingerprint;
+
+  if (
+    typeof legacy.activeEncryptedPayload === 'string' &&
+    typeof legacy.activePayloadNonce === 'string' &&
+    legacy.activePayloadAadVersion === CACHE_AAD_VERSION
+  ) {
+    next.activeEncryptedPayload = legacy.activeEncryptedPayload;
+    next.activePayloadNonce = legacy.activePayloadNonce;
+    next.activePayloadAadVersion = CACHE_AAD_VERSION;
+    next.activeSnapshotToken =
+      typeof legacy.activeSnapshotToken === 'string' ? legacy.activeSnapshotToken : null;
+    next.activeEtag = typeof legacy.activeEtag === 'string' ? legacy.activeEtag : null;
+    next.activeGeneratedAt =
+      typeof legacy.activeGeneratedAt === 'string' ? legacy.activeGeneratedAt : null;
+    next.activeItemCount = Number.isFinite(Number(legacy.activeItemCount))
+      ? Math.max(0, Math.trunc(Number(legacy.activeItemCount)))
+      : 0;
+  } else if (
+    typeof legacy.encryptedPayload === 'string' &&
+    typeof legacy.payloadNonce === 'string' &&
+    legacy.payloadAadVersion === CACHE_AAD_VERSION
+  ) {
+    next.activeEncryptedPayload = legacy.encryptedPayload;
+    next.activePayloadNonce = legacy.payloadNonce;
+    next.activePayloadAadVersion = CACHE_AAD_VERSION;
+    next.activeSnapshotToken = typeof legacy.snapshotToken === 'string' ? legacy.snapshotToken : null;
+    next.activeEtag = typeof legacy.etag === 'string' ? legacy.etag : null;
+    next.activeGeneratedAt = typeof legacy.generatedAt === 'string' ? legacy.generatedAt : nowIso();
+    next.activeItemCount = Number.isFinite(Number(legacy.itemCount))
+      ? Math.max(0, Math.trunc(Number(legacy.itemCount)))
+      : 0;
+  }
+
+  if (
+    typeof legacy.pendingSyncId === 'string' &&
+    legacy.pendingSyncId.length > 0 &&
+    typeof legacy.pendingStartedAt === 'string'
+  ) {
+    next.pendingSyncId = legacy.pendingSyncId;
+    next.pendingStartedAt = legacy.pendingStartedAt;
+    next.pendingBaseSnapshotToken =
+      typeof legacy.pendingBaseSnapshotToken === 'string' ? legacy.pendingBaseSnapshotToken : null;
+    next.pendingProgress = Number.isFinite(Number(legacy.pendingProgress))
+      ? Math.max(0, Math.min(1, Number(legacy.pendingProgress)))
+      : null;
+    next.pendingSnapshotToken =
+      typeof legacy.pendingSnapshotToken === 'string' ? legacy.pendingSnapshotToken : null;
+    next.pendingEtag = typeof legacy.pendingEtag === 'string' ? legacy.pendingEtag : null;
+    next.pendingGeneratedAt =
+      typeof legacy.pendingGeneratedAt === 'string' ? legacy.pendingGeneratedAt : null;
+    next.pendingEncryptedPayload =
+      typeof legacy.pendingEncryptedPayload === 'string' ? legacy.pendingEncryptedPayload : null;
+    next.pendingPayloadNonce =
+      typeof legacy.pendingPayloadNonce === 'string' ? legacy.pendingPayloadNonce : null;
+    next.pendingPayloadAadVersion =
+      legacy.pendingPayloadAadVersion === CACHE_AAD_VERSION ? CACHE_AAD_VERSION : null;
+    next.pendingItemCount = Number.isFinite(Number(legacy.pendingItemCount))
+      ? Math.max(0, Math.trunc(Number(legacy.pendingItemCount)))
+      : 0;
+  }
+  return next;
+}
+
+function clearPendingState(record: StoredCacheRecordV2): void {
+  record.pendingSyncId = null;
+  record.pendingStartedAt = null;
+  record.pendingBaseSnapshotToken = null;
+  record.pendingProgress = null;
+  record.pendingSnapshotToken = null;
+  record.pendingEtag = null;
+  record.pendingGeneratedAt = null;
+  record.pendingItemCount = 0;
+  record.pendingEncryptedPayload = null;
+  record.pendingPayloadNonce = null;
+  record.pendingPayloadAadVersion = null;
+}
+
+function isPendingStale(record: StoredCacheRecordV2): boolean {
+  if (!record.pendingSyncId || !record.pendingStartedAt) {
+    return false;
+  }
+  const startedAtMs = parseIsoTimestamp(record.pendingStartedAt);
+  if (!startedAtMs) {
+    return true;
+  }
+  return Date.now() - startedAtMs > PENDING_LEASE_MAX_AGE_MS;
+}
+
+async function encryptPayload(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  key: CryptoKey;
+  payload: LocalVaultCachePayloadV1;
+}): Promise<{ encryptedPayload: string; payloadNonce: string; itemCount: number }> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(nonce),
+      additionalData: toArrayBuffer(
+        buildAad({
+          userId: input.userId,
+          deviceId: input.deviceId,
+          deploymentFingerprint: input.deploymentFingerprint,
+        }),
+      ),
+    },
+    input.key,
+    textEncoder.encode(JSON.stringify(input.payload)),
+  );
+  return {
+    encryptedPayload: bytesToBase64Url(new Uint8Array(ciphertext)),
+    payloadNonce: bytesToBase64Url(nonce),
+    itemCount: Array.isArray(input.payload.items) ? input.payload.items.length : 0,
+  };
+}
+
+async function decryptPayload(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  key: CryptoKey;
+  encryptedPayload: string;
+  payloadNonce: string;
+}): Promise<LocalVaultCachePayloadV1 | null> {
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(base64UrlToBytes(input.payloadNonce)),
+      additionalData: toArrayBuffer(
+        buildAad({
+          userId: input.userId,
+          deviceId: input.deviceId,
+          deploymentFingerprint: input.deploymentFingerprint,
+        }),
+      ),
+    },
+    input.key,
+    toArrayBuffer(base64UrlToBytes(input.encryptedPayload)),
+  );
+  const payload = JSON.parse(textDecoder.decode(plaintext)) as LocalVaultCachePayloadV1;
+  if (!payload || payload.schemaVersion !== CACHE_PAYLOAD_SCHEMA_VERSION || !Array.isArray(payload.items)) {
+    return null;
+  }
+  return payload;
+}
+
+function resolveNewestRecordForIdentity(
+  records: Array<StoredCacheRecordV2 | Record<string, unknown>>,
+  input: {
+    userId: string;
+    deviceId: string;
+    deploymentFingerprint?: string;
+  },
+): (StoredCacheRecordV2 | Record<string, unknown>) | null {
+  const filtered = records.filter((value) => {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    const candidate = value as Record<string, unknown>;
+    if (candidate.userId !== input.userId || candidate.deviceId !== input.deviceId) {
+      return false;
+    }
+    if (
+      input.deploymentFingerprint &&
+      typeof candidate.deploymentFingerprint === 'string' &&
+      candidate.deploymentFingerprint !== input.deploymentFingerprint
+    ) {
+      return false;
+    }
+    return true;
+  });
+  if (filtered.length === 0) {
+    return null;
+  }
+  return (
+    filtered.sort((left, right) => {
+      const leftGeneratedAt =
+        typeof (left as Record<string, unknown>).activeGeneratedAt === 'string'
+          ? String((left as Record<string, unknown>).activeGeneratedAt)
+          : typeof (left as Record<string, unknown>).generatedAt === 'string'
+            ? String((left as Record<string, unknown>).generatedAt)
+            : '';
+      const rightGeneratedAt =
+        typeof (right as Record<string, unknown>).activeGeneratedAt === 'string'
+          ? String((right as Record<string, unknown>).activeGeneratedAt)
+          : typeof (right as Record<string, unknown>).generatedAt === 'string'
+            ? String((right as Record<string, unknown>).generatedAt)
+            : '';
+      return rightGeneratedAt.localeCompare(leftGeneratedAt);
+    })[0] ?? null
   );
 }
 
@@ -185,81 +481,237 @@ export async function saveLocalVaultCache(input: {
     deviceId: input.deviceId,
     deploymentFingerprint: input.deploymentFingerprint,
   });
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: toArrayBuffer(nonce),
-      additionalData: toArrayBuffer(
-        buildAad({
-          userId: input.userId,
-          deviceId: input.deviceId,
-          deploymentFingerprint: input.deploymentFingerprint,
-        }),
-      ),
-    },
-    key,
-    textEncoder.encode(JSON.stringify(input.payload)),
-  );
-  const record: LocalVaultCacheRecordV1 = {
-    cacheKey: buildCacheKey({
-      userId: input.userId,
-      deviceId: input.deviceId,
-      deploymentFingerprint: input.deploymentFingerprint,
-    }),
+  const encrypted = await encryptPayload({
     userId: input.userId,
     deviceId: input.deviceId,
     deploymentFingerprint: input.deploymentFingerprint,
-    snapshotToken: input.snapshotToken,
-    etag: input.etag,
-    generatedAt: new Date().toISOString(),
-    itemCount: input.payload.items.length,
-    encryptedPayload: bytesToBase64Url(new Uint8Array(ciphertext)),
-    payloadNonce: bytesToBase64Url(nonce),
-    payloadAadVersion: CACHE_AAD_VERSION,
-    schemaVersion: CACHE_SCHEMA_VERSION,
-  };
+    key,
+    payload: input.payload,
+  });
+  const existing = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
+  );
+  existing.schemaVersion = CACHE_SCHEMA_VERSION;
+  existing.activeSnapshotToken = input.snapshotToken;
+  existing.activeEtag = input.etag;
+  existing.activeGeneratedAt = nowIso();
+  existing.activeItemCount = encrypted.itemCount;
+  existing.activeEncryptedPayload = encrypted.encryptedPayload;
+  existing.activePayloadNonce = encrypted.payloadNonce;
+  existing.activePayloadAadVersion = CACHE_AAD_VERSION;
+  clearPendingState(existing);
+  await withStore('readwrite', (store) => store.put(existing));
+}
+
+export async function beginLocalVaultCachePending(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  syncId: string;
+  baseSnapshotToken?: string | null;
+}): Promise<void> {
+  if (!hasIndexedDbSupport()) {
+    return;
+  }
+  const record = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
+  );
+  if (record.pendingSyncId && record.pendingSyncId !== input.syncId && !isPendingStale(record)) {
+    throw new Error('pending_sync_in_progress');
+  }
+  clearPendingState(record);
+  record.pendingSyncId = input.syncId;
+  record.pendingStartedAt = nowIso();
+  record.pendingBaseSnapshotToken = input.baseSnapshotToken ?? record.activeSnapshotToken ?? null;
+  record.pendingProgress = 0;
   await withStore('readwrite', (store) => store.put(record));
 }
 
-function isCacheRecordV1(value: unknown): value is LocalVaultCacheRecordV1 {
-  if (!value || typeof value !== 'object') {
-    return false;
+export async function writeLocalVaultCachePending(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  accountKey: string;
+  syncId: string;
+  snapshotToken: string | null;
+  etag: string | null;
+  payload: LocalVaultCachePayloadV1;
+  progress?: number;
+}): Promise<void> {
+  if (!hasIndexedDbSupport()) {
+    return;
   }
-  const record = value as Partial<LocalVaultCacheRecordV1>;
-  return (
-    typeof record.cacheKey === 'string' &&
-    typeof record.userId === 'string' &&
-    typeof record.deviceId === 'string' &&
-    typeof record.deploymentFingerprint === 'string' &&
-    typeof record.encryptedPayload === 'string' &&
-    typeof record.payloadNonce === 'string' &&
-    record.payloadAadVersion === CACHE_AAD_VERSION &&
-    record.schemaVersion === CACHE_SCHEMA_VERSION
+  const record = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
   );
+  if (record.pendingSyncId !== input.syncId) {
+    throw new Error('pending_sync_mismatch');
+  }
+  const key = await deriveCacheKey({
+    accountKey: input.accountKey,
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint: input.deploymentFingerprint,
+  });
+  const encrypted = await encryptPayload({
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint: input.deploymentFingerprint,
+    key,
+    payload: input.payload,
+  });
+  record.pendingSnapshotToken = input.snapshotToken;
+  record.pendingEtag = input.etag;
+  record.pendingGeneratedAt = nowIso();
+  record.pendingItemCount = encrypted.itemCount;
+  record.pendingEncryptedPayload = encrypted.encryptedPayload;
+  record.pendingPayloadNonce = encrypted.payloadNonce;
+  record.pendingPayloadAadVersion = CACHE_AAD_VERSION;
+  record.pendingProgress = Number.isFinite(Number(input.progress))
+    ? Math.max(0, Math.min(1, Number(input.progress)))
+    : 1;
+  await withStore('readwrite', (store) => store.put(record));
 }
 
-function resolveNewestRecordForIdentity(
-  records: LocalVaultCacheRecordV1[],
-  input: {
-    userId: string;
-    deviceId: string;
-    deploymentFingerprint?: string;
-  },
-): LocalVaultCacheRecordV1 | null {
-  const filtered = records.filter((record) => {
-    if (record.userId !== input.userId || record.deviceId !== input.deviceId) {
-      return false;
-    }
-    if (input.deploymentFingerprint && record.deploymentFingerprint !== input.deploymentFingerprint) {
-      return false;
-    }
-    return true;
-  });
-  if (filtered.length === 0) {
-    return null;
+export async function finalizeLocalVaultCachePending(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  accountKey: string;
+  syncId: string;
+  expectedItemCount?: number;
+}): Promise<LocalVaultPendingFinalizeResult> {
+  if (!hasIndexedDbSupport()) {
+    return { ok: false, reason: 'indexeddb_unavailable' };
   }
-  return filtered.sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))[0] ?? null;
+  const record = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
+  );
+  if (record.pendingSyncId !== input.syncId) {
+    return { ok: false, reason: 'pending_sync_mismatch' };
+  }
+  if (
+    typeof record.pendingEncryptedPayload !== 'string' ||
+    typeof record.pendingPayloadNonce !== 'string' ||
+    record.pendingPayloadAadVersion !== CACHE_AAD_VERSION
+  ) {
+    return { ok: false, reason: 'pending_payload_missing' };
+  }
+  const key = await deriveCacheKey({
+    accountKey: input.accountKey,
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint: input.deploymentFingerprint,
+  });
+  const payload = await decryptPayload({
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint: input.deploymentFingerprint,
+    key,
+    encryptedPayload: record.pendingEncryptedPayload,
+    payloadNonce: record.pendingPayloadNonce,
+  });
+  if (!payload) {
+    return { ok: false, reason: 'pending_payload_invalid' };
+  }
+  if (
+    Number.isFinite(Number(input.expectedItemCount)) &&
+    Math.trunc(Number(input.expectedItemCount)) !== payload.items.length
+  ) {
+    return { ok: false, reason: 'pending_item_count_mismatch' };
+  }
+  return {
+    ok: true,
+    itemCount: payload.items.length,
+    snapshotToken: record.pendingSnapshotToken,
+    etag: record.pendingEtag,
+  };
+}
+
+export async function promoteLocalVaultCachePending(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  syncId: string;
+}): Promise<{ ok: boolean; reason?: string }> {
+  if (!hasIndexedDbSupport()) {
+    return { ok: false, reason: 'indexeddb_unavailable' };
+  }
+  const record = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
+  );
+  if (record.pendingSyncId !== input.syncId) {
+    return { ok: false, reason: 'pending_sync_mismatch' };
+  }
+  if (
+    typeof record.pendingEncryptedPayload !== 'string' ||
+    typeof record.pendingPayloadNonce !== 'string' ||
+    record.pendingPayloadAadVersion !== CACHE_AAD_VERSION
+  ) {
+    return { ok: false, reason: 'pending_payload_missing' };
+  }
+  record.activeSnapshotToken = record.pendingSnapshotToken;
+  record.activeEtag = record.pendingEtag;
+  record.activeGeneratedAt = record.pendingGeneratedAt ?? nowIso();
+  record.activeItemCount = record.pendingItemCount;
+  record.activeEncryptedPayload = record.pendingEncryptedPayload;
+  record.activePayloadNonce = record.pendingPayloadNonce;
+  record.activePayloadAadVersion = record.pendingPayloadAadVersion;
+  clearPendingState(record);
+  await withStore('readwrite', (store) => store.put(record));
+  return { ok: true };
+}
+
+export async function discardLocalVaultCachePending(input: {
+  userId: string;
+  deviceId: string;
+  deploymentFingerprint: string;
+  syncId?: string;
+}): Promise<void> {
+  if (!hasIndexedDbSupport()) {
+    return;
+  }
+  const record = normalizeStoredRecord(
+    await getRecord(buildCacheKey(input)),
+    {
+      userId: input.userId,
+      deviceId: input.deviceId,
+      deploymentFingerprint: input.deploymentFingerprint,
+    },
+  );
+  if (input.syncId && record.pendingSyncId !== input.syncId) {
+    return;
+  }
+  if (!record.pendingSyncId) {
+    return;
+  }
+  clearPendingState(record);
+  await withStore('readwrite', (store) => store.put(record));
 }
 
 export async function loadLocalVaultCache(input: {
@@ -275,41 +727,61 @@ export async function loadLocalVaultCache(input: {
     return null;
   }
   const all = await listAllRecords();
-  const record = resolveNewestRecordForIdentity(all, {
+  const newest = resolveNewestRecordForIdentity(all, {
     userId: input.userId,
     deviceId: input.deviceId,
     deploymentFingerprint: input.deploymentFingerprint,
   });
-  if (!record || !isCacheRecordV1(record)) {
+  if (!newest) {
+    return null;
+  }
+  const normalized = normalizeStoredRecord(newest, {
+    userId: input.userId,
+    deviceId: input.deviceId,
+    deploymentFingerprint:
+      typeof (newest as Record<string, unknown>).deploymentFingerprint === 'string'
+        ? String((newest as Record<string, unknown>).deploymentFingerprint)
+        : input.deploymentFingerprint ?? 'unknown',
+  });
+  if (
+    typeof normalized.activeEncryptedPayload !== 'string' ||
+    typeof normalized.activePayloadNonce !== 'string' ||
+    normalized.activePayloadAadVersion !== CACHE_AAD_VERSION
+  ) {
     return null;
   }
   const key = await deriveCacheKey({
     accountKey: input.accountKey,
-    userId: record.userId,
-    deviceId: record.deviceId,
-    deploymentFingerprint: record.deploymentFingerprint,
+    userId: normalized.userId,
+    deviceId: normalized.deviceId,
+    deploymentFingerprint: normalized.deploymentFingerprint,
   });
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: toArrayBuffer(base64UrlToBytes(record.payloadNonce)),
-      additionalData: toArrayBuffer(
-        buildAad({
-          userId: record.userId,
-          deviceId: record.deviceId,
-          deploymentFingerprint: record.deploymentFingerprint,
-        }),
-      ),
-    },
+  const payload = await decryptPayload({
+    userId: normalized.userId,
+    deviceId: normalized.deviceId,
+    deploymentFingerprint: normalized.deploymentFingerprint,
     key,
-    toArrayBuffer(base64UrlToBytes(record.encryptedPayload)),
-  );
-  const payload = JSON.parse(textDecoder.decode(plaintext)) as LocalVaultCachePayloadV1;
-  if (!payload || payload.schemaVersion !== CACHE_SCHEMA_VERSION || !Array.isArray(payload.items)) {
+    encryptedPayload: normalized.activeEncryptedPayload,
+    payloadNonce: normalized.activePayloadNonce,
+  });
+  if (!payload) {
     return null;
   }
   return {
-    record,
+    record: {
+      cacheKey: normalized.cacheKey,
+      userId: normalized.userId,
+      deviceId: normalized.deviceId,
+      deploymentFingerprint: normalized.deploymentFingerprint,
+      snapshotToken: normalized.activeSnapshotToken,
+      etag: normalized.activeEtag,
+      generatedAt: normalized.activeGeneratedAt ?? nowIso(),
+      itemCount: normalized.activeItemCount,
+      encryptedPayload: normalized.activeEncryptedPayload,
+      payloadNonce: normalized.activePayloadNonce,
+      payloadAadVersion: CACHE_AAD_VERSION,
+      schemaVersion: normalized.schemaVersion,
+    },
     payload,
   };
 }
@@ -323,11 +795,19 @@ export async function clearLocalVaultCache(input: {
     return;
   }
   const all = await listAllRecords();
-  const toDelete = all.filter((record) => {
+  const toDelete = all.filter((value) => {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
     if (record.userId !== input.userId || record.deviceId !== input.deviceId) {
       return false;
     }
-    if (input.deploymentFingerprint && record.deploymentFingerprint !== input.deploymentFingerprint) {
+    if (
+      input.deploymentFingerprint &&
+      typeof record.deploymentFingerprint === 'string' &&
+      record.deploymentFingerprint !== input.deploymentFingerprint
+    ) {
       return false;
     }
     return true;
@@ -337,7 +817,9 @@ export async function clearLocalVaultCache(input: {
   }
   await Promise.all(
     toDelete.map((record) =>
-      withStore('readwrite', (store) => store.delete(record.cacheKey)),
+      withStore('readwrite', (store) =>
+        store.delete(String((record as Record<string, unknown>).cacheKey ?? '')),
+      ),
     ),
   );
 }

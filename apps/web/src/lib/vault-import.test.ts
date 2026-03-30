@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
+import { zipSync } from 'fflate';
 
 import type { SessionStore } from './session-store';
 import type { VaultLiteVaultClient } from './vault-client';
@@ -148,6 +149,8 @@ function createVaultClientStub(): VaultLiteVaultClient {
 }
 
 describe('vault import', () => {
+  const toZipBytes = (value: string): Uint8Array => new Uint8Array(new TextEncoder().encode(value));
+
   test('parses supported CSV import files', async () => {
     const sessionStore = createSessionStoreStub();
     const vaultClient = createVaultClientStub();
@@ -549,6 +552,152 @@ describe('vault import', () => {
 
     expect(result.skipped).toBe(1);
     expect(result.records[0]?.status).toBe('skipped_review_required');
+  });
+
+  test('parses 1PUX preserving vault context and mapping identity/card without metadata dump', async () => {
+    const sessionStore = createSessionStoreStub();
+    const vaultClient = createVaultClientStub();
+    const exportData = {
+      accounts: [
+        {
+          attrs: {
+            accountName: 'Otavio',
+          },
+          vaults: [
+            {
+              attrs: {
+                name: 'Privado',
+              },
+              items: [
+                {
+                  uuid: 'login_1',
+                  categoryUuid: '001',
+                  favIndex: 1,
+                  state: 'active',
+                  overview: {
+                    title: 'Github',
+                    subtitle: 'otavio.marques20@hotmail.com',
+                    url: 'https://github.com',
+                    tags: ['Starter Kit'],
+                  },
+                  details: {
+                    notesPlain: 'Conta principal',
+                    loginFields: [
+                      {
+                        designation: 'username',
+                        value: 'otavio.marques20@hotmail.com',
+                      },
+                      {
+                        designation: 'password',
+                        value: 'super-secret',
+                      },
+                    ],
+                    sections: [
+                      {
+                        title: 'Extra',
+                        fields: [
+                          {
+                            title: 'Recovery email',
+                            id: 'recovery',
+                            value: { emailAddress: 'backup@example.com' },
+                            inputTraits: { keyboard: 'email' },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+                {
+                  uuid: 'identity_1',
+                  categoryUuid: '006',
+                  favIndex: 0,
+                  state: 'active',
+                  overview: {
+                    title: 'Otavio Marques',
+                    subtitle: '',
+                  },
+                  details: {
+                    notesPlain: "It's you!",
+                    sections: [
+                      {
+                        title: 'Identificacao',
+                        fields: [
+                          {
+                            title: 'Nome',
+                            id: 'firstname',
+                            value: { string: 'Otavio' },
+                            inputTraits: { keyboard: 'default', capitalization: 'words' },
+                          },
+                          {
+                            title: 'Sobrenome',
+                            id: 'lastname',
+                            value: { string: 'Marques' },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+                {
+                  uuid: 'card_1',
+                  categoryUuid: '002',
+                  favIndex: 0,
+                  state: 'active',
+                  overview: {
+                    title: 'Visa pessoal',
+                  },
+                  details: {
+                    notesPlain: 'Cartao principal',
+                    sections: [
+                      {
+                        title: 'Card',
+                        fields: [
+                          { title: 'Cardholder', id: 'cardholder', value: { string: 'Otavio Marques' } },
+                          { title: 'Card Number', id: 'ccnum', value: { concealed: '4111111111111111' } },
+                          { title: 'Expiry', id: 'expiry', value: { monthYear: '03/2030' } },
+                          { title: 'Security Code', id: 'cvv', value: { concealed: '123' } },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const archive = zipSync({
+      'export.attributes': [toZipBytes(JSON.stringify({ version: 3, description: '1Password Unencrypted Export' }))],
+      'export.data': [toZipBytes(JSON.stringify(exportData))],
+    });
+    const archiveBuffer = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength);
+    const file = new File([archiveBuffer], 'sample.1pux', { type: 'application/zip' });
+
+    const preview = await parseVaultImportFile({
+      file,
+      sessionStore,
+      vaultClient,
+    });
+
+    expect(preview.format).toBe('onepassword_1pux_v1');
+    expect(preview.validRows).toBe(3);
+    const loginCandidate = preview.candidates.find((candidate) => candidate.sourceItemId === 'login_1');
+    const identityCandidate = preview.candidates.find((candidate) => candidate.sourceItemId === 'identity_1');
+    const cardCandidate = preview.candidates.find((candidate) => candidate.sourceItemId === 'card_1');
+
+    expect(loginCandidate?.itemType).toBe('login');
+    expect(loginCandidate?.folderHint).toBe('Privado');
+    expect(loginCandidate?.customFields.some((field) => field.label === 'Imported tags')).toBe(true);
+    expect(loginCandidate?.notes.includes('keyboard:')).toBe(false);
+    expect(identityCandidate?.itemType).toBe('secure_note');
+    expect(identityCandidate?.content.includes('Nome: Otavio')).toBe(true);
+    expect(identityCandidate?.content.includes('capitalization:')).toBe(false);
+    expect(cardCandidate?.itemType).toBe('card');
+    expect(cardCandidate?.cardNumber).toBe('4111111111111111');
+    expect(cardCandidate?.cardExpiryMonth).toBe('03');
+    expect(cardCandidate?.cardExpiryYear).toBe('2030');
   });
 
   test('uses icons domain batch sync during import when icons state sync flag is enabled', async () => {

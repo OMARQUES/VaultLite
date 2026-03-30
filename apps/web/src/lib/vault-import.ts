@@ -55,13 +55,19 @@ export interface ParsedImportCandidate {
   sourceFormat: SupportedImportFormat;
   sourceRef: string;
   sourceItemId: string | null;
-  itemType: Extract<VaultItemType, 'login' | 'document' | 'secure_note'>;
+  itemType: Extract<VaultItemType, 'login' | 'document' | 'card' | 'secure_note'>;
   title: string;
   notes: string;
   content: string;
   username: string;
   password: string;
   totp: string;
+  cardholderName?: string;
+  cardBrand?: string;
+  cardNumber?: string;
+  cardExpiryMonth?: string;
+  cardExpiryYear?: string;
+  cardSecurityCode?: string;
   urls: string[];
   favoriteHint: boolean;
   folderHint: string | null;
@@ -80,7 +86,7 @@ export interface ImportPreviewRow {
   rowIndex: number;
   sourceFormat: SupportedImportFormat;
   sourceRef: string;
-  itemType: Extract<VaultItemType, 'login' | 'document' | 'secure_note'>;
+  itemType: Extract<VaultItemType, 'login' | 'document' | 'card' | 'secure_note'>;
   title: string;
   username: string;
   firstUrl: string;
@@ -408,6 +414,18 @@ async function buildSecureNoteDedupeKey(input: { title: string; content: string 
   return `secure_note|${normalizeForKey(input.title)}|${await sha256Base64Url(normalizeForKey(input.content))}`;
 }
 
+function buildCardDedupeKey(input: {
+  title: string;
+  cardholderName: string;
+  number: string;
+  expiryMonth: string;
+  expiryYear: string;
+}): string {
+  const digits = input.number.replace(/\D+/gu, '');
+  const last4 = digits.slice(-4);
+  return `card|${normalizeForKey(input.title)}|${normalizeForKey(input.cardholderName)}|${last4}|${normalizeForKey(input.expiryMonth)}|${normalizeForKey(input.expiryYear)}`;
+}
+
 function buildDocumentFallbackDedupeKey(input: {
   title: string;
   fileName: string;
@@ -507,25 +525,221 @@ function coerceRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
-function flattenStructuredValues(value: unknown, output: string[] = []): string[] {
+interface OnePasswordItemContext {
+  item: Record<string, unknown>;
+  vaultName: string | null;
+}
+
+interface OnePasswordSectionField {
+  label: string;
+  id: string;
+  normalizedLabel: string;
+  normalizedId: string;
+  value: string;
+}
+
+const ONE_PASSWORD_VALUE_PRIORITY_KEYS = [
+  'concealed',
+  'string',
+  'emailAddress',
+  'email',
+  'username',
+  'url',
+  'phone',
+  'otp',
+  'totp',
+  'number',
+  'creditCardType',
+  'monthYear',
+] as const;
+const ONE_PASSWORD_METADATA_KEYS = new Set([
+  'id',
+  'fieldType',
+  'designation',
+  'indexAtSource',
+  'guarded',
+  'multiline',
+  'dontGenerate',
+  'inputTraits',
+  'keyboard',
+  'correction',
+  'capitalization',
+  'purpose',
+  'name',
+  'type',
+]);
+const ONE_PASSWORD_CARD_CATEGORY_UUIDS = new Set(['002']);
+const ONE_PASSWORD_IDENTITY_CATEGORY_UUIDS = new Set(['006']);
+
+function extract1PasswordPrimitive(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return normalizeCell(String(value));
+  }
+  return '';
+}
+
+function extract1PasswordFieldValue(value: unknown): string {
+  const primitive = extract1PasswordPrimitive(value);
+  if (primitive) {
+    return primitive;
+  }
   if (Array.isArray(value)) {
-    value.forEach((entry) => flattenStructuredValues(entry, output));
-    return output;
+    const values = value.map((entry) => extract1PasswordFieldValue(entry)).filter((entry) => entry.length > 0);
+    return values.join(', ');
   }
-  if (value && typeof value === 'object') {
-    Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
-      if (entry && typeof entry === 'object') {
-        flattenStructuredValues(entry, output);
-      } else if (typeof entry === 'string' && normalizeCell(entry)) {
-        output.push(`${key}: ${normalizeCell(entry)}`);
-      }
-    });
-    return output;
+  if (!value || typeof value !== 'object') {
+    return '';
   }
-  if (typeof value === 'string' && normalizeCell(value)) {
-    output.push(normalizeCell(value));
+  const record = value as Record<string, unknown>;
+  for (const key of ONE_PASSWORD_VALUE_PRIORITY_KEYS) {
+    if (!(key in record)) continue;
+    const extracted = extract1PasswordFieldValue(record[key]);
+    if (extracted) return extracted;
+  }
+  if (Number.isFinite(Number(record.month)) && Number.isFinite(Number(record.year))) {
+    const month = String(record.month).padStart(2, '0');
+    const year = String(record.year);
+    return normalizeCell(`${month}/${year}`);
+  }
+  for (const [key, entry] of Object.entries(record)) {
+    if (ONE_PASSWORD_METADATA_KEYS.has(key)) continue;
+    const extracted = extract1PasswordFieldValue(entry);
+    if (extracted) return extracted;
+  }
+  return '';
+}
+
+function parse1PasswordSectionFields(details: Record<string, unknown>): OnePasswordSectionField[] {
+  const sections = Array.isArray(details.sections) ? details.sections : [];
+  const output: OnePasswordSectionField[] = [];
+  for (const sectionEntry of sections) {
+    const section = coerceRecord(sectionEntry);
+    const fields = Array.isArray(section.fields) ? section.fields : [];
+    for (const fieldEntry of fields) {
+      const field = coerceRecord(fieldEntry);
+      const label = normalizeCell(String(field.title ?? field.label ?? field.id ?? ''));
+      const id = normalizeCell(String(field.id ?? ''));
+      const value = extract1PasswordFieldValue(field.value);
+      if (!label || !value) continue;
+      output.push({
+        label,
+        id,
+        normalizedLabel: normalizeForKey(label),
+        normalizedId: normalizeForKey(id),
+        value,
+      });
+    }
   }
   return output;
+}
+
+function split1PasswordCardExpiry(value: string): { month: string; year: string } {
+  const normalized = normalizeCell(value);
+  const mmYyyy = normalized.match(/^(\d{1,2})\s*[/\-]\s*(\d{4})$/u);
+  if (mmYyyy) {
+    return { month: mmYyyy[1]!.padStart(2, '0'), year: mmYyyy[2]! };
+  }
+  const mmYy = normalized.match(/^(\d{1,2})\s*[/\-]\s*(\d{2})$/u);
+  if (mmYy) {
+    const year = Number(mmYy[2]!);
+    const normalizedYear = year >= 70 ? `19${mmYy[2]}` : `20${mmYy[2]}`;
+    return { month: mmYy[1]!.padStart(2, '0'), year: normalizedYear };
+  }
+  return { month: '', year: '' };
+}
+
+function infer1PasswordCardPayload(input: {
+  sectionFields: OnePasswordSectionField[];
+}): {
+  itemType: Extract<VaultItemType, 'card' | 'secure_note'>;
+  cardholderName: string;
+  cardBrand: string;
+  cardNumber: string;
+  cardExpiryMonth: string;
+  cardExpiryYear: string;
+  cardSecurityCode: string;
+} {
+  let cardholderName = '';
+  let cardBrand = '';
+  let cardNumber = '';
+  let cardExpiryMonth = '';
+  let cardExpiryYear = '';
+  let cardSecurityCode = '';
+
+  for (const field of input.sectionFields) {
+    const key = `${field.normalizedLabel} ${field.normalizedId}`.trim();
+    if (!cardholderName && /cardholder|nameoncard|name on card|nome no cartao/iu.test(key)) {
+      cardholderName = field.value;
+      continue;
+    }
+    if (!cardBrand && /brand|bandeira|card type|tipo do cartao|cctype|type/iu.test(key)) {
+      cardBrand = field.value;
+      continue;
+    }
+    if (!cardNumber && /card number|credit card number|ccnum|numero do cartao|number/iu.test(key)) {
+      cardNumber = field.value;
+      continue;
+    }
+    if (!cardSecurityCode && /cvv|cvc|security code|codigo de seguranca/iu.test(key)) {
+      cardSecurityCode = field.value;
+      continue;
+    }
+    if ((!cardExpiryMonth || !cardExpiryYear) && /expiry|expiration|validade|expires|monthyear/iu.test(key)) {
+      const parsed = split1PasswordCardExpiry(field.value);
+      cardExpiryMonth = cardExpiryMonth || parsed.month;
+      cardExpiryYear = cardExpiryYear || parsed.year;
+    }
+  }
+
+  const isCardLike =
+    Boolean(cardNumber) ||
+    Boolean(cardholderName) ||
+    Boolean(cardSecurityCode) ||
+    Boolean(cardExpiryMonth) ||
+    Boolean(cardBrand);
+
+  return {
+    itemType: isCardLike ? 'card' : 'secure_note',
+    cardholderName,
+    cardBrand,
+    cardNumber,
+    cardExpiryMonth,
+    cardExpiryYear,
+    cardSecurityCode,
+  };
+}
+
+function build1PasswordCustomFields(input: {
+  sectionFields: OnePasswordSectionField[];
+  tags: string[];
+  skipKeys?: Set<string>;
+  archivedHint: boolean;
+}): ParsedImportCustomField[] {
+  const skipKeys = input.skipKeys ?? new Set<string>();
+  const customFields: ParsedImportCustomField[] = [];
+  const seen = new Set<string>();
+  for (const field of input.sectionFields) {
+    const dedupeKey = `${field.normalizedLabel}|${field.normalizedId}|${normalizeForKey(field.value)}`;
+    if (seen.has(dedupeKey)) continue;
+    const compoundKey = `${field.normalizedLabel} ${field.normalizedId}`.trim();
+    const shouldSkip = Array.from(skipKeys).some((entry) => compoundKey.includes(entry) || field.normalizedId.includes(entry));
+    if (shouldSkip) continue;
+    customFields.push({
+      label: field.label,
+      value: field.value,
+    });
+    seen.add(dedupeKey);
+  }
+  if (input.tags.length > 0) {
+    customFields.push({
+      label: 'Imported tags',
+      value: input.tags.join(', '),
+    });
+  }
+  if (input.archivedHint) {
+    customFields.push({ label: 'Imported archived', value: 'true' });
+  }
+  return customFields;
 }
 
 function isTransientUploadError(error: unknown): boolean {
@@ -811,6 +1025,24 @@ async function buildExistingDedupeIndex(dataset: DecryptedVaultDataset): Promise
       index.set(key, item.itemId);
       continue;
     }
+    if (item.itemType === 'card') {
+      const payload = item.payload as Partial<{
+        title: string;
+        cardholderName: string;
+        number: string;
+        expiryMonth: string;
+        expiryYear: string;
+      }>;
+      const key = buildCardDedupeKey({
+        title: String(payload.title ?? ''),
+        cardholderName: String(payload.cardholderName ?? ''),
+        number: String(payload.number ?? ''),
+        expiryMonth: String(payload.expiryMonth ?? ''),
+        expiryYear: String(payload.expiryYear ?? ''),
+      });
+      index.set(key, item.itemId);
+      continue;
+    }
     if (item.itemType === 'secure_note') {
       const payload = item.payload as Partial<{ title: string; content: string }>;
       const key = await buildSecureNoteDedupeKey({
@@ -830,7 +1062,7 @@ function formatRows(format: SupportedImportFormat, candidates: ParsedImportCandi
     sourceRef: candidate.sourceRef,
     itemType: candidate.itemType,
     title: candidate.title,
-    username: candidate.username,
+    username: candidate.itemType === 'card' ? normalizeCell(candidate.cardholderName ?? '') : candidate.username,
     firstUrl: candidate.urls[0] ?? '',
     attachmentCount: candidate.attachments.length,
     status: candidate.status,
@@ -859,6 +1091,14 @@ async function finalizeCandidates(
         title: candidate.title,
         username: candidate.username,
         firstUrl: candidate.urls[0] ?? '',
+      });
+    } else if (candidate.itemType === 'card') {
+      candidate.dedupeKey = buildCardDedupeKey({
+        title: candidate.title,
+        cardholderName: candidate.cardholderName ?? '',
+        number: candidate.cardNumber ?? '',
+        expiryMonth: candidate.cardExpiryMonth ?? '',
+        expiryYear: candidate.cardExpiryYear ?? '',
       });
     } else if (candidate.itemType === 'secure_note') {
       candidate.dedupeKey = await buildSecureNoteDedupeKey({
@@ -1136,8 +1376,35 @@ async function parseBitwardenJsonImport(input: {
   return candidates;
 }
 
-function find1PasswordItems(root: unknown): Array<Record<string, unknown>> {
-  const output: Array<Record<string, unknown>> = [];
+function collect1PasswordItems(root: unknown): OnePasswordItemContext[] {
+  const parsedRoot = coerceRecord(root);
+  const accounts = Array.isArray(parsedRoot.accounts) ? parsedRoot.accounts : [];
+  const collected: OnePasswordItemContext[] = [];
+
+  for (const accountEntry of accounts) {
+    const account = coerceRecord(accountEntry);
+    const vaults = Array.isArray(account.vaults) ? account.vaults : [];
+    for (const vaultEntry of vaults) {
+      const vault = coerceRecord(vaultEntry);
+      const vaultAttrs = coerceRecord(vault.attrs);
+      const vaultName = normalizeCell(String(vaultAttrs.name ?? '')) || null;
+      const items = Array.isArray(vault.items) ? vault.items : [];
+      for (const itemEntry of items) {
+        const item = coerceRecord(itemEntry);
+        if (!item.overview || !item.details) continue;
+        collected.push({
+          item,
+          vaultName,
+        });
+      }
+    }
+  }
+
+  if (collected.length > 0) {
+    return collected;
+  }
+
+  const fallback: OnePasswordItemContext[] = [];
   const queue: unknown[] = [root];
   while (queue.length > 0) {
     const current = queue.shift();
@@ -1148,50 +1415,66 @@ function find1PasswordItems(root: unknown): Array<Record<string, unknown>> {
     }
     if (typeof current !== 'object') continue;
     const record = current as Record<string, unknown>;
-    if (record.overview && record.details) output.push(record);
+    if (record.overview && record.details) {
+      fallback.push({
+        item: record,
+        vaultName: null,
+      });
+    }
     Object.values(record).forEach((entry) => {
       if (entry && typeof entry === 'object') queue.push(entry);
     });
   }
-  return output;
+  return fallback;
 }
 
 async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Array> }): Promise<ParsedImportCandidate[]> {
   const exportData = findZipEntry(input.zipEntries, 'export.data');
   if (!exportData) throw new Error('unsupported_import_format');
   const parsed = JSON.parse(textDecoder.decode(exportData));
-  const items = find1PasswordItems(parsed);
+  const items = collect1PasswordItems(parsed);
   const candidates: ParsedImportCandidate[] = [];
 
   for (let index = 0; index < items.length; index += 1) {
     const rowIndex = index + 1;
-    const item = items[index];
+    const context = items[index];
+    const item = context?.item ?? {};
     const overview = coerceRecord(item.overview);
     const details = coerceRecord(item.details);
+    const itemFile = coerceRecord(item.file);
+    const categoryUuid = normalizeForKey(String(item.categoryUuid ?? ''));
+    const sectionFields = parse1PasswordSectionFields(details);
+    const sectionFieldLines = sectionFields.map((field) => `${field.label}: ${field.value}`);
+    const tags = Array.isArray(overview.tags)
+      ? overview.tags
+          .map((entry) => normalizeCell(String(entry)))
+          .filter((entry) => entry.length > 0)
+      : [];
     const sourceItemId = normalizeCell(String(item.uuid ?? item.id ?? '')) || null;
     const sourceRef = buildSourceRef('onepassword_1pux_v1', sourceItemId, rowIndex);
     const archivedHint = normalizeForKey(String(item.state ?? '')) === 'archived';
     const favoriteHint = Number(item.favIndex ?? 0) > 0;
-    const folderHint = normalizeCell(String(item.vaultName ?? item.vault ?? '')) || null;
-    const customFields = archivedHint ? [{ label: 'Imported archived', value: 'true' }] : [];
+    const folderHint = (context?.vaultName ?? normalizeCell(String(item.vaultName ?? item.vault ?? ''))) || null;
     const documentAttributes = coerceRecord(details.documentAttributes);
     const documentId = normalizeCell(String(documentAttributes.documentId ?? ''));
     const documentFileName = normalizeCell(String(documentAttributes.fileName ?? ''));
+    const filePath = normalizeCell(String(itemFile.path ?? ''));
 
     if (documentId || documentFileName) {
       const title = normalizeCell(String(overview.title ?? '')) || 'Imported document';
-      const body = [
-        normalizeCell(String(details.notesPlain ?? '')),
-        flattenStructuredValues(details.sections).join('\n'),
-      ]
+      const body = [normalizeCell(String(details.notesPlain ?? '')), sectionFieldLines.join('\n')]
         .filter((entry) => entry.length > 0)
         .join('\n\n');
       const attachments: ParsedImportAttachment[] = [];
       if (documentId && documentFileName) {
-        const preferred = `files/${documentId}__${documentFileName}`;
+        const preferredThreeUnderscores = `files/${documentId}___${documentFileName}`;
+        const preferredTwoUnderscores = `files/${documentId}__${documentFileName}`;
         const path =
-          findZipEntryName(input.zipEntries, preferred) ??
+          findZipEntryName(input.zipEntries, filePath) ??
+          findZipEntryName(input.zipEntries, preferredThreeUnderscores) ??
+          findZipEntryName(input.zipEntries, preferredTwoUnderscores) ??
           Array.from(input.zipEntries.keys()).find((key) => key.endsWith(`${documentId}__${documentFileName}`)) ??
+          Array.from(input.zipEntries.keys()).find((key) => key.endsWith(`${documentId}___${documentFileName}`)) ??
           null;
         const bytes = path ? input.zipEntries.get(path) ?? null : null;
         attachments.push({
@@ -1221,7 +1504,11 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
         favoriteHint,
         folderHint,
         archivedHint,
-        customFields,
+        customFields: build1PasswordCustomFields({
+          sectionFields,
+          tags,
+          archivedHint,
+        }),
         attachments,
         provenance: { format: 'onepassword_1pux_v1' },
         dedupeKey: null,
@@ -1244,6 +1531,105 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
     const fallbackUrl = normalizeCell(String(overview.url ?? ''));
     if (fallbackUrl && !urls.includes(fallbackUrl)) urls.push(fallbackUrl);
     const title = normalizeCell(String(overview.title ?? '')) || extractHostTitle(urls[0] ?? '');
+    const notesPlain = normalizeCell(String(details.notesPlain ?? ''));
+    const hasLoginSignal =
+      loginFields.length > 0 || Boolean(usernameField?.value) || Boolean(passwordField?.value) || urls.length > 0;
+    const isCardCategory = ONE_PASSWORD_CARD_CATEGORY_UUIDS.has(categoryUuid);
+    const isIdentityCategory = ONE_PASSWORD_IDENTITY_CATEGORY_UUIDS.has(categoryUuid);
+
+    if (isCardCategory || (!hasLoginSignal && sectionFields.some((field) => /ccnum|card|cvv|expiry|expiration/iu.test(`${field.normalizedLabel} ${field.normalizedId}`)))) {
+      const card = infer1PasswordCardPayload({ sectionFields });
+      const cardSkipKeys = new Set([
+        'cardholder',
+        'nameoncard',
+        'ccnum',
+        'card number',
+        'numero do cartao',
+        'card type',
+        'brand',
+        'cvv',
+        'cvc',
+        'security',
+        'expiry',
+        'expiration',
+        'monthyear',
+      ]);
+      if (card.itemType === 'card') {
+        candidates.push({
+          sourceFormat: 'onepassword_1pux_v1',
+          sourceRef,
+          sourceItemId,
+          itemType: 'card',
+          title: title || card.cardBrand || 'Imported card',
+          notes: notesPlain,
+          content: '',
+          username: '',
+          password: '',
+          totp: '',
+          cardholderName: card.cardholderName,
+          cardBrand: card.cardBrand,
+          cardNumber: card.cardNumber,
+          cardExpiryMonth: card.cardExpiryMonth,
+          cardExpiryYear: card.cardExpiryYear,
+          cardSecurityCode: card.cardSecurityCode,
+          urls: [],
+          favoriteHint,
+          folderHint,
+          archivedHint,
+          customFields: build1PasswordCustomFields({
+            sectionFields,
+            tags,
+            skipKeys: cardSkipKeys,
+            archivedHint,
+          }),
+          attachments: [],
+          provenance: { format: 'onepassword_1pux_v1' },
+          dedupeKey: null,
+          status: title || card.cardNumber ? 'valid' : 'invalid',
+          reason: title || card.cardNumber ? null : 'missing_title',
+          rowIndex,
+          existingItemId: null,
+        });
+        continue;
+      }
+    }
+
+    if (!hasLoginSignal || isIdentityCategory) {
+      const content = [notesPlain, sectionFieldLines.join('\n')]
+        .filter((entry) => entry.length > 0)
+        .join('\n\n');
+      candidates.push({
+        sourceFormat: 'onepassword_1pux_v1',
+        sourceRef,
+        sourceItemId,
+        itemType: 'secure_note',
+        title: title || 'Imported note',
+        notes: '',
+        content,
+        username: '',
+        password: '',
+        totp: '',
+        urls: [],
+        favoriteHint,
+        folderHint,
+        archivedHint,
+        customFields: build1PasswordCustomFields({
+          sectionFields,
+          tags,
+          archivedHint,
+        }),
+        attachments: [],
+        provenance: { format: 'onepassword_1pux_v1' },
+        dedupeKey: null,
+        status: title || content ? 'valid' : 'invalid',
+        reason: title || content ? null : 'missing_title',
+        rowIndex,
+        existingItemId: null,
+      });
+      continue;
+    }
+
+    const loginSkipKeys = new Set(['username', 'password', 'one time password', 'totp', 'otp']);
 
     candidates.push({
       sourceFormat: 'onepassword_1pux_v1',
@@ -1251,12 +1637,7 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
       sourceItemId,
       itemType: 'login',
       title,
-      notes: [
-        normalizeCell(String(details.notesPlain ?? '')),
-        flattenStructuredValues(details.sections).join('\n'),
-      ]
-        .filter((entry) => entry.length > 0)
-        .join('\n\n'),
+      notes: notesPlain,
       content: '',
       username: normalizeCell(String(usernameField?.value ?? overview.subtitle ?? '')),
       password: normalizeCell(String(passwordField?.value ?? '')),
@@ -1265,7 +1646,12 @@ async function parse1Password1PuxImport(input: { zipEntries: Map<string, Uint8Ar
       favoriteHint,
       folderHint,
       archivedHint,
-      customFields,
+      customFields: build1PasswordCustomFields({
+        sectionFields,
+        tags,
+        skipKeys: loginSkipKeys,
+        archivedHint,
+      }),
       attachments: [],
       provenance: { format: 'onepassword_1pux_v1' },
       dedupeKey: null,
@@ -1321,7 +1707,7 @@ async function parseVaultLiteExportImport(input: {
     const payload = coerceRecord(item.payload);
     const itemType = item.itemType;
 
-    if (itemType !== 'login' && itemType !== 'document' && itemType !== 'secure_note') {
+    if (itemType !== 'login' && itemType !== 'document' && itemType !== 'card' && itemType !== 'secure_note') {
       candidates.push({
         sourceFormat: input.format,
         sourceRef,
@@ -1368,6 +1754,12 @@ async function parseVaultLiteExportImport(input: {
       username: normalizeCell(String(payload.username ?? '')),
       password: normalizeCell(String(payload.password ?? '')),
       totp: normalizeCell(String(payload.totp ?? '')),
+      cardholderName: itemType === 'card' ? normalizeCell(String(payload.cardholderName ?? '')) : undefined,
+      cardBrand: itemType === 'card' ? normalizeCell(String(payload.brand ?? '')) : undefined,
+      cardNumber: itemType === 'card' ? normalizeCell(String(payload.number ?? '')) : undefined,
+      cardExpiryMonth: itemType === 'card' ? normalizeCell(String(payload.expiryMonth ?? '')) : undefined,
+      cardExpiryYear: itemType === 'card' ? normalizeCell(String(payload.expiryYear ?? '')) : undefined,
+      cardSecurityCode: itemType === 'card' ? normalizeCell(String(payload.securityCode ?? '')) : undefined,
       urls,
       favoriteHint: favorites.has(item.itemId),
       folderHint,
@@ -1520,6 +1912,19 @@ function mapCandidatePayload(candidate: ParsedImportCandidate): Record<string, u
       username: candidate.username,
       password: candidate.password,
       urls: candidate.urls,
+      notes: candidate.notes,
+      customFields,
+    };
+  }
+  if (candidate.itemType === 'card') {
+    return {
+      title: candidate.title,
+      cardholderName: candidate.cardholderName ?? '',
+      brand: candidate.cardBrand ?? '',
+      number: candidate.cardNumber ?? '',
+      expiryMonth: candidate.cardExpiryMonth ?? '',
+      expiryYear: candidate.cardExpiryYear ?? '',
+      securityCode: candidate.cardSecurityCode ?? '',
       notes: candidate.notes,
       customFields,
     };

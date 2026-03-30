@@ -8,6 +8,13 @@ import {
   type PasswordGeneratorHistoryEntry,
 } from '../../lib/password-generator-history';
 import {
+  getPasswordGeneratorHistoryCache,
+  markPasswordGeneratorHistoryCacheStale,
+  runPasswordGeneratorHistoryCacheSync,
+  setPasswordGeneratorHistoryCache,
+  shouldSyncPasswordGeneratorHistoryCache,
+} from '../../lib/password-generator-history-cache';
+import {
   createDefaultGeneratorState,
   generatePassword,
   normalizeGeneratorState,
@@ -33,6 +40,8 @@ const emit = defineEmits<{
   close: [];
   fill: [password: string];
 }>();
+
+const PASSWORD_HISTORY_REALTIME_EVENT = 'vaultlite.password_history.updated';
 
 const rootRef = ref<HTMLElement | null>(null);
 const state = ref<PasswordGeneratorState>(createDefaultGeneratorState());
@@ -98,6 +107,7 @@ async function addHistoryEntry(password: string) {
     createdAt: Date.now(),
   });
   history.value = nextHistory;
+  setPasswordGeneratorHistoryCache(nextHistory);
   const newest = nextHistory[0] ?? null;
   if (!newest) {
     return;
@@ -167,7 +177,7 @@ async function upsertHistoryEntryRemote(entry: PasswordGeneratorHistoryEntry) {
   }
 }
 
-async function loadHistoryFromRemote() {
+async function loadHistoryFromRemote(options: { force?: boolean } = {}) {
   if (!sessionStore || sessionStore.state.phase !== 'ready') {
     return;
   }
@@ -180,43 +190,65 @@ async function loadHistoryFromRemote() {
   if (!accountKey) {
     return;
   }
+  const force = options.force === true;
+  const cachedEntries = getPasswordGeneratorHistoryCache();
+  if (cachedEntries.length > 0) {
+    history.value = cachedEntries;
+  }
+  if (!force && !shouldSyncPasswordGeneratorHistoryCache()) {
+    return;
+  }
   try {
-    const response = await sessionStore.listPasswordGeneratorHistory();
-    const decryptedEntries: PasswordGeneratorHistoryEntry[] = [];
-    for (const entry of response.entries) {
-      try {
-        const decrypted = await decryptVaultItemPayload<{
-          password?: string;
-          pageUrl?: string;
-          pageHost?: string;
-          createdAt?: number;
-        }>({
-          accountKey,
-          encryptedPayload: entry.encryptedPayload,
-        });
-        const normalized = normalizeHistoryEntry({
-          id: entry.entryId,
-          createdAt:
-            Number.isFinite(Number(decrypted.createdAt)) && Number(decrypted.createdAt) > 0
-              ? Number(decrypted.createdAt)
-              : Date.parse(entry.createdAt),
-          password: typeof decrypted.password === 'string' ? decrypted.password : '',
-          pageUrl: typeof decrypted.pageUrl === 'string' ? decrypted.pageUrl : '',
-          pageHost: typeof decrypted.pageHost === 'string' ? decrypted.pageHost : '',
-        });
-        if (normalized) {
-          decryptedEntries.push(normalized);
+    const nextEntries = await runPasswordGeneratorHistoryCacheSync(
+      async () => {
+        const response = await sessionStore.listPasswordGeneratorHistory();
+        const decryptedEntries: PasswordGeneratorHistoryEntry[] = [];
+        for (const entry of response.entries) {
+          try {
+            const decrypted = await decryptVaultItemPayload<{
+              password?: string;
+              pageUrl?: string;
+              pageHost?: string;
+              createdAt?: number;
+            }>({
+              accountKey,
+              encryptedPayload: entry.encryptedPayload,
+            });
+            const normalized = normalizeHistoryEntry({
+              id: entry.entryId,
+              createdAt:
+                Number.isFinite(Number(decrypted.createdAt)) && Number(decrypted.createdAt) > 0
+                  ? Number(decrypted.createdAt)
+                  : Date.parse(entry.createdAt),
+              password: typeof decrypted.password === 'string' ? decrypted.password : '',
+              pageUrl: typeof decrypted.pageUrl === 'string' ? decrypted.pageUrl : '',
+              pageHost: typeof decrypted.pageHost === 'string' ? decrypted.pageHost : '',
+            });
+            if (normalized) {
+              decryptedEntries.push(normalized);
+            }
+          } catch {
+            // Skip malformed/decrypt-failed entry.
+          }
         }
-      } catch {
-        // Skip malformed/decrypt-failed entry.
-      }
-    }
-    if (decryptedEntries.length > 0) {
-      history.value = sortHistoryEntries(decryptedEntries);
+        return sortHistoryEntries(decryptedEntries);
+      },
+      {
+        force,
+      },
+    );
+    const nextHistory = Array.isArray(nextEntries) ? nextEntries : getPasswordGeneratorHistoryCache();
+    if (nextHistory.length > 0) {
+      history.value = nextHistory;
     }
   } catch {
     // Keep local-only history when remote fetch fails.
   }
+}
+
+function handlePasswordHistoryRealtimeUpdate() {
+  markPasswordGeneratorHistoryCacheStale();
+  void loadHistoryFromRemote({ force: true });
 }
 
 async function copyPassword(password: string) {
@@ -331,12 +363,15 @@ watch(
 onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown);
   window.addEventListener('keydown', handleWindowKeydown);
-  void loadHistoryFromRemote();
+  history.value = getPasswordGeneratorHistoryCache();
+  window.addEventListener(PASSWORD_HISTORY_REALTIME_EVENT, handlePasswordHistoryRealtimeUpdate);
+  void loadHistoryFromRemote({ force: history.value.length === 0 });
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown);
   window.removeEventListener('keydown', handleWindowKeydown);
+  window.removeEventListener(PASSWORD_HISTORY_REALTIME_EVENT, handlePasswordHistoryRealtimeUpdate);
   if (copyFeedbackTimer.value !== null) {
     window.clearTimeout(copyFeedbackTimer.value);
     copyFeedbackTimer.value = null;

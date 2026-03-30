@@ -23,6 +23,7 @@ import {
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
+  shouldRenderVaultSkeleton,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
   toNavigableUrl,
@@ -708,8 +709,6 @@ function setBusy(nextBusy) {
   if (!nextBusy) {
     if (!elements.readySection.hidden) {
       scheduleReadySearchFocus();
-    } else if (shouldKeepUnlockInputFocused()) {
-      scheduleUnlockPasswordFocus();
     }
   }
 }
@@ -805,34 +804,47 @@ function setAlert(kind, message) {
 
 function toggleSections(state) {
   const phase = resolveEffectivePopupPhase(state);
-  elements.pairingSection.hidden = true;
-  elements.unlockSection.hidden = true;
-  elements.readySection.hidden = true;
+  const unlockWasVisible = !elements.unlockSection.hidden;
+  const shouldShowUnlock =
+    phase === 'local_unlock_required' ||
+    (phase === 'remote_authentication_required' && state?.hasTrustedState);
+  const shouldShowPairing =
+    phase === 'pairing_required' || (phase === 'remote_authentication_required' && !state?.hasTrustedState);
+  const shouldShowReady = phase === 'ready';
+  if (elements.pairingSection.hidden === shouldShowPairing) {
+    elements.pairingSection.hidden = !shouldShowPairing;
+  }
+  if (elements.unlockSection.hidden === shouldShowUnlock) {
+    elements.unlockSection.hidden = !shouldShowUnlock;
+  }
+  if (elements.readySection.hidden === shouldShowReady) {
+    elements.readySection.hidden = !shouldShowReady;
+  }
   if (phase !== 'local_unlock_required' && !(phase === 'remote_authentication_required' && state?.hasTrustedState)) {
     clearUnlockPasswordError();
   }
 
   if (phase === 'remote_authentication_required' && state?.hasTrustedState) {
-    elements.unlockSection.hidden = false;
-    setUnlockPasswordVisibility(false);
-    scheduleUnlockPasswordFocus();
+    if (!unlockWasVisible) {
+      setUnlockPasswordVisibility(false);
+      scheduleUnlockPasswordFocus();
+    }
     return;
   }
 
   if (phase === 'pairing_required' || phase === 'remote_authentication_required') {
-    elements.pairingSection.hidden = false;
     return;
   }
 
   if (phase === 'local_unlock_required') {
-    elements.unlockSection.hidden = false;
-    setUnlockPasswordVisibility(false);
-    scheduleUnlockPasswordFocus();
+    if (!unlockWasVisible) {
+      setUnlockPasswordVisibility(false);
+      scheduleUnlockPasswordFocus();
+    }
     return;
   }
 
   if (phase === 'ready') {
-    elements.readySection.hidden = false;
     if (readySearchShouldAutoFocus) {
       scheduleReadySearchFocus();
       readySearchShouldAutoFocus = false;
@@ -1401,6 +1413,9 @@ function scheduleRealtimePopupRefresh(domains) {
     realtimeRefreshDebounceTimer = null;
     const domainsToApply = Array.from(pendingRealtimeDomains);
     pendingRealtimeDomains.clear();
+    if (domainsToApply.includes('password_history')) {
+      void syncPasswordGeneratorHistoryFromRemote({ force: true });
+    }
     const shouldRefreshList = domainsToApply.some(
       (domain) => domain === 'vault' || domain === 'icons_manual' || domain === 'icons_state',
     );
@@ -1857,11 +1872,16 @@ function renderCredentialList(items, options = {}) {
     if (!preserveSelectionOnEmpty) {
       selectedItemId = null;
     }
-    const warmupRunning =
-      currentState?.cacheWarmupState === 'running' ||
-      currentState?.cacheWarmupState === 'syncing' ||
-      currentState?.cacheWarmupState === 'loading_local';
-    if (vaultLoading || warmupRunning) {
+    const hasReadySnapshot =
+      (Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0) ||
+      (Array.isArray(previousItems) && previousItems.length > 0);
+    if (
+      shouldRenderVaultSkeleton({
+        vaultLoading,
+        warmupState: currentState?.cacheWarmupState,
+        hasReadySnapshot,
+      })
+    ) {
       elements.credentialsList.innerHTML = buildVaultLoadingSkeletonMarkup();
       renderCredentialDetails();
       popupAutosizer?.schedule();
@@ -2204,12 +2224,19 @@ async function refreshStateAndMaybeList(options = {}) {
   const showLoading = options?.showLoading !== false && fetchList;
   const prefetchedState = options?.prefetchedState ?? null;
   const forceActiveStateRefresh = options?.forceActiveStateRefresh === true;
+  const hasFallbackItems =
+    (Array.isArray(currentItems) && currentItems.length > 0) ||
+    (Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0);
   if (showLoading) {
-    vaultLoading = true;
+    vaultLoading = !hasFallbackItems;
     detailLoading = Boolean(selectedItemId);
     listErrorMessage = '';
     if (currentItems.length === 0) {
-      renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
+      if (Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0) {
+        renderCredentialList(lastReadyListSnapshot, { preserveSelectionOnEmpty: true });
+      } else {
+        renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
+      }
     } else {
       renderCredentialDetails();
       popupAutosizer?.schedule();
@@ -2574,8 +2601,16 @@ async function handleUnlock() {
 
   const unlockedState = response.state ?? null;
   if (resolvePopupPhase(unlockedState) === 'ready') {
-    if ((!Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0) && trustedIdentitySignature) {
-      await loadPersistedReadyListSnapshot(trustedIdentitySignature);
+    const unlockTrustedSignature =
+      resolveTrustedIdentitySignatureFromState(unlockedState) ?? trustedIdentitySignature;
+    if (unlockTrustedSignature) {
+      trustedIdentitySignature = unlockTrustedSignature;
+    }
+    if (
+      (!Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0) &&
+      unlockTrustedSignature
+    ) {
+      await loadPersistedReadyListSnapshot(unlockTrustedSignature);
     }
     const hasRenderableItems = Array.isArray(currentItems) && currentItems.length > 0;
     const fallbackItems =
@@ -3035,11 +3070,6 @@ function wireEvents() {
       void runAction(handleUnlock);
     }
   });
-  elements.unlockPasswordInput.addEventListener('blur', () => {
-    window.setTimeout(() => {
-      focusUnlockPasswordInput();
-    }, 0);
-  });
   elements.openApprovalBtn.addEventListener('click', () => {
     void runAction(async () => {
       const openResult = await openWebSettings({ autoFromLinkPair: false, silentOnError: false });
@@ -3413,16 +3443,6 @@ function wireEvents() {
     if (!(target instanceof Node)) {
       return;
     }
-    if (shouldKeepUnlockInputFocused()) {
-      const clickedInput =
-        target === elements.unlockPasswordInput ||
-        (target instanceof Element && target.closest('#unlockPasswordInput') !== null);
-      if (!clickedInput) {
-        window.setTimeout(() => {
-          focusUnlockPasswordInput();
-        }, 0);
-      }
-    }
     if (!elements.passwordGeneratorPanel.hidden) {
       const insideGeneratorPanel = elements.passwordGeneratorPanel.contains(target);
       const insideGeneratorButton = elements.passwordGeneratorBtn.contains(target);
@@ -3493,15 +3513,15 @@ function scheduleRefresh() {
       return 1_200;
     }
     if (effectivePhase === 'local_unlock_required') {
-      return 1_500;
+      return 5_000;
     }
     if (effectivePhase === 'remote_authentication_required' && currentState?.hasTrustedState) {
-      return 1_500;
+      return 5_000;
     }
     if (effectivePhase === 'ready') {
-      return 12_000;
+      return 5 * 60 * 1000;
     }
-    return 20_000;
+    return 20 * 60 * 1000;
   })();
   if (refreshTimer !== null && refreshIntervalMs === nextIntervalMs) {
     return;
