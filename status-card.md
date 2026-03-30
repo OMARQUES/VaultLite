@@ -2,8 +2,8 @@
 
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
-Status card version: `2026-03-23-v2.3.0-r20`
-Last updated: `2026-03-23`
+Status card version: `2026-03-30-v2.3.1-r21`
+Last updated: `2026-03-30`
 Overall status: `phase12_in_progress`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
@@ -126,6 +126,7 @@ Active card: `P12-C01 - Threat-model review update`
 Global gates still blocking sensitive implementation: `none`
 Reason: `P11` extension baseline has been stabilized in repo with LTS pairing, unlock/session continuity, bridge hardening, and manual-icon flows; execution focus is now release hardening and threat-model reconciliation.
 Suggested immediate sequence: `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -> `P12-C06` -> `P12-C07` -> `P12-C08` -> `P12-C03`.
+Post-Phase-12 queued sequence: `P13-C01` -> `P13-C02` -> `P13-C03` -> `P13-C04` -> `P13-C05` -> `P13-C06` -> `P13-C07` -> `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -240,6 +241,18 @@ Suggested immediate sequence: `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -
 - `P12-C06` Environment validation — `not_started`
 - `P12-C07` Residual risk log — `not_started`
 - `P12-C08` Release go/no-go checklist — `not_started`
+- `P13-C01` Extension item edit parity — `not_started`
+- `P13-C02` Item change history with field-level diff visibility — `not_started`
+- `P13-C03` Form metadata capture and sync contracts — `not_started`
+- `P13-C04` Inline field suggestion anchor (content-script) — `not_started`
+- `P13-C05` Inline mini-search and ranked credential suggestion tray — `not_started`
+- `P13-C06` Save login and update password post-submit prompts — `not_started`
+- `P13-C07` Heuristic autofill engine v1 (same-origin iframe) — `not_started`
+- `P13-C08` Identity/address/card fill profiles v1 — `not_started`
+- `P13-C09` TOTP suggestion and fill assist — `not_started`
+- `P13-C10` Site allowlist and denylist controls — `not_started`
+- `P13-C11` Local non-sensitive assist telemetry — `not_started`
+- `P13-C12` Cross-origin iframe fill support v2 — `not_started`
 
 ## Phase 0
 
@@ -2610,6 +2623,260 @@ Notes for Codex/dev: every checklist line should point to an artifact, command, 
 Evidence required to mark done: Committed release checklist template with evidence placeholders or references filled for each gate.
 Suggested next action: compile the final checklist from implemented verification steps.
 
+## Phase 13
+
+### P13-C01 - Extension item edit parity
+Card ID: `P13-C01`
+Title: `Extension item edit parity`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P0`
+Objective: Permitir edição de item diretamente na extensão com comportamento consistente com o web app.
+Description: Implementar fluxo de edição no popup para login, card, document e secure note com validações mínimas, sem perder o comportamento cache-first.
+Motivation: Os cards de detecção/save/update/autofill dependem de um fluxo de edição rápido e seguro dentro da própria extensão.
+Scope includes: UI de edição no popup; validação de campos obrigatórios; salvar sem recarga total; sincronização por snapshot/realtime.
+Out of scope: autosave sem confirmação e edição em lote.
+Dependencies: `P11-C03`; `P7-C01`; `P7-C02`.
+Files/areas impacted: `apps/extension/popup.js`; `apps/extension/popup-view-model.js`; `apps/extension/background.js`.
+Deliverables: edição funcional de item na extensão com testes.
+Required tests: `apps/extension/src/popup-view-model.test.js`; `apps/extension/src/background-controller.test.ts` cobrindo abrir, editar, salvar, erro e rollback visual.
+Acceptance criteria: usuário edita e salva item na extensão sem tela vazia temporária e sem regressão de lock/unlock.
+Risks / cautions: regressão de UX cache-first ao trocar estado de edição.
+Notes for Codex/dev: evitar limpar lista ativa durante save; sincronização deve ser em background.
+Evidence required to mark done: testes de edição na extensão verdes e evidência manual de save sem flicker de lista.
+Suggested next action: implementar edição mínima para itens `login`.
+
+### P13-C02 - Item change history with field-level diff visibility
+Card ID: `P13-C02`
+Title: `Item change history with field-level diff visibility`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P0`
+Objective: Exibir histórico por item com diff de campos (antes/depois), incluindo valores substituídos quando usuário solicitar.
+Description: Persistir eventos de alteração por item/dispositivo e renderizar timeline no popup/web com reveal explícito para campos sensíveis.
+Motivation: Auditoria e confiança operacional para fluxos de update automático de credencial.
+Scope includes: evento por alteração; tipo de mudança; dispositivo/origem; diff por campo; reveal explícito para campos sensíveis.
+Out of scope: versionamento completo de item inteiro.
+Dependencies: `P13-C01`; `P9-C01`.
+Files/areas impacted: `apps/api/src/app.ts`; `apps/api/src/realtime.ts`; `adapters/cloudflare-storage/src/index.ts`; `apps/extension/popup.js`; `apps/web/src/pages/VaultShellPage.vue`.
+Deliverables: histórico navegável com diffs por campo.
+Required tests: `apps/api/src/app.test.ts` e `apps/extension/src/popup-view-model.test.js` cobrindo criação de eventos, ordenação e reveal controlado.
+Acceptance criteria: histórico mostra `quando`, `dispositivo`, `tipo` e `before/after` por campo sem quebrar políticas de desbloqueio local.
+Risks / cautions: exposição indevida de valores sensíveis se reveal não for protegido por `local unlock`.
+Notes for Codex/dev: diffs sensíveis devem ficar criptografados em repouso.
+Evidence required to mark done: endpoints/testes de histórico e validação manual de reveal após desbloqueio local.
+Suggested next action: definir contrato de evento de histórico em `packages/contracts`.
+
+### P13-C03 - Form metadata capture and sync contracts
+Card ID: `P13-C03`
+Title: `Form metadata capture and sync contracts`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P0`
+Objective: Capturar e sincronizar metadados de formulário para melhorar preenchimentos futuros.
+Description: Salvar fingerprint/seletores/roles por origem e item, atualizar metadados quando o site mudar, e sincronizar entre dispositivos por realtime.
+Motivation: Base técnica para reduzir falhas de detecção em sites reais.
+Scope includes: schema de metadados; upsert por confiança; sync por websocket; fallback heurístico quando seletor falhar.
+Out of scope: TTL temporal fixo para metadados.
+Dependencies: `P13-C01`; `P11-C02`; `P9-C01`.
+Files/areas impacted: `packages/contracts/src`; `apps/api/src/app.ts`; `apps/api/src/realtime.ts`; `adapters/cloudflare-storage/src/index.ts`; `apps/extension/content-script.js`; `apps/extension/background.js`.
+Deliverables: contrato e pipeline de metadados de formulário sincronizado.
+Required tests: API/extension tests para criação, atualização por mudança de layout e propagação realtime sem loop.
+Acceptance criteria: metadados úteis são reutilizados entre sessões/dispositivos e atualizados quando detecção confirmar novo layout.
+Risks / cautions: ruído de metadados pode degradar ranking se confiança não for bem tratada.
+Notes for Codex/dev: atualizar metadados somente com sinais fortes de sucesso de preenchimento.
+Evidence required to mark done: testes de captura/sync e inspeção de payload sem dados sensíveis desnecessários.
+Suggested next action: implementar tipos `form_fingerprint` e `field_role` nos contratos.
+
+### P13-C04 - Inline field suggestion anchor (content-script)
+Card ID: `P13-C04`
+Title: `Inline field suggestion anchor (content-script)`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P1`
+Objective: Exibir ícone inline em campos de login para iniciar sugestão contextual sem abrir popup.
+Description: Detectar campos de autenticação no content-script e ancorar affordance visual consistente com ação de sugestão.
+Motivation: Reduzir atrito de uso e aproximar UX esperada de gerenciadores líderes.
+Scope includes: detecção de campo; ícone inline; acionamento por foco/click; integração com background para ranking.
+Out of scope: preenchimento automático sem confirmação.
+Dependencies: `P13-C03`; `P11-C03`.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/bridge-content-script.js`; `apps/extension/src/fill-engine.ts`.
+Deliverables: affordance inline funcional em campos suportados.
+Required tests: `apps/extension/src/fill-engine.test.ts` e testes de DOM fixture para foco/click.
+Acceptance criteria: ícone aparece em campos compatíveis e abre fluxo de sugestão sem causar regressão em páginas não suportadas.
+Risks / cautions: interferir com UI de terceiros se injeção não for isolada.
+Notes for Codex/dev: manter estilos isolados e fail-safe em páginas incompatíveis.
+Evidence required to mark done: capturas/fixtures de campo suportado + testes automatizados.
+Suggested next action: habilitar ancoragem apenas em inputs com confiança mínima de login.
+
+### P13-C05 - Inline mini-search and ranked credential suggestion tray
+Card ID: `P13-C05`
+Title: `Inline mini-search and ranked credential suggestion tray`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P1`
+Objective: Permitir busca rápida no vault e seleção de credencial diretamente abaixo do campo.
+Description: Renderizar mini-lista inline com sugestões ranqueadas e busca local rápida quando não houver match forte.
+Motivation: Evitar abrir popup e acelerar preenchimento em contexto de login.
+Scope includes: ranking por domínio/subdomínio/PSL + favorito + último uso + similaridade de username; busca inline; ação de fill.
+Out of scope: ranking por telemetria remota.
+Dependencies: `P13-C04`; `P11-C02`; `P7-C04`.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/popup-view-model.js`.
+Deliverables: mini-lista inline com seleção de credencial e preenchimento.
+Required tests: testes de ranking e busca inline cobrindo baixa confiança e fallback manual.
+Acceptance criteria: com ou sem match forte, usuário consegue selecionar credencial e preencher sem abrir popup.
+Risks / cautions: ranking ruim pode aumentar falso positivo de preenchimento.
+Notes for Codex/dev: baixa confiança deve continuar mostrando sugestões, mas sem autofill silencioso.
+Evidence required to mark done: testes de ranking e demo manual em domínios sem match exato.
+Suggested next action: implementar função de score determinística com pesos versionados.
+
+### P13-C06 - Save login and update password post-submit prompts
+Card ID: `P13-C06`
+Title: `Save login and update password post-submit prompts`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P1`
+Objective: Sugerir salvar novo login e atualizar senha após submit detectado.
+Description: Detectar submit de credenciais, classificar cenário (`new_login`, `update_password`) e abrir prompt com confirmação explícita.
+Motivation: Cobrir fluxos de manutenção de credenciais com mínimo de cliques.
+Scope includes: detecção pós-submit; prompt superior direito; abrir item prefill para confirmação final de save/update.
+Out of scope: persistência automática sem interação do usuário.
+Dependencies: `P13-C01`; `P13-C03`; `P13-C05`.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/popup.js`.
+Deliverables: prompts funcionais para salvar/atualizar credenciais.
+Required tests: cenários com domínio conhecido/desconhecido, username novo e senha alterada.
+Acceptance criteria: prompt aparece nos cenários definidos e usuário conclui update com fluxo curto e explícito.
+Risks / cautions: falsos positivos em formulários não-auth.
+Notes for Codex/dev: confirmar intenção do usuário antes de persistir dados sensíveis.
+Evidence required to mark done: testes de submit-capture + validação manual em ao menos 3 fluxos reais.
+Suggested next action: implementar classificador inicial de submit de login/senha.
+
+### P13-C07 - Heuristic autofill engine v1 (same-origin iframe)
+Card ID: `P13-C07`
+Title: `Heuristic autofill engine v1 (same-origin iframe)`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P1`
+Objective: Melhorar taxa de preenchimento com heurística agressiva mantendo confirmação por padrão.
+Description: Expandir detecção/fill para campos comuns de login em páginas principais e iframes same-origin.
+Motivation: Cobrir grande parte dos sites sem exigir configuração manual por site.
+Scope includes: heurística de roles; fallback quando seletor salvo falhar; suporte same-origin iframe; confirmação extra em HTTP inseguro.
+Out of scope: cross-origin iframe (V2).
+Dependencies: `P13-C03`; `P13-C04`; `P13-C05`.
+Files/areas impacted: `apps/extension/src/fill-engine.ts`; `apps/extension/content-script.js`; `apps/extension/src/origin-policy.ts`.
+Deliverables: engine heurístico v1 com cobertura ampliada.
+Required tests: `fill-engine` tests para campos variados, iframe same-origin e guardrail HTTP.
+Acceptance criteria: aumento de cobertura de preenchimento em fixtures sem regressão de segurança.
+Risks / cautions: heurística agressiva pode preencher campo errado sem guardrails.
+Notes for Codex/dev: padrão deve ser sugestão + clique; autofill completo só em modo explícito configurável.
+Evidence required to mark done: suíte de fixtures atualizada e relatório de sucesso por tipo de formulário.
+Suggested next action: consolidar matriz de detecção de campo por role.
+
+### P13-C08 - Identity/address/card fill profiles v1
+Card ID: `P13-C08`
+Title: `Identity/address/card fill profiles v1`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P2`
+Objective: Preencher dados de identidade/endereço/cartão com suporte a campos text/select/mask.
+Description: Implementar perfis de preenchimento completo para formulários de checkout/cadastro após seleção explícita do perfil.
+Motivation: Aumentar utilidade prática além de login/senha.
+Scope includes: mapping por tipo de campo; selects/mascaras; fluxo por etapas; CVV após seleção explícita de cartão.
+Out of scope: detecção automática sem seleção de perfil.
+Dependencies: `P13-C07`; `P7-C02`; `P10-C01`.
+Files/areas impacted: `apps/extension/src/fill-engine.ts`; `apps/extension/content-script.js`; `apps/extension/popup.js`.
+Deliverables: preenchimento assistido de identidade/endereço/cartão.
+Required tests: fixtures de checkout/cadastro com campos mascarados e selects.
+Acceptance criteria: perfil selecionado preenche corretamente campos compatíveis em formulários comuns.
+Risks / cautions: risco de preencher dados sensíveis no campo errado.
+Notes for Codex/dev: manter confirmação explícita de perfil/cartão antes do fill.
+Evidence required to mark done: testes de perfis + validação manual em formulários de referência.
+Suggested next action: definir catálogo de `fieldRole` para identidade/endereço/cartão.
+
+### P13-C09 - TOTP suggestion and fill assist
+Card ID: `P13-C09`
+Title: `TOTP suggestion and fill assist`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P2`
+Objective: Sugerir e preencher código TOTP em campos 2FA com fluxo de interação consistente.
+Description: Detectar etapa OTP, sugerir código do item correspondente e permitir clique para preencher; autofill automático opcional.
+Motivation: Reduzir fricção em login com 2FA.
+Scope includes: detecção de campo OTP; sugestão contextual; clique para fill; modo opcional de autofill.
+Out of scope: bypass de confirmação de segurança.
+Dependencies: `P13-C05`; `P13-C07`.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/popup.js`.
+Deliverables: fluxo TOTP inline funcional.
+Required tests: testes de detecção OTP e preenchimento com modo padrão/automático.
+Acceptance criteria: usuário consegue preencher OTP sem copiar/colar manual na maior parte dos sites suportados.
+Risks / cautions: identificação incorreta de campo OTP pode causar erro de autenticação.
+Notes for Codex/dev: expiração/refresh do código deve ser refletida sem jank visual.
+Evidence required to mark done: testes de OTP + validação manual de fluxo 2FA.
+Suggested next action: implementar detector OTP por `autocomplete`, `inputmode`, label e padrões comuns.
+
+### P13-C10 - Site allowlist and denylist controls
+Card ID: `P13-C10`
+Title: `Site allowlist and denylist controls`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P2`
+Objective: Permitir controle por site de sugestões/fill/save prompts.
+Description: Adicionar controles globais e por domínio para habilitar/desabilitar assistências de preenchimento.
+Motivation: Evitar comportamento indesejado em sites específicos e melhorar governança de UX.
+Scope includes: opções por domínio; override de heurística; suporte a allowlist/denylist no runtime.
+Out of scope: políticas centralizadas multi-admin.
+Dependencies: `P13-C05`; `P13-C06`; `P13-C07`.
+Files/areas impacted: `apps/extension/options.js`; `apps/extension/background.js`; `apps/extension/popup.js`.
+Deliverables: configuração funcional de allowlist/denylist.
+Required tests: testes de política por domínio com bloqueio/liberação de cada capacidade.
+Acceptance criteria: regras por site são respeitadas em sugestão, fill e save/update prompts.
+Risks / cautions: regra conflitante pode gerar comportamento difícil de diagnosticar.
+Notes for Codex/dev: exibir regra ativa para facilitar suporte.
+Evidence required to mark done: testes de política e confirmação manual em domínios distintos.
+Suggested next action: definir precedência de regras (denylist > allowlist > default).
+
+### P13-C11 - Local non-sensitive assist telemetry
+Card ID: `P13-C11`
+Title: `Local non-sensitive assist telemetry`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P2`
+Objective: Medir eficácia de detecção/sugestão/fill sem coletar dados sensíveis.
+Description: Registrar métricas locais para guiar melhorias de heurística e reduzir regressões.
+Motivation: Sem telemetria técnica, tuning de heurística vira tentativa e erro.
+Scope includes: métricas de sucesso/falha por tipo de formulário; contadores de prompt/fill; export local para diagnóstico.
+Out of scope: envio remoto automático de telemetria.
+Dependencies: `P13-C05`; `P13-C06`; `P13-C07`.
+Files/areas impacted: `apps/extension/background.js`; `apps/extension/runtime-common.js`; `apps/extension/options.js`.
+Deliverables: painel/artefato local de métricas não sensíveis.
+Required tests: testes garantindo ausência de PII/segredos no payload de telemetria.
+Acceptance criteria: métricas ajudam a medir qualidade sem expor credenciais ou conteúdo secreto.
+Risks / cautions: logging excessivo pode degradar performance em páginas complexas.
+Notes for Codex/dev: limitar cardinalidade e retenção local.
+Evidence required to mark done: testes de schema + revisão manual de payload.
+Suggested next action: definir schema mínimo com chaves estáveis.
+
+### P13-C12 - Cross-origin iframe fill support v2
+Card ID: `P13-C12`
+Title: `Cross-origin iframe fill support v2`
+Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Status: `not_started`
+Priority: `P3`
+Objective: Expandir suporte para formulários de login em iframes cross-origin.
+Description: Projetar e implementar estratégia segura para detecção/sugestão/fill em iframes de origem diferente.
+Motivation: Alguns provedores de autenticação embutem login em iframe externo.
+Scope includes: desenho de permissões; isolamento de origin; validação explícita de contexto.
+Out of scope: bypass de políticas de navegador ou expansão insegura de permissões.
+Dependencies: `P13-C07`; revisão de segurança dedicada no contexto de `P12-C01`.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/bridge-content-script.js`; `apps/extension/src/origin-policy.ts`; docs de segurança.
+Deliverables: design + implementação v2 para cross-origin iframe com guardrails.
+Required tests: testes de permissão/origin e fixtures com iframe cross-origin.
+Acceptance criteria: suporte cross-origin funcional sem quebrar isolamento de segurança da extensão.
+Risks / cautions: aumento relevante de superfície de ataque.
+Notes for Codex/dev: tratar como entrega separada após validação de risco.
+Evidence required to mark done: threat-review específico + testes green em cenários cross-origin.
+Suggested next action: registrar ADR curto de permissões e riscos antes de codar.
+
 ## Cross-Phase Risks
 - `R-01`: Auth-state ambiguity between `remote authentication`, `local unlock`, and `session restoration`.
   Impact: high risk of incorrect guards, leaky UI states, and auth regressions.
@@ -2637,6 +2904,7 @@ Suggested next action: compile the final checklist from implemented verification
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-03-30: Added `Phase 13 - Intelligent Assist and Contextual Autofill` with card IDs `P13-C01` to `P13-C12`, explicit dependencies, and V1/V2 scope boundaries (same-origin iframe in V1, cross-origin iframe deferred). This phase is queued after Phase 12 and does not change the current release-hardening focus.
 - 2026-03-23: Synced status-card with repository state and moved execution focus to Phase 12. `P11-C01`, `P11-C02`, and `P11-C03` are now `done` based on implemented LTS-only extension pairing, unlock/session continuity with backend-mediated unlock grants, strict bridge hardening, listing/fill stabilization, and green automated suites in `@vaultlite/extension` and `@vaultlite/api` extension auth coverage.
 - 2026-03-23: Extension and web manual-icon flows now operate on shared server-side overrides with popup detail-icon editing and robust sync behavior (queued retries, non-retriable 4xx drop, and cross-surface refresh triggers), reducing extension/web icon drift during normal use.
 - 2026-03-19: Closed the Phase 11 runtime implementation path and moved `P11-C01`/`P11-C02`/`P11-C03` to `review_needed`. Added operational MV3 runtime files (`apps/extension/background.js`, `apps/extension/popup.js`, `apps/extension/options.js`, `apps/extension/full-page-auth.js`, `apps/extension/content-script.js`, `apps/extension/runtime-*.js`) enforcing background-only secret authority, strict sender capability checks, exact-origin fill authorization, anti-race revalidation, and fail-closed lock behavior. Validation evidence: `@vaultlite/api`, `@vaultlite/web`, and `@vaultlite/extension` test suites green; workspace typecheck green; migration validation green; `npm audit --omit=dev` reports 0 vulnerabilities.
