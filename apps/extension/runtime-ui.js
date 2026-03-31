@@ -291,5 +291,28 @@ export function setFormDisabled(formElement, disabled) {
 }
 
 export async function copyToClipboard(value) {
-  await navigator.clipboard.writeText(value);
+  const text = typeof value === 'string' ? value : String(value ?? '');
+  if (typeof document.execCommand === 'function') {
+    const fallbackArea = document.createElement('textarea');
+    fallbackArea.value = text;
+    fallbackArea.setAttribute('readonly', 'readonly');
+    fallbackArea.style.position = 'fixed';
+    fallbackArea.style.top = '-9999px';
+    fallbackArea.style.opacity = '0';
+    document.body.appendChild(fallbackArea);
+    fallbackArea.focus();
+    fallbackArea.select();
+    const copied = document.execCommand('copy');
+    fallbackArea.remove();
+    if (copied) {
+      return;
+    }
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  throw new Error('Clipboard is unavailable.');
 }

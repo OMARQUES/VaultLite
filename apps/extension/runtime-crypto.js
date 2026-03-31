@@ -227,6 +227,42 @@ export async function encryptVaultItemPayload(input) {
   );
 }
 
+export async function encryptAttachmentBlobPayload(input) {
+  const key = await importAccountKey(input.accountKey, 'encrypt');
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(nonce),
+    },
+    key,
+    input.plaintext,
+  );
+  const encryptedBytes = new Uint8Array(ciphertext);
+  const authTagLength = 16;
+  const cipherBytes = encryptedBytes.slice(0, encryptedBytes.length - authTagLength);
+  const authTag = encryptedBytes.slice(encryptedBytes.length - authTagLength);
+
+  return bytesToBase64Url(
+    textEncoder.encode(
+      JSON.stringify({
+        version: 'blob.v1',
+        algorithm: 'aes-256-gcm',
+        nonce: bytesToBase64Url(nonce),
+        ciphertext: bytesToBase64Url(cipherBytes),
+        authTag: bytesToBase64Url(authTag),
+        contentType: typeof input?.contentType === 'string' ? input.contentType : 'application/octet-stream',
+        originalSize:
+          input?.plaintext instanceof ArrayBuffer
+            ? input.plaintext.byteLength
+            : ArrayBuffer.isView(input?.plaintext)
+              ? input.plaintext.byteLength
+              : 0,
+      }),
+    ),
+  );
+}
+
 export async function decryptVaultItemPayload(input) {
   const envelopeRaw = textDecoder.decode(base64UrlToBytes(input.encryptedPayload));
   const envelope = JSON.parse(envelopeRaw);

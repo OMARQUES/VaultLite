@@ -42,6 +42,10 @@ import type {
   SiteIconManualUpsertInput,
   SiteIconResolveBatchInput,
   SiteIconResolveBatchOutput,
+  VaultFolderAssignmentUpsertInput,
+  VaultFolderMutationOutput,
+  VaultFoldersStateOutput,
+  VaultFolderUpsertInput,
   OnboardingAccountKitSignInput,
   PasswordRotationCompleteOutput,
   PasswordRotationInput,
@@ -183,6 +187,12 @@ export interface VaultLiteAuthClient {
   upsertPasswordGeneratorHistoryEntry(
     input: PasswordGeneratorHistoryUpsertInput,
   ): Promise<PasswordGeneratorHistoryActionOutput>;
+  listVaultFoldersState(input?: { etag?: string }): Promise<
+    | { status: 'ok'; payload: VaultFoldersStateOutput; etag: string | null }
+    | { status: 'not_modified'; etag: string | null }
+  >;
+  upsertVaultFolder(input: VaultFolderUpsertInput): Promise<VaultFolderMutationOutput>;
+  assignVaultFolder(input: VaultFolderAssignmentUpsertInput): Promise<VaultFolderMutationOutput>;
 }
 
 async function requestJson<T>(
@@ -243,6 +253,17 @@ async function requestJson<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+function resolveFetchUrl(baseUrl: string, path: string): string {
+  const target = `${baseUrl}${path}`;
+  if (/^https?:\/\//i.test(target)) {
+    return target;
+  }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return new URL(target, window.location.origin).toString();
+  }
+  return target;
 }
 
 function nextIdempotencyKey(): string {
@@ -606,7 +627,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
         query.set('domains', input.domains.join(','));
       }
       const response = await fetch(
-        `${baseUrl}/api/icons/state${query.size > 0 ? `?${query.toString()}` : ''}`,
+        resolveFetchUrl(baseUrl, `/api/icons/state${query.size > 0 ? `?${query.toString()}` : ''}`),
         {
           credentials: 'include',
           method: 'GET',
@@ -727,7 +748,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       );
     },
     async listManualSiteIcons(input) {
-      const response = await fetch(`${baseUrl}/api/icons/manual`, {
+      const response = await fetch(resolveFetchUrl(baseUrl, '/api/icons/manual'), {
         credentials: 'include',
         method: 'GET',
         headers: {
@@ -789,6 +810,48 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       return requestJson<PasswordGeneratorHistoryListOutput>(
         `${baseUrl}/api/password-generator/history`,
         undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    async listVaultFoldersState(input) {
+      const response = await fetch(resolveFetchUrl(baseUrl, '/api/vault/folders/state'), {
+        credentials: 'include',
+        headers: {
+          ...(input?.etag ? { 'if-none-match': input.etag } : {}),
+        },
+      });
+      if (response.status === 304) {
+        return {
+          status: 'not_modified' as const,
+          etag: response.headers.get('etag'),
+        };
+      }
+      if (!response.ok) {
+        throw new Error(`request_failed_${response.status}`);
+      }
+      return {
+        status: 'ok' as const,
+        payload: (await response.json()) as VaultFoldersStateOutput,
+        etag: response.headers.get('etag'),
+      };
+    },
+    upsertVaultFolder(input) {
+      return requestJson<VaultFolderMutationOutput>(
+        `${baseUrl}/api/vault/folders/upsert`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    assignVaultFolder(input) {
+      return requestJson<VaultFolderMutationOutput>(
+        `${baseUrl}/api/vault/folders/assign`,
+        withIdempotencyHeader({
+          method: 'POST',
+          body: JSON.stringify(input),
+        }),
         { emitUnauthorizedEvent: true },
       );
     },

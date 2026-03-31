@@ -2184,6 +2184,72 @@
         resize: vertical;
       }
 
+      .detail-attachment-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-attachment-row {
+        border: 1px solid color-mix(in srgb, var(--vl-border) 88%, transparent);
+        border-radius: 10px;
+        padding: 9px 10px;
+        background: color-mix(in srgb, var(--vl-surface-2) 44%, transparent);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .detail-attachment-meta {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+      }
+
+      .detail-attachment-name {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text);
+        word-break: break-word;
+      }
+
+      .detail-attachment-subtitle {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vl-text-soft);
+      }
+
+      .detail-folder-editor-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .detail-folder-create-btn {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        border: 1px solid color-mix(in srgb, var(--vl-primary) 80%, transparent);
+        background: var(--vl-primary);
+        color: #fff;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+
+      .detail-folder-create-btn:hover {
+        background: var(--vl-primary-strong);
+      }
+
+      .detail-folder-value {
+        margin: 8px 0 0;
+        font-size: 14px;
+        color: var(--vl-text);
+      }
+
       .detail-row-editor-split {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -2213,11 +2279,20 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        box-shadow: none;
       }
 
       .detail-password-inline-toggle:hover {
-        background: color-mix(in srgb, var(--vl-surface) 55%, transparent);
         color: var(--vl-text);
+        border-color: transparent;
+        box-shadow: none;
+      }
+
+      .detail-password-inline-toggle.row-action,
+      .detail-password-inline-toggle.row-action:hover {
+        background: transparent;
+        border-color: transparent;
+        box-shadow: none;
       }
 
       .detail-password-inline-toggle .material-symbols-rounded {
@@ -2244,6 +2319,11 @@
         margin: 0;
         font-size: 12px;
         color: var(--vl-text-muted);
+      }
+
+      .detail-section-icon-action {
+        width: 34px;
+        height: 34px;
       }
 
       .detail-custom-fields-list {
@@ -2309,10 +2389,14 @@
         border-top: 1px solid color-mix(in srgb, var(--vl-divider) 95%, transparent);
       }
 
+      .detail-section--spaced {
+        padding-top: 10px;
+      }
+
       .detail-row {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
+        align-items: start;
         gap: 12px;
         padding: 11px 0;
       }
@@ -2409,6 +2493,39 @@
         justify-content: center;
       }
 
+      .folder-modal-field {
+        display: grid;
+        gap: 10px;
+      }
+
+      .folder-modal-label {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text-soft);
+      }
+
+      .folder-modal-input {
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid var(--vl-border);
+        background: var(--vl-input);
+        color: var(--vl-text);
+        padding: 10px 12px;
+        font: inherit;
+      }
+
+      .folder-modal-input:focus {
+        outline: none;
+        border-color: color-mix(in srgb, var(--vl-primary) 72%, white 12%);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--vl-primary) 18%, transparent);
+      }
+
+      .folder-modal-error {
+        margin: 10px 0 0;
+        font-size: 12px;
+        color: #ff9e9e;
+      }
+
       .copy-toast {
         position: fixed;
         left: 50%;
@@ -2432,6 +2549,8 @@
         display: inline-flex;
         gap: 8px;
         align-items: center;
+        align-self: start;
+        margin-top: 18px;
       }
 
       .row-action {
@@ -2595,9 +2714,8 @@
               type="button"
               id="newItemBtn"
               class="icon-button new-item-btn"
-              title="New item (coming soon)"
-              aria-label="New item (coming soon)"
-              disabled
+              title="New item"
+              aria-label="New item"
             >
               <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
             </button>
@@ -2964,9 +3082,50 @@
                   <section class="detail-section" id="detailCustomFieldsSection" hidden>
                     <div class="detail-custom-fields-header">
                       <p id="detailCustomFieldsTitle" class="detail-custom-fields-title">Custom fields</p>
-                      <button type="button" id="detailCustomFieldAddBtn" class="btn-secondary" hidden>Add field</button>
+                      <button
+                        type="button"
+                        id="detailCustomFieldAddBtn"
+                        class="icon-button detail-section-icon-action"
+                        title="Add field"
+                        aria-label="Add field"
+                        hidden
+                      >
+                        <span class="material-symbols-rounded" aria-hidden="true">add</span>
+                      </button>
                     </div>
                     <div id="detailCustomFieldsList" class="detail-custom-fields-list"></div>
+                  </section>
+
+                  <section class="detail-section detail-section--spaced" id="detailFolderSection" hidden>
+                    <div class="detail-custom-fields-header">
+                      <p class="detail-custom-fields-title">Folder</p>
+                    </div>
+                    <p id="detailFolderValue" class="detail-folder-value">No folder</p>
+                    <div class="detail-folder-editor-row">
+                      <select id="detailFolderSelect" class="detail-row-editor" hidden>
+                        <option value="">No folder</option>
+                      </select>
+                      <button type="button" id="detailFolderCreateBtn" class="detail-folder-create-btn" title="Create folder" aria-label="Create folder" hidden>
+                        <span class="material-symbols-rounded" aria-hidden="true">add</span>
+                      </button>
+                    </div>
+                  </section>
+
+                  <section class="detail-section detail-section--spaced" id="detailAttachmentsSection" hidden>
+                    <div class="detail-custom-fields-header">
+                      <p class="detail-custom-fields-title">Attachments</p>
+                      <button
+                        type="button"
+                        id="detailAttachmentAddBtn"
+                        class="icon-button detail-section-icon-action"
+                        title="Add attachment"
+                        aria-label="Add attachment"
+                      >
+                        <span class="material-symbols-rounded" aria-hidden="true">attach_file</span>
+                      </button>
+                    </div>
+                    <div id="detailAttachmentList" class="detail-attachment-list"></div>
+                    <input id="detailAttachmentInput" type="file" hidden />
                   </section>
 
                   <section id="detailHistorySummarySection" class="detail-history-summary" hidden>
@@ -3007,6 +3166,20 @@
             <div class="confirm-modal-actions">
               <button type="button" id="confirmDeleteConfirmBtn" class="confirm-modal-delete-btn">Delete</button>
               <button type="button" id="confirmDeleteCancelBtn" class="btn-secondary confirm-modal-cancel-btn">Cancel</button>
+            </div>
+          </section>
+        </div>
+        <div id="createFolderModal" class="confirm-modal-backdrop" hidden>
+          <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="createFolderTitle">
+            <h2 id="createFolderTitle" class="confirm-modal-title">New folder</h2>
+            <div class="folder-modal-field">
+              <p class="folder-modal-label">Folder name</p>
+              <input id="createFolderNameInput" class="folder-modal-input" type="text" autocomplete="off" />
+            </div>
+            <p id="createFolderError" class="folder-modal-error" hidden></p>
+            <div class="confirm-modal-actions">
+              <button type="button" id="createFolderConfirmBtn" class="btn-primary" disabled>Create folder</button>
+              <button type="button" id="createFolderCancelBtn" class="btn-secondary">Cancel</button>
             </div>
           </section>
         </div>

@@ -340,6 +340,21 @@ export interface VaultItemRecord {
   updatedAt: string;
 }
 
+export interface VaultFolderRecord {
+  ownerUserId: string;
+  folderId: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VaultFolderAssignmentRecord {
+  ownerUserId: string;
+  itemId: string;
+  folderId: string;
+  updatedAt: string;
+}
+
 export type VaultItemHistoryChangeType = 'create' | 'update' | 'delete' | 'restore';
 
 export interface VaultItemHistoryRecord {
@@ -823,6 +838,20 @@ export interface VaultItemHistoryRepository {
   }): Promise<number>;
 }
 
+export interface VaultFolderRepository {
+  listByOwnerUserId(ownerUserId: string): Promise<{
+    folders: VaultFolderRecord[];
+    assignments: VaultFolderAssignmentRecord[];
+  }>;
+  upsertFolder(record: VaultFolderRecord): Promise<VaultFolderRecord>;
+  setAssignment(input: {
+    ownerUserId: string;
+    itemId: string;
+    folderId: string | null;
+    updatedAt: string;
+  }): Promise<void>;
+}
+
 export interface CompleteOnboardingAtomicInput {
   nowIso: string;
   inviteTokenHash: string;
@@ -891,6 +920,7 @@ export interface VaultLiteStorage {
   attachmentBlobs: AttachmentBlobRepository;
   vaultItems: VaultItemRepository;
   vaultItemHistory: VaultItemHistoryRepository;
+  folders: VaultFolderRepository;
   completeOnboardingAtomic(input: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult>;
   revokeDeviceAndSessionsAtomic(input: RevokeDeviceAndSessionsAtomicInput): Promise<void>;
   rotatePasswordAtomic(input: RotatePasswordAtomicInput): Promise<RotatePasswordAtomicResult>;
@@ -933,6 +963,8 @@ export function createInMemoryVaultLiteStorage(input: {
   const vaultItems = new Map<string, VaultItemRecord>();
   const vaultItemHistory = new Map<string, VaultItemHistoryRecord>();
   const vaultItemTombstones = new Map<string, VaultItemTombstoneRecord>();
+  const folders = new Map<string, VaultFolderRecord>();
+  const folderAssignments = new Map<string, VaultFolderAssignmentRecord>();
   const idempotencyRecords = new Map<string, IdempotencyRecord>();
   const auditEvents = new Map<string, AuditEventRecord>();
   let deploymentState: DeploymentStateRecord = {
@@ -2487,6 +2519,48 @@ export function createInMemoryVaultLiteStorage(input: {
           vaultItemHistory.delete(key);
         }
         return candidates.length;
+      },
+    },
+    folders: {
+      async listByOwnerUserId(ownerUserId) {
+        const ownedFolders = Array.from(folders.values())
+          .filter((record) => record.ownerUserId === ownerUserId)
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .map((record) => ({ ...record }));
+        const assignments = Array.from(folderAssignments.values())
+          .filter((record) => record.ownerUserId === ownerUserId)
+          .sort((left, right) => left.itemId.localeCompare(right.itemId))
+          .map((record) => ({ ...record }));
+        return {
+          folders: ownedFolders,
+          assignments,
+        };
+      },
+      async upsertFolder(record) {
+        const key = `${record.ownerUserId}:${record.folderId}`;
+        const existing = folders.get(key);
+        const normalized: VaultFolderRecord = existing
+          ? {
+              ...existing,
+              name: record.name,
+              updatedAt: record.updatedAt,
+            }
+          : { ...record };
+        folders.set(key, normalized);
+        return { ...normalized };
+      },
+      async setAssignment(inputRecord) {
+        const key = `${inputRecord.ownerUserId}:${inputRecord.itemId}`;
+        if (!inputRecord.folderId) {
+          folderAssignments.delete(key);
+          return;
+        }
+        folderAssignments.set(key, {
+          ownerUserId: inputRecord.ownerUserId,
+          itemId: inputRecord.itemId,
+          folderId: inputRecord.folderId,
+          updatedAt: inputRecord.updatedAt,
+        });
       },
     },
     async completeOnboardingAtomic(inputRecord) {

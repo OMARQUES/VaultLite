@@ -1,6 +1,7 @@
 import { generateAccountKitKeyPair } from '@vaultlite/crypto/account-kit';
 import { FixedClock, QueueIdGenerator, createTestStorage } from '@vaultlite/test-utils';
 import { describe, expect, test } from 'vitest';
+import { createHash } from 'node:crypto';
 
 import { createVaultLiteApi } from './app';
 
@@ -107,6 +108,7 @@ async function createAuthenticatedVaultFixture() {
   return {
     app,
     storage,
+    clock,
     aliceHeaders: {
       cookie: 'vl_session=session_1; vl_csrf=csrf_1',
       'content-type': 'application/json',
@@ -118,6 +120,36 @@ async function createAuthenticatedVaultFixture() {
       'x-csrf-token': 'csrf_2',
     },
   };
+}
+
+async function issueExtensionBearerForFixture(input: {
+  storage: Awaited<ReturnType<typeof createAuthenticatedVaultFixture>>['storage'];
+  clock: FixedClock;
+  userId: string;
+}): Promise<string> {
+  const rawToken = 'extension_session_token_test_v1';
+  const hashedSessionId = createHash('sha256').update(rawToken).digest('base64url');
+  await input.storage.devices.register({
+    deviceId: 'device_ext_1',
+    userId: input.userId,
+    deviceName: 'Alice Extension',
+    platform: 'extension',
+    deviceState: 'active',
+    createdAt: input.clock.now().toISOString(),
+    revokedAt: null,
+  });
+  await input.storage.sessions.create({
+    sessionId: hashedSessionId,
+    userId: input.userId,
+    deviceId: 'device_ext_1',
+    csrfToken: 'csrf_ext_1',
+    createdAt: input.clock.now().toISOString(),
+    expiresAt: new Date(input.clock.now().getTime() + 6 * 60 * 60 * 1000).toISOString(),
+    recentReauthAt: input.clock.now().toISOString(),
+    revokedAt: null,
+    rotatedFromSessionId: null,
+  });
+  return rawToken;
 }
 
 describe('vault item CRUD API', () => {
@@ -473,6 +505,115 @@ describe('vault item CRUD API', () => {
     expect(await response.json()).toEqual({
       ok: false,
       code: 'vault_item_restore_failed',
+    });
+  });
+
+  test('creates vault item via extension bearer endpoint', async () => {
+    const fixture = await createAuthenticatedVaultFixture();
+    const extensionToken = await issueExtensionBearerForFixture({
+      storage: fixture.storage,
+      clock: fixture.clock,
+      userId: 'user_1',
+    });
+
+    const response = await fixture.app.request('/api/extension/vault/items', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_from_extension_v1',
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const created = await response.json();
+    expect(created).toEqual(
+      expect.objectContaining({
+        itemType: 'login',
+        revision: 1,
+        encryptedPayload: 'encrypted_login_payload_from_extension_v1',
+      }),
+    );
+
+    const historyResponse = await fixture.app.request(`/api/vault/items/${encodeURIComponent(created.itemId)}/history`, {
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+      },
+    });
+    expect(historyResponse.status).toBe(200);
+    expect(await historyResponse.json()).toEqual({
+      records: [
+        expect.objectContaining({
+          changeType: 'create',
+        }),
+      ],
+      nextCursor: null,
+    });
+  });
+
+  test('returns folders snapshot and supports folder upsert + assignment mutation', async () => {
+    const fixture = await createAuthenticatedVaultFixture();
+
+    const beforeSnapshot = await fixture.app.request('/api/vault/folders/state', {
+      headers: fixture.aliceHeaders,
+    });
+    expect(beforeSnapshot.status).toBe(200);
+    expect(await beforeSnapshot.json()).toEqual({
+      folders: [],
+      assignments: [],
+    });
+
+    const upsertFolder = await fixture.app.request('/api/vault/folders/upsert', {
+      method: 'POST',
+      headers: fixture.aliceHeaders,
+      body: JSON.stringify({
+        folderId: 'folder_personal',
+        name: 'Personal',
+      }),
+    });
+    expect(upsertFolder.status).toBe(200);
+
+    const createItem = await fixture.app.request('/api/vault/items', {
+      method: 'POST',
+      headers: fixture.aliceHeaders,
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_payload_for_assignment',
+      }),
+    });
+    expect(createItem.status).toBe(201);
+    const created = await createItem.json();
+
+    const assignFolder = await fixture.app.request('/api/vault/folders/assign', {
+      method: 'POST',
+      headers: fixture.aliceHeaders,
+      body: JSON.stringify({
+        itemId: created.itemId,
+        folderId: 'folder_personal',
+      }),
+    });
+    expect(assignFolder.status).toBe(200);
+
+    const afterSnapshot = await fixture.app.request('/api/vault/folders/state', {
+      headers: fixture.aliceHeaders,
+    });
+    expect(afterSnapshot.status).toBe(200);
+    expect(await afterSnapshot.json()).toEqual({
+      folders: [
+        expect.objectContaining({
+          folderId: 'folder_personal',
+          name: 'Personal',
+        }),
+      ],
+      assignments: [
+        expect.objectContaining({
+          itemId: created.itemId,
+          folderId: 'folder_personal',
+        }),
+      ],
     });
   });
 });

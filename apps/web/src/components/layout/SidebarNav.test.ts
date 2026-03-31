@@ -1,8 +1,19 @@
 import { flushPromises, mount } from '@vue/test-utils';
 import { createMemoryHistory, createRouter } from 'vue-router';
-import { describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import SidebarNav from './SidebarNav.vue';
+
+vi.mock('../../lib/vault-folder-sync', async () => {
+  const uiState = await vi.importActual<typeof import('../../lib/vault-ui-state')>('../../lib/vault-ui-state');
+  return {
+    hydrateVaultFoldersFromServer: vi.fn(async () => false),
+    createVaultFolderOnServer: vi.fn(async (username: string | null, _authClient: unknown, folderName: string) => {
+      uiState.addVaultFolder(username, folderName);
+    }),
+    assignVaultFolderOnServer: vi.fn(async () => undefined),
+  };
+});
 
 async function mountSidebarAt(path: string, role: 'owner' | 'user' = 'user') {
   const router = createRouter({
@@ -39,6 +50,10 @@ async function mountSidebarAt(path: string, role: 'owner' | 'user' = 'user') {
 }
 
 describe('SidebarNav', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   test('shows vault IA blocks on vault routes including card and secure note tabs', async () => {
     const { wrapper } = await mountSidebarAt('/vault');
 

@@ -221,12 +221,37 @@ describe('popup view model helpers', () => {
       searchQuery: 'deleted',
       typeFilter: 'trash',
       suggestedOnly: false,
+      detailPanelMode: 'edit',
+      detailTargetItemId: 'item_9',
+      detailFolderId: 'folder_finance',
+      detailDraftUpdatedAt: Date.now(),
+      detailDraft: {
+        itemType: 'login',
+        title: 'Bank',
+        username: 'user@example.com',
+        password: 'secret',
+        urls: ['https://bank.example.com'],
+        notes: 'Important',
+        customFields: [{ label: 'Branch', value: 'Main' }],
+      },
     })).toEqual({
       selectedItemId: 'item_9',
       searchQuery: 'deleted',
       typeFilter: 'trash',
       suggestedOnly: false,
       sortMode: 'default',
+      detailPanelMode: 'edit',
+      detailTargetItemId: 'item_9',
+      detailFolderId: 'folder_finance',
+      detailDraft: {
+        itemType: 'login',
+        title: 'Bank',
+        username: 'user@example.com',
+        password: 'secret',
+        urls: ['https://bank.example.com'],
+        notes: 'Important',
+        customFields: [{ label: 'Branch', value: 'Main' }],
+      },
     });
     expect(parsePersistedPopupUiState({
       selectedItemId: 'item_1',
@@ -239,6 +264,10 @@ describe('popup view model helpers', () => {
       typeFilter: 'card',
       suggestedOnly: true,
       sortMode: 'default',
+      detailPanelMode: 'view',
+      detailTargetItemId: null,
+      detailFolderId: '',
+      detailDraft: null,
     });
     expect(parsePersistedPopupUiState({})).toEqual({
       selectedItemId: null,
@@ -246,6 +275,10 @@ describe('popup view model helpers', () => {
       typeFilter: 'all',
       suggestedOnly: false,
       sortMode: 'default',
+      detailPanelMode: 'view',
+      detailTargetItemId: null,
+      detailFolderId: '',
+      detailDraft: null,
     });
     expect(parsePersistedPopupUiState(null)).toEqual({
       selectedItemId: null,
@@ -253,6 +286,10 @@ describe('popup view model helpers', () => {
       typeFilter: 'all',
       suggestedOnly: false,
       sortMode: 'default',
+      detailPanelMode: 'view',
+      detailTargetItemId: null,
+      detailFolderId: '',
+      detailDraft: null,
     });
   });
 
@@ -262,19 +299,82 @@ describe('popup view model helpers', () => {
       searchQuery: 'bank',
       typeFilter: 'document',
       suggestedOnly: true,
-    })).toEqual({
+      detailPanelMode: 'create',
+      detailTargetItemId: null,
+      detailFolderId: 'folder_docs',
+      detailDraft: {
+        itemType: 'document',
+        title: 'Passport',
+        content: 'Draft content',
+        customFields: [{ label: 'Country', value: 'BR' }],
+      },
+    })).toMatchObject({
       selectedItemId: 'item_2',
       searchQuery: 'bank',
       typeFilter: 'document',
       suggestedOnly: true,
       sortMode: 'default',
+      detailPanelMode: 'create',
+      detailTargetItemId: null,
+      detailFolderId: 'folder_docs',
+      detailDraft: {
+        itemType: 'document',
+        title: 'Passport',
+        content: 'Draft content',
+        customFields: [{ label: 'Country', value: 'BR' }],
+      },
     });
+    expect(buildPersistedPopupUiState({
+      selectedItemId: 'item_2',
+      searchQuery: 'bank',
+      typeFilter: 'document',
+      suggestedOnly: true,
+      detailPanelMode: 'create',
+      detailTargetItemId: null,
+      detailFolderId: 'folder_docs',
+      detailDraft: {
+        itemType: 'document',
+        title: 'Passport',
+        content: 'Draft content',
+        customFields: [{ label: 'Country', value: 'BR' }],
+      },
+    }).detailDraftUpdatedAt).toEqual(expect.any(Number));
     expect(buildPersistedPopupUiState({ selectedItemId: '', searchQuery: '' })).toEqual({
       selectedItemId: null,
       searchQuery: '',
       typeFilter: 'all',
       suggestedOnly: false,
       sortMode: 'default',
+      detailPanelMode: 'view',
+      detailTargetItemId: null,
+      detailFolderId: '',
+      detailDraft: null,
+    });
+  });
+
+  test('drops expired persisted detail drafts', () => {
+    expect(parsePersistedPopupUiState({
+      detailPanelMode: 'create',
+      detailDraftUpdatedAt: Date.now() - 31 * 60 * 1000,
+      detailDraft: {
+        itemType: 'login',
+        title: 'Expired',
+        username: 'user',
+        password: 'secret',
+        urls: [],
+        notes: '',
+        customFields: [],
+      },
+    })).toEqual({
+      selectedItemId: null,
+      searchQuery: '',
+      typeFilter: 'all',
+      suggestedOnly: false,
+      sortMode: 'default',
+      detailPanelMode: 'view',
+      detailTargetItemId: null,
+      detailFolderId: '',
+      detailDraft: null,
     });
   });
 });

@@ -8,11 +8,12 @@ import PrimaryButton from '../ui/PrimaryButton.vue';
 import SecondaryButton from '../ui/SecondaryButton.vue';
 import TextField from '../ui/TextField.vue';
 import {
-  addVaultFolder,
   loadVaultUiState,
   onVaultUiStateUpdated,
   type VaultFolder,
 } from '../../lib/vault-ui-state';
+import { createVaultLiteAuthClient } from '../../lib/auth-client';
+import { createVaultFolderOnServer, hydrateVaultFoldersFromServer } from '../../lib/vault-folder-sync';
 
 const props = defineProps<{
   username: string | null;
@@ -144,6 +145,9 @@ const folders = ref<VaultFolder[]>([]);
 const folderDialogOpen = ref(false);
 const folderName = ref('');
 const folderNameFieldRef = ref<InstanceType<typeof TextField> | null>(null);
+const folderMutationBusy = ref(false);
+const folderMutationError = ref('');
+const authClient = createVaultLiteAuthClient();
 
 function refreshFolders() {
   folders.value = loadVaultUiState(props.username).folders;
@@ -186,21 +190,29 @@ function toggleFolderSelection(folderId: string) {
   void router.push(vaultRoute({ folder: nextFolder }));
 }
 
-function createFolder() {
+async function createFolder() {
   const trimmed = folderName.value.trim();
   if (!trimmed) {
     return;
   }
-
-  addVaultFolder(props.username, trimmed);
-  refreshFolders();
-  folderDialogOpen.value = false;
-  folderName.value = '';
+  folderMutationBusy.value = true;
+  folderMutationError.value = '';
+  try {
+    await createVaultFolderOnServer(props.username, authClient, trimmed);
+    refreshFolders();
+    folderDialogOpen.value = false;
+    folderName.value = '';
+  } catch {
+    folderMutationError.value = 'Could not create folder right now.';
+  } finally {
+    folderMutationBusy.value = false;
+  }
 }
 
 function openFolderDialog() {
   folderDialogOpen.value = true;
   folderName.value = '';
+  folderMutationError.value = '';
   queueMicrotask(() => {
     folderNameFieldRef.value?.focus();
   });
@@ -209,6 +221,7 @@ function openFolderDialog() {
 function closeFolderDialog() {
   folderDialogOpen.value = false;
   folderName.value = '';
+  folderMutationError.value = '';
 }
 
 function handleFolderDialogKeydown(event: KeyboardEvent) {
@@ -232,6 +245,11 @@ let unsubscribe: (() => void) | null = null;
 
 onMounted(() => {
   refreshFolders();
+  void hydrateVaultFoldersFromServer(props.username, authClient)
+    .then(() => {
+      refreshFolders();
+    })
+    .catch(() => undefined);
   unsubscribe = onVaultUiStateUpdated((detail) => {
     if (detail.username === (props.username ?? null)) {
       refreshFolders();
@@ -250,6 +268,11 @@ watch(
   () => props.username,
   () => {
     refreshFolders();
+    void hydrateVaultFoldersFromServer(props.username, authClient)
+      .then(() => {
+        refreshFolders();
+      })
+      .catch(() => undefined);
   },
 );
 </script>
@@ -504,9 +527,12 @@ watch(
 
     <DialogModal :open="folderDialogOpen" title="New folder">
       <TextField ref="folderNameFieldRef" v-model="folderName" label="Folder name" autocomplete="off" />
+      <p v-if="folderMutationError" class="module-empty-hint">{{ folderMutationError }}</p>
       <template #actions>
         <SecondaryButton type="button" @click="closeFolderDialog">Cancel</SecondaryButton>
-        <PrimaryButton type="button" :disabled="!folderName.trim()" @click="createFolder">Create folder</PrimaryButton>
+        <PrimaryButton type="button" :disabled="!folderName.trim() || folderMutationBusy" @click="createFolder">
+          {{ folderMutationBusy ? 'Creating...' : 'Create folder' }}
+        </PrimaryButton>
       </template>
     </DialogModal>
   </aside>

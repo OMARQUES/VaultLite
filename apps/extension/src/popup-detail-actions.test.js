@@ -20,8 +20,10 @@ describe('popup-detail-actions', () => {
     expect(model.rows[0].label).toBe('Username');
     expect(model.rows[1].label).toBe('Password');
     expect(model.rows[2].label).toBe('URL');
+    expect(model.rows[0].actions).toEqual([]);
+    expect(model.rows[1].actions).toEqual([{ id: 'toggle_password_visibility', label: 'Show password' }]);
     expect(model.rows[2].actions.some((action) => action.id === 'open_url')).toBe(true);
-    expect(model.rows[2].actions.some((action) => action.id === 'copy_url')).toBe(true);
+    expect(model.rows[2].actions.some((action) => action.id === 'copy_url')).toBe(false);
   });
 
   test('identifies copy actions', () => {
@@ -40,4 +42,3 @@ describe('popup-detail-actions', () => {
     vi.useRealTimers();
   });
 });
-

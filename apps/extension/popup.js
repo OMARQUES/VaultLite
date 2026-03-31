@@ -43,6 +43,7 @@ import { createFilterDropdown } from './popup-filter-dropdown.js';
 import { buildDetailViewModel, pulseCopyIcon } from './popup-detail-actions.js';
 import { createPopupAutosizer } from './popup-autosize.js';
 import { importManualIconFromFile, sanitizeIconHost } from './manual-icons.js';
+import { resolveAttachmentSectionState, resolveFolderSectionState } from './popup-detail-sections.js';
 import {
   createDefaultGeneratorState,
   generatePassword,
@@ -139,6 +140,14 @@ const elements = {
   detailCustomFieldsTitle: byId('detailCustomFieldsTitle'),
   detailCustomFieldsList: byId('detailCustomFieldsList'),
   detailCustomFieldAddBtn: byId('detailCustomFieldAddBtn'),
+  detailFolderSection: byId('detailFolderSection'),
+  detailFolderValue: byId('detailFolderValue'),
+  detailFolderSelect: byId('detailFolderSelect'),
+  detailFolderCreateBtn: byId('detailFolderCreateBtn'),
+  detailAttachmentsSection: byId('detailAttachmentsSection'),
+  detailAttachmentList: byId('detailAttachmentList'),
+  detailAttachmentAddBtn: byId('detailAttachmentAddBtn'),
+  detailAttachmentInput: byId('detailAttachmentInput'),
   detailHistorySummarySection: byId('detailHistorySummarySection'),
   detailHistorySummaryToggle: byId('detailHistorySummaryToggle'),
   detailHistorySummaryChevron: byId('detailHistorySummaryChevron'),
@@ -176,6 +185,11 @@ const elements = {
   confirmDeleteBody: byId('confirmDeleteBody'),
   confirmDeleteConfirmBtn: byId('confirmDeleteConfirmBtn'),
   confirmDeleteCancelBtn: byId('confirmDeleteCancelBtn'),
+  createFolderModal: byId('createFolderModal'),
+  createFolderNameInput: byId('createFolderNameInput'),
+  createFolderError: byId('createFolderError'),
+  createFolderConfirmBtn: byId('createFolderConfirmBtn'),
+  createFolderCancelBtn: byId('createFolderCancelBtn'),
   copyToast: byId('copyToast'),
   lockBtn: byId('lockBtn'),
 };
@@ -242,7 +256,16 @@ let lastStableStateSnapshotAt = 0;
 let readySearchShouldAutoFocus = true;
 let detailPanelMode = 'view';
 let detailEditDraft = null;
+let detailCreateDraft = null;
+let detailCreateFolderId = '';
+let detailCreatePendingAttachments = [];
+let detailEditFolderId = '';
+let detailEditPendingAttachments = [];
 let detailEditPasswordVisible = false;
+let detailAttachmentLoading = false;
+let detailAttachmentError = '';
+let detailAttachmentItemId = null;
+let detailAttachmentRecords = [];
 let detailHistoryLoading = false;
 let detailHistoryError = '';
 let detailHistoryCursor = null;
@@ -253,11 +276,17 @@ let detailHistoryView = 'list';
 let detailHistorySummaryExpanded = false;
 const detailHistoryRevealKeys = new Set();
 let detailDeleteConfirmResolver = null;
+let detailCreateFolderResolver = null;
 let copyToastTimer = null;
 let passwordGeneratorOpen = false;
 let passwordGeneratorState = createDefaultGeneratorState();
 let passwordGeneratorValue = generatePassword(passwordGeneratorState);
 let passwordGeneratorCopyFeedbackTimer = null;
+let folderStateSnapshot = {
+  folders: [],
+  assignments: [],
+  etag: null,
+};
 let passwordGeneratorHistoryOpen = false;
 let passwordGeneratorHistory = [];
 let passwordGeneratorHistoryLastSyncedAt = 0;
@@ -377,6 +406,198 @@ function createEditDraftFromSelected(selected) {
     content: typeof payload.content === 'string' ? payload.content : '',
     customFields: cloneCustomFieldsForEdit(payload.customFields),
   };
+}
+
+function createDraftForItemType(itemType = 'login') {
+  if (itemType === 'card') {
+    return {
+      itemType: 'card',
+      title: '',
+      cardholderName: '',
+      brand: '',
+      number: '',
+      expiryMonth: '',
+      expiryYear: '',
+      securityCode: '',
+      notes: '',
+      customFields: [],
+    };
+  }
+  if (itemType === 'document') {
+    return {
+      itemType: 'document',
+      title: '',
+      content: '',
+      customFields: [],
+    };
+  }
+  if (itemType === 'secure_note') {
+    return {
+      itemType: 'secure_note',
+      title: '',
+      content: '',
+      customFields: [],
+    };
+  }
+  return {
+    itemType: 'login',
+    title: '',
+    username: '',
+    password: '',
+    urls: [],
+    notes: '',
+    customFields: [],
+  };
+}
+
+function buildCreateDraftItem() {
+  if (!detailCreateDraft || !supportsPopupEditing(detailCreateDraft.itemType)) {
+    return null;
+  }
+  return normalizePopupItemFromPayload(
+    {
+      itemId: '__draft__',
+      itemType: detailCreateDraft.itemType,
+      title: detailCreateDraft.title || 'New item',
+      subtitle: 'Draft',
+      searchText: detailCreateDraft.title || '',
+      firstUrl:
+        detailCreateDraft.itemType === 'login' && Array.isArray(detailCreateDraft.urls)
+          ? detailCreateDraft.urls[0] ?? ''
+          : '',
+      urlHostSummary: 'Draft',
+      matchFlags: {
+        exactOrigin: false,
+        domainScore: 0,
+      },
+      isDeleted: false,
+    },
+    detailCreateDraft,
+    0,
+  );
+}
+
+function getActiveDetailDraft() {
+  if (detailPanelMode === 'edit') {
+    return detailEditDraft;
+  }
+  if (detailPanelMode === 'create') {
+    return detailCreateDraft;
+  }
+  return null;
+}
+
+function activeDetailFolderId() {
+  if (detailPanelMode === 'edit') {
+    return detailEditFolderId;
+  }
+  if (detailPanelMode === 'create') {
+    return detailCreateFolderId;
+  }
+  return '';
+}
+
+function setActiveDetailFolderId(folderId) {
+  if (detailPanelMode === 'edit') {
+    detailEditFolderId = folderId;
+    persistPopupUiState();
+    return;
+  }
+  if (detailPanelMode === 'create') {
+    detailCreateFolderId = folderId;
+    persistPopupUiState();
+  }
+}
+
+function activePendingAttachments() {
+  if (detailPanelMode === 'edit') {
+    return detailEditPendingAttachments;
+  }
+  if (detailPanelMode === 'create') {
+    return detailCreatePendingAttachments;
+  }
+  return [];
+}
+
+function setActivePendingAttachments(entries) {
+  if (detailPanelMode === 'edit') {
+    detailEditPendingAttachments = entries;
+    persistPopupUiState();
+    return;
+  }
+  if (detailPanelMode === 'create') {
+    detailCreatePendingAttachments = entries;
+    persistPopupUiState();
+  }
+}
+
+function getActiveDetailItem() {
+  if (detailPanelMode === 'create') {
+    return buildCreateDraftItem();
+  }
+  return getSelectedCredential();
+}
+
+function isEditorMode() {
+  return detailPanelMode === 'edit' || detailPanelMode === 'create';
+}
+
+function formatAttachmentSize(bytes) {
+  const size = Number.isFinite(Number(bytes)) ? Number(bytes) : 0;
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function queueDetailAttachmentFile(file) {
+  const nextEntries = [
+    ...activePendingAttachments(),
+    {
+      id: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}`,
+      file,
+      fileName: file.name || 'Attachment',
+      contentType: file.type || 'application/octet-stream',
+      size: file.size,
+    },
+  ];
+  setActivePendingAttachments(nextEntries);
+}
+
+async function refreshDetailAttachments(options = {}) {
+  const selected = getSelectedCredential();
+  if (!selected || detailPanelMode === 'create') {
+    detailAttachmentItemId = null;
+    detailAttachmentRecords = [];
+    detailAttachmentLoading = false;
+    detailAttachmentError = '';
+    return;
+  }
+  const itemId = selected.itemId;
+  detailAttachmentItemId = itemId;
+  detailAttachmentLoading = options.silent !== true;
+  detailAttachmentError = '';
+  renderDetailPanels();
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.list_item_attachments',
+    itemId,
+    force: options.force === true,
+  });
+  if (detailAttachmentItemId !== itemId) {
+    return;
+  }
+  if (!response?.ok) {
+    detailAttachmentError = response?.message || 'Attachments are unavailable right now.';
+    detailAttachmentLoading = false;
+    renderDetailPanels();
+    return;
+  }
+  detailAttachmentRecords = Array.isArray(response.uploads) ? response.uploads : [];
+  detailAttachmentLoading = false;
+  renderDetailPanels();
 }
 
 function escapeAttribute(value) {
@@ -604,7 +825,7 @@ function applyLayoutState(phase) {
   if (currentLayoutMode !== 'pairing') {
     document.body.dataset.linkRequest = 'closed';
   }
-  const expanded = shouldUseExpandedPopup(currentLayoutMode, selectedItemId);
+  const expanded = shouldUseExpandedPopup(currentLayoutMode, selectedItemId, detailPanelMode);
   document.body.dataset.detail = expanded ? 'open' : 'closed';
   elements.lockBtn.hidden = !shouldShowLockIcon(currentLayoutMode);
   elements.headerReadySearch.hidden = currentLayoutMode !== 'ready';
@@ -1262,6 +1483,15 @@ async function loadPersistedPopupUiState() {
     activeTypeFilter = parsed.typeFilter;
     suggestedOnly = parsed.suggestedOnly;
     activeSortMode = parsed.sortMode;
+    detailPanelMode = parsed.detailPanelMode;
+    detailCreateDraft = parsed.detailPanelMode === 'create' ? parsed.detailDraft : null;
+    detailEditDraft = parsed.detailPanelMode === 'edit' ? parsed.detailDraft : null;
+    detailCreateFolderId = parsed.detailPanelMode === 'create' ? parsed.detailFolderId : '';
+    detailEditFolderId = parsed.detailPanelMode === 'edit' ? parsed.detailFolderId : '';
+    if (parsed.detailPanelMode === 'edit' && parsed.detailTargetItemId) {
+      selectedItemId = parsed.detailTargetItemId;
+      shouldPinSelectedRowOnNextRender = true;
+    }
     syncSortMenuState();
   } catch {
     // Ignore storage failures and keep ephemeral popup defaults.
@@ -1558,12 +1788,26 @@ function persistPopupUiState() {
     return;
   }
 
+  const draft = isEditorMode() ? readDetailDraftFromDom() ?? getActiveDetailDraft() : null;
+  if (detailPanelMode === 'create') {
+    detailCreateDraft = draft;
+  } else if (detailPanelMode === 'edit') {
+    detailEditDraft = draft;
+  }
+
+  const detailItem = getActiveDetailItem();
+  const activeDetailDraft = detailPanelMode === 'create' ? detailCreateDraft : detailPanelMode === 'edit' ? detailEditDraft : null;
+
   const payload = buildPersistedPopupUiState({
     selectedItemId,
     searchQuery: elements.searchInput.value,
     typeFilter: activeTypeFilter,
     suggestedOnly,
     sortMode: activeSortMode,
+    detailPanelMode,
+    detailTargetItemId: detailPanelMode === 'edit' ? detailItem?.itemId ?? selectedItemId : null,
+    detailFolderId: activeDetailFolderId(),
+    detailDraft: activeDetailDraft,
   });
   void chrome.storage.session.set({
     [POPUP_UI_STATE_STORAGE_KEY]: payload,
@@ -1696,6 +1940,15 @@ function scheduleRealtimePopupRefresh(domains) {
     pendingRealtimeDomains.clear();
     if (domainsToApply.includes('password_history')) {
       void syncPasswordGeneratorHistoryFromRemote({ force: true });
+    }
+    if (domainsToApply.includes('folders')) {
+      void refreshFolderState({ force: true });
+    }
+    if (domainsToApply.includes('attachments') && resolvePopupPhase(currentState) === 'ready') {
+      void refreshDetailAttachments({
+        force: true,
+        silent: detailPanelMode !== 'view' && detailPanelMode !== 'edit',
+      });
     }
     const shouldRefreshList = domainsToApply.some(
       (domain) => domain === 'vault' || domain === 'icons_manual' || domain === 'icons_state',
@@ -1949,7 +2202,7 @@ function configureDetailRow(nodes, rowModel) {
   }
   nodes.value.classList.toggle('detail-password', rowModel.password === true);
 
-  if (detailPanelMode === 'edit') {
+  if (isEditorMode()) {
     nodes.row.dataset.defaultAction = '';
     nodes.row.classList.remove('is-clickable');
     hideRowAction(nodes.actionA);
@@ -2001,14 +2254,15 @@ function ensureHistorySelection() {
 }
 
 function renderInlineEditorsForRows(selectedItem) {
-  if (detailPanelMode !== 'edit' || !detailEditDraft || !selectedItem) {
+  const activeDraft = getActiveDetailDraft();
+  if (!isEditorMode() || !activeDraft || !selectedItem) {
     return;
   }
 
   if (selectedItem.itemType === 'login') {
     elements.detailPrimaryValue.classList.remove('detail-password');
     elements.detailPrimaryValue.innerHTML = `
-      <input data-edit-field="username" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.username)}" />
+      <input data-edit-field="username" class="detail-row-editor" type="text" value="${escapeAttribute(activeDraft.username)}" />
     `;
     elements.detailSecondaryValue.classList.remove('detail-password');
     const passwordEditorType = detailEditPasswordVisible ? 'text' : 'password';
@@ -2016,7 +2270,7 @@ function renderInlineEditorsForRows(selectedItem) {
     const passwordToggleGlyph = detailEditPasswordVisible ? 'visibility_off' : 'visibility';
     elements.detailSecondaryValue.innerHTML = `
       <div class="detail-password-editor-shell">
-        <input data-edit-field="password" class="detail-row-editor" type="${passwordEditorType}" value="${escapeAttribute(detailEditDraft.password)}" />
+        <input data-edit-field="password" class="detail-row-editor" type="${passwordEditorType}" value="${escapeAttribute(activeDraft.password)}" />
         <button
           type="button"
           class="detail-password-inline-toggle row-action"
@@ -2030,7 +2284,7 @@ function renderInlineEditorsForRows(selectedItem) {
     `;
     elements.detailTertiaryValue.classList.remove('detail-password');
     elements.detailTertiaryValue.innerHTML = `
-      <textarea data-edit-field="urls" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(detailEditDraft.urls.join('\n'))}</textarea>
+      <textarea data-edit-field="urls" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(activeDraft.urls.join('\n'))}</textarea>
     `;
     return;
   }
@@ -2038,17 +2292,17 @@ function renderInlineEditorsForRows(selectedItem) {
   if (selectedItem.itemType === 'card') {
     elements.detailPrimaryValue.classList.remove('detail-password');
     elements.detailPrimaryValue.innerHTML = `
-      <input data-edit-field="number" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.number)}" />
+      <input data-edit-field="number" class="detail-row-editor" type="text" value="${escapeAttribute(activeDraft.number)}" />
     `;
     elements.detailSecondaryValue.classList.remove('detail-password');
     elements.detailSecondaryValue.innerHTML = `
-      <input data-edit-field="securityCode" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.securityCode)}" />
+      <input data-edit-field="securityCode" class="detail-row-editor" type="text" value="${escapeAttribute(activeDraft.securityCode)}" />
     `;
     elements.detailTertiaryValue.classList.remove('detail-password');
     elements.detailTertiaryValue.innerHTML = `
       <div class="detail-row-editor-split">
-        <input data-edit-field="expiryMonth" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.expiryMonth)}" placeholder="MM" />
-        <input data-edit-field="expiryYear" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.expiryYear)}" placeholder="YYYY" />
+        <input data-edit-field="expiryMonth" class="detail-row-editor" type="text" value="${escapeAttribute(activeDraft.expiryMonth)}" placeholder="MM" />
+        <input data-edit-field="expiryYear" class="detail-row-editor" type="text" value="${escapeAttribute(activeDraft.expiryYear)}" placeholder="YYYY" />
       </div>
     `;
     return;
@@ -2057,7 +2311,7 @@ function renderInlineEditorsForRows(selectedItem) {
   if (selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note') {
     elements.detailSecondaryValue.classList.remove('detail-password');
     elements.detailSecondaryValue.innerHTML = `
-      <textarea data-edit-field="content" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(detailEditDraft.content)}</textarea>
+      <textarea data-edit-field="content" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(activeDraft.content)}</textarea>
     `;
   }
 }
@@ -2086,7 +2340,8 @@ function renderNotesSection(selectedItem) {
     elements.detailNotesRow.hidden = true;
     return;
   }
-  const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const activeDraft = getActiveDetailDraft();
+  const isEditMode = isEditorMode() && !!activeDraft;
   const notesState = resolveNotesValueForSelected(selectedItem);
   elements.detailNotesRow.hidden = false;
   elements.detailNotesLabel.textContent = notesState.label;
@@ -2095,8 +2350,8 @@ function renderNotesSection(selectedItem) {
     elements.detailNotesRow.classList.remove('is-clickable');
     const draftValue =
       selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note'
-        ? detailEditDraft?.content ?? ''
-        : detailEditDraft?.notes ?? '';
+        ? activeDraft?.content ?? ''
+        : activeDraft?.notes ?? '';
     elements.detailNotesValue.hidden = true;
     elements.detailNotesEditor.hidden = false;
     elements.detailNotesEditor.setAttribute('data-edit-field', notesState.editField);
@@ -2132,10 +2387,11 @@ function renderCustomFieldsSection(selectedItem) {
     elements.detailCustomFieldsTitle.hidden = true;
     return;
   }
-  const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const activeDraft = getActiveDetailDraft();
+  const isEditMode = isEditorMode() && !!activeDraft;
   const fields = isEditMode
-    ? Array.isArray(detailEditDraft?.customFields)
-      ? detailEditDraft.customFields
+    ? Array.isArray(activeDraft?.customFields)
+      ? activeDraft.customFields
       : []
     : cloneCustomFieldsForEdit(selectedItem.payload?.customFields);
   const payload = selectedItem.payload && typeof selectedItem.payload === 'object' ? selectedItem.payload : {};
@@ -2161,7 +2417,7 @@ function renderCustomFieldsSection(selectedItem) {
             data-edit-field="cardholderName"
             class="detail-row-editor"
             type="text"
-            value="${escapeAttribute(detailEditDraft.cardholderName ?? '')}"
+            value="${escapeAttribute(activeDraft.cardholderName ?? '')}"
           />
         </div>
       `);
@@ -2174,7 +2430,7 @@ function renderCustomFieldsSection(selectedItem) {
             data-edit-field="brand"
             class="detail-row-editor"
             type="text"
-            value="${escapeAttribute(detailEditDraft.brand ?? '')}"
+            value="${escapeAttribute(activeDraft.brand ?? '')}"
           />
         </div>
       `);
@@ -2238,8 +2494,76 @@ function renderCustomFieldsSection(selectedItem) {
   elements.detailCustomFieldsList.innerHTML = `${extraRows.join('')}${customRows}`;
 }
 
+function renderFolderSection() {
+  const sectionState = resolveFolderSectionState({
+    detailPanelMode,
+    itemId: getSelectedCredential()?.itemId ?? '',
+    draftFolderId: activeDetailFolderId(),
+    folders: folderStateSnapshot.folders,
+    assignments: folderStateSnapshot.assignments,
+  });
+  elements.detailFolderSection.hidden = !sectionState.visible;
+  if (!sectionState.visible) {
+    return;
+  }
+  elements.detailFolderValue.hidden = sectionState.editable;
+  elements.detailFolderSelect.hidden = !sectionState.editable;
+  elements.detailFolderCreateBtn.hidden = !sectionState.canCreateFolder;
+  elements.detailFolderValue.textContent = sectionState.selectedFolderName;
+  if (!sectionState.editable) {
+    return;
+  }
+  const options = [
+    '<option value="">No folder</option>',
+    ...folderStateSnapshot.folders.map(
+      (folder) =>
+        `<option value="${escapeAttribute(folder.folderId)}">${sanitizeText(folder.name)}</option>`,
+    ),
+  ];
+  elements.detailFolderSelect.innerHTML = options.join('');
+  elements.detailFolderSelect.value = sectionState.selectedFolderId || '';
+}
+
+function renderAttachmentsSection() {
+  const sectionState = resolveAttachmentSectionState({
+    detailPanelMode,
+    existingAttachments: detailPanelMode === 'create' ? [] : detailAttachmentRecords,
+    pendingAttachments: activePendingAttachments(),
+  });
+  elements.detailAttachmentsSection.hidden = !sectionState.visible;
+  if (!sectionState.visible) {
+    return;
+  }
+  elements.detailAttachmentAddBtn.hidden = !sectionState.canAddAttachments;
+  if (detailAttachmentLoading) {
+    elements.detailAttachmentList.innerHTML = '<p class="empty-state">Loading attachments...</p>';
+    return;
+  }
+  if (detailAttachmentError) {
+    elements.detailAttachmentList.innerHTML = `<p class="empty-state">${sanitizeText(detailAttachmentError)}</p>`;
+    return;
+  }
+  if (sectionState.rows.length === 0) {
+    elements.detailAttachmentList.innerHTML = '<p class="empty-state">No attachments yet.</p>';
+    return;
+  }
+  elements.detailAttachmentList.innerHTML = sectionState.rows
+    .map(
+      (entry) => `
+        <div class="detail-attachment-row" ${entry.removable ? `data-create-attachment-id="${escapeAttribute(entry.id)}"` : ''}>
+          <div class="detail-attachment-meta">
+            <p class="detail-attachment-name">${sanitizeText(entry.fileName)}</p>
+            <p class="detail-attachment-subtitle">${sanitizeText(entry.subtitle)}</p>
+          </div>
+          ${entry.removable ? `<button type="button" class="btn-secondary" data-create-attachment-remove="${escapeAttribute(entry.id)}">Remove</button>` : ''}
+        </div>
+      `,
+    )
+    .join('');
+}
+
 function renderDetailHistorySummary(selectedItem) {
-  if (!selectedItem || detailPanelMode === 'history') {
+  if (!selectedItem || detailPanelMode === 'history' || detailPanelMode === 'create' || detailPanelMode === 'edit') {
     elements.detailHistorySummarySection.hidden = true;
     elements.detailHistorySummarySection.classList.remove('is-expanded');
     return;
@@ -2390,15 +2714,18 @@ function renderDetailHistoryPanel() {
 }
 
 function renderDetailPanels() {
-  const selected = getSelectedCredential();
+  const selected = getActiveDetailItem();
+  const activeDraft = getActiveDetailDraft();
   const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const isCreateMode = detailPanelMode === 'create' && !!detailCreateDraft;
+  const isEditorActive = (isEditMode || isCreateMode) && !!activeDraft;
   const isHistoryMode = detailPanelMode === 'history';
   const isHistoryEntryMode = isHistoryMode && detailHistoryView === 'entry';
   elements.detailMainSections.hidden = isHistoryMode || !selected;
-  elements.detailActionPrimary.hidden = isEditMode || isHistoryMode;
-  elements.detailActionMenu.hidden = isEditMode || isHistoryMode;
-  elements.detailEditCancelBtn.hidden = !isEditMode;
-  elements.detailEditSaveBtn.hidden = !isEditMode;
+  elements.detailActionPrimary.hidden = isEditorActive || isHistoryMode;
+  elements.detailActionMenu.hidden = isEditorActive || isHistoryMode;
+  elements.detailEditCancelBtn.hidden = !isEditorActive;
+  elements.detailEditSaveBtn.hidden = !isEditorActive;
   elements.detailHistoryNavTitle.hidden = !isHistoryMode;
   elements.detailHistoryNavBackBtn.hidden = !isHistoryEntryMode;
   elements.detailHistoryNavCloseBtn.hidden = !isHistoryMode;
@@ -2410,26 +2737,30 @@ function renderDetailPanels() {
     elements.detailIconEditBtn.hidden = true;
     elements.detailIconEditBtn.disabled = true;
   }
-  elements.detailTitle.contentEditable = isEditMode ? 'true' : 'false';
-  elements.detailTitle.classList.toggle('is-inline-editing', isEditMode);
+  elements.detailTitle.contentEditable = isEditorActive ? 'true' : 'false';
+  elements.detailTitle.classList.toggle('is-inline-editing', isEditorActive);
   elements.detailTitle.dataset.placeholder = 'Item title';
-  if (!isEditMode) {
+  if (!isEditorActive) {
     setDetailEditError('');
   }
-  if (isEditMode && selected && detailEditDraft) {
+  if (isEditorActive && selected && activeDraft) {
     if (normalizeInlineEditableText(elements.detailTitle).length === 0) {
-      elements.detailTitle.textContent = detailEditDraft.title;
+      elements.detailTitle.textContent = activeDraft.title;
     }
     renderInlineEditorsForRows(selected);
   }
   if (isHistoryMode) {
     elements.detailNotesRow.hidden = true;
     elements.detailCustomFieldsSection.hidden = true;
+    elements.detailFolderSection.hidden = true;
+    elements.detailAttachmentsSection.hidden = true;
   } else {
     renderNotesSection(selected);
     renderCustomFieldsSection(selected);
+    renderFolderSection();
+    renderAttachmentsSection();
   }
-  renderDetailHistorySummary(selected);
+  renderDetailHistorySummary(isCreateMode ? null : selected);
   renderDetailHistoryPanel();
 }
 
@@ -2440,7 +2771,16 @@ function clearDetailTransientPanels(options = {}) {
   }
   detailPanelMode = 'view';
   detailEditDraft = null;
+  detailCreateDraft = null;
+  detailCreateFolderId = '';
+  detailCreatePendingAttachments = [];
+  detailEditFolderId = '';
+  detailEditPendingAttachments = [];
   detailEditPasswordVisible = false;
+  detailAttachmentLoading = false;
+  detailAttachmentError = '';
+  detailAttachmentItemId = null;
+  detailAttachmentRecords = [];
   detailHistoryLoading = false;
   detailHistoryError = '';
   detailHistoryCursor = null;
@@ -2453,9 +2793,14 @@ function clearDetailTransientPanels(options = {}) {
   elements.detailTitle.contentEditable = 'false';
   elements.detailTitle.classList.remove('is-inline-editing');
   renderDetailPanels();
+  persistPopupUiState();
 }
 
 function syncDetailPanelStateForSelected() {
+  if (detailPanelMode === 'create') {
+    renderDetailPanels();
+    return;
+  }
   const selected = getSelectedCredential();
   if (!selected) {
     clearDetailTransientPanels({
@@ -2467,6 +2812,9 @@ function syncDetailPanelStateForSelected() {
     detailEditDraft = createEditDraftFromSelected(selected);
     if (!detailEditDraft) {
       detailPanelMode = 'view';
+    } else {
+      detailEditFolderId =
+        folderStateSnapshot.assignments.find((entry) => entry?.itemId === selected.itemId)?.folderId ?? '';
     }
   }
   if (detailHistoryItemId !== selected.itemId) {
@@ -2480,6 +2828,15 @@ function syncDetailPanelStateForSelected() {
     detailHistorySummaryExpanded = false;
     detailHistoryRevealKeys.clear();
     void refreshSelectedItemHistory({ force: false, silent: true });
+  }
+  if (folderStateSnapshot.folders.length === 0 && folderStateSnapshot.assignments.length === 0) {
+    void refreshFolderState();
+  }
+  if (detailAttachmentItemId !== selected.itemId) {
+    void refreshDetailAttachments({
+      force: false,
+      silent: true,
+    });
   }
   renderDetailPanels();
 }
@@ -2518,12 +2875,46 @@ function openDeleteConfirmationDialog(itemTitle) {
   });
 }
 
+function resolveCreateFolderDialog(result) {
+  if (typeof detailCreateFolderResolver !== 'function') {
+    return;
+  }
+  const resolver = detailCreateFolderResolver;
+  detailCreateFolderResolver = null;
+  elements.createFolderModal.hidden = true;
+  resolver(result);
+}
+
+function setCreateFolderError(message) {
+  const normalized = typeof message === 'string' ? message.trim() : '';
+  elements.createFolderError.hidden = normalized.length === 0;
+  elements.createFolderError.textContent = normalized;
+}
+
+function openCreateFolderDialog() {
+  if (typeof detailCreateFolderResolver === 'function') {
+    resolveCreateFolderDialog(null);
+  }
+  elements.createFolderNameInput.value = '';
+  setCreateFolderError('');
+  elements.createFolderConfirmBtn.disabled = true;
+  elements.createFolderModal.hidden = false;
+  window.setTimeout(() => {
+    elements.createFolderNameInput.focus();
+  }, 0);
+  return new Promise((resolve) => {
+    detailCreateFolderResolver = resolve;
+  });
+}
+
 function renderCredentialDetails() {
   const selectedItem = getSelectedCredential();
+  const displayItem = getActiveDetailItem();
+  const createModeActive = detailPanelMode === 'create' && !!detailCreateDraft;
   applyLayoutState(resolveEffectivePopupPhase(currentState));
-  const disableActions = !selectedItem || inFlight;
+  const disableActions = (!displayItem && !createModeActive) || inFlight;
 
-  if (!selectedItem) {
+  if (!displayItem) {
     resetDetailSecretState(null);
     clearDetailTransientPanels({
       preserveDeleteConfirmation: true,
@@ -2553,9 +2944,9 @@ function renderCredentialDetails() {
     return;
   }
 
-  elements.credentialDetailsLoading.hidden = !detailLoading;
-  elements.credentialDetailsContent.hidden = detailLoading;
-  if (detailLoading) {
+  elements.credentialDetailsLoading.hidden = createModeActive || !detailLoading;
+  elements.credentialDetailsContent.hidden = !createModeActive && detailLoading;
+  if (detailLoading && !createModeActive) {
     closeDetailMenu();
     clearDetailTransientPanels({
       preserveDeleteConfirmation: true,
@@ -2567,22 +2958,22 @@ function renderCredentialDetails() {
     return;
   }
 
-  ensureDetailSecretStateForItem(selectedItem.itemId);
-  const isDeletedItem = selectedItem.isDeleted === true;
-  const detailModel = buildDetailViewModel(selectedItem, {
+  ensureDetailSecretStateForItem(displayItem.itemId);
+  const isDeletedItem = displayItem.isDeleted === true;
+  const detailModel = buildDetailViewModel(displayItem, {
     passwordVisible: detailSecretState.passwordVisible,
     passwordValue: detailSecretState.passwordValue,
   });
-  const iconHost = selectedManualIconHost();
-  const iconEditable = Boolean(iconHost);
+  const iconHost = createModeActive ? '' : selectedManualIconHost();
+  const iconEditable = !createModeActive && Boolean(iconHost);
   elements.detailIconShell.classList.toggle('is-editable', iconEditable);
   elements.detailIconEditBtn.hidden = !iconEditable;
   elements.detailIconEditBtn.disabled = disableActions || !iconEditable;
-  elements.detailActionEdit.disabled = disableActions || isDeletedItem || !supportsPopupEditing(selectedItem.itemType);
+  elements.detailActionEdit.disabled = disableActions || isDeletedItem || !supportsPopupEditing(displayItem.itemType);
   elements.detailActionHistory.disabled = disableActions;
   elements.detailActionDelete.disabled = disableActions || isDeletedItem;
-  elements.detailMonogram.textContent = buildCredentialMonogram(selectedItem.title);
-  const detailFaviconUrl = activeFaviconUrl(selectedItem);
+  elements.detailMonogram.textContent = buildCredentialMonogram(displayItem.title);
+  const detailFaviconUrl = createModeActive ? '' : activeFaviconUrl(displayItem);
   if (detailFaviconUrl) {
     elements.detailFavicon.hidden = false;
     elements.detailFavicon.src = detailFaviconUrl;
@@ -2602,7 +2993,11 @@ function renderCredentialDetails() {
 
   elements.detailActionPrimary.disabled = disableActions;
   elements.detailActionMenu.disabled = disableActions;
-  syncDetailPanelStateForSelected();
+  if (createModeActive) {
+    renderDetailPanels();
+  } else {
+    syncDetailPanelStateForSelected();
+  }
   popupAutosizer?.schedule();
 }
 
@@ -3935,12 +4330,13 @@ function normalizePopupItemFromPayload(baseItem, payload, revision) {
   };
 }
 
-function readDetailEditDraftFromDom() {
-  const selected = getSelectedCredential();
-  if (!selected || !detailEditDraft || !supportsPopupEditing(selected.itemType)) {
+function readDetailDraftFromDom() {
+  const selected = getActiveDetailItem();
+  const activeDraft = getActiveDetailDraft();
+  if (!selected || !activeDraft || !supportsPopupEditing(selected.itemType)) {
     return null;
   }
-  const titleValue = normalizeInlineEditableText(elements.detailTitle) || detailEditDraft.title;
+  const titleValue = normalizeInlineEditableText(elements.detailTitle) || activeDraft.title;
   const customFields = Array.from(elements.detailCustomFieldsList.querySelectorAll('[data-custom-field-row]'))
     .map((row) => {
       const index = Number(row.getAttribute('data-custom-field-row'));
@@ -4068,6 +4464,76 @@ async function refreshSelectedItemHistory(options = {}) {
   renderDetailPanels();
 }
 
+async function refreshFolderState(options = {}) {
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.list_folders_state',
+    force: options.force === true,
+  });
+  if (!response?.ok) {
+    return;
+  }
+  folderStateSnapshot = {
+    folders: Array.isArray(response.folders) ? response.folders : [],
+    assignments: Array.isArray(response.assignments) ? response.assignments : [],
+    etag: typeof response.etag === 'string' ? response.etag : null,
+  };
+  if (detailPanelMode === 'create' || detailPanelMode === 'edit' || Boolean(getSelectedCredential())) {
+    renderDetailPanels();
+  }
+}
+
+async function createFolderFromDetailEditor() {
+  const requestedName = await openCreateFolderDialog();
+  if (typeof requestedName !== 'string') {
+    return;
+  }
+  const trimmedName = requestedName.trim();
+  if (!trimmedName) {
+    return;
+  }
+  elements.createFolderConfirmBtn.disabled = true;
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.upsert_folder',
+    name: trimmedName,
+  });
+  if (!response?.ok) {
+    setCreateFolderError(response?.message || 'Could not create folder right now.');
+    elements.createFolderConfirmBtn.disabled = false;
+    return;
+  }
+  folderStateSnapshot = {
+    folders: Array.isArray(response.folders) ? response.folders : [],
+    assignments: Array.isArray(response.assignments) ? response.assignments : [],
+    etag: typeof response.etag === 'string' ? response.etag : folderStateSnapshot.etag,
+  };
+  if (typeof response.folderId === 'string' && response.folderId.length > 0) {
+    setActiveDetailFolderId(response.folderId);
+  }
+  resolveCreateFolderDialog(trimmedName);
+  renderDetailPanels();
+}
+
+function openDetailCreatePanel(itemType = 'login') {
+  detailCreateDraft = createDraftForItemType(itemType);
+  detailCreateFolderId = '';
+  detailCreatePendingAttachments = [];
+  detailEditDraft = null;
+  detailEditFolderId = '';
+  detailEditPendingAttachments = [];
+  detailEditPasswordVisible = false;
+  detailAttachmentItemId = null;
+  detailAttachmentRecords = [];
+  detailAttachmentLoading = false;
+  detailAttachmentError = '';
+  detailPanelMode = 'create';
+  setDetailEditError('');
+  closeDetailMenu();
+  elements.detailTitle.textContent = detailCreateDraft.title || 'New item';
+  void refreshFolderState();
+  renderCredentialDetails();
+  persistPopupUiState();
+}
+
 function openDetailEditPanel() {
   const selected = getSelectedCredential();
   detailEditDraft = createEditDraftFromSelected(selected);
@@ -4076,11 +4542,88 @@ function openDetailEditPanel() {
     return;
   }
   detailPanelMode = 'edit';
+  detailEditFolderId =
+    folderStateSnapshot.assignments.find((entry) => entry?.itemId === selected?.itemId)?.folderId ?? '';
+  detailEditPendingAttachments = [];
   detailEditPasswordVisible = false;
   setDetailEditError('');
   closeDetailMenu();
   elements.detailTitle.textContent = detailEditDraft.title;
+  void refreshFolderState();
+  void refreshDetailAttachments({
+    force: false,
+    silent: true,
+  });
   renderCredentialDetails();
+  persistPopupUiState();
+}
+
+async function saveDetailCreate() {
+  const draft = readDetailDraftFromDom();
+  const validationError = validateDetailEditDraft(draft);
+  if (validationError) {
+    setDetailEditError(validationError);
+    return;
+  }
+  const attachments = [];
+  for (const entry of detailCreatePendingAttachments) {
+    attachments.push({
+      fileName: entry.fileName,
+      contentType: entry.contentType,
+      size: entry.size,
+      buffer: await entry.file.arrayBuffer(),
+    });
+  }
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.create_item',
+    itemType: draft.itemType,
+    payload: draft,
+    folderId: detailCreateFolderId || null,
+    attachments,
+  });
+  if (!response?.ok) {
+    setDetailEditError(response?.message || 'Could not create item right now.');
+    return;
+  }
+
+  const createdItem = response?.item && typeof response.item === 'object' ? response.item : draft;
+  const createdRevision =
+    Number.isFinite(response?.item?.revision) && response.item.revision > 0 ? Math.trunc(response.item.revision) : 1;
+  const normalizedCreatedItem = normalizePopupItemFromPayload(
+    {
+      itemId: response.item.itemId,
+      itemType: draft.itemType,
+      title: createdItem.title,
+      subtitle: '',
+      searchText: createdItem.title || '',
+      firstUrl: Array.isArray(createdItem.urls) ? createdItem.urls[0] ?? '' : '',
+      urlHostSummary: 'No URL',
+      matchFlags: {
+        exactOrigin: false,
+        domainScore: 0,
+      },
+      isDeleted: false,
+    },
+    createdItem,
+    createdRevision,
+  );
+  currentItems = [normalizedCreatedItem, ...currentItems];
+  selectedItemId = normalizedCreatedItem.itemId;
+  detailPanelMode = 'view';
+  detailCreateDraft = null;
+  detailCreateFolderId = '';
+  detailCreatePendingAttachments = [];
+  renderCredentialList(currentItems);
+  persistPopupUiState();
+  const attachmentFailures = Array.isArray(response.attachmentFailures) ? response.attachmentFailures : [];
+  if (attachmentFailures.length > 0) {
+    setAlert('warning', 'Item created, but one or more attachments failed to upload.');
+  } else {
+    setAlert('success', 'Item created.');
+  }
+  void refreshStateAndMaybeList({
+    showLoading: false,
+  });
 }
 
 async function openDetailHistoryPanel(options = {}) {
@@ -4094,23 +4637,38 @@ async function openDetailHistoryPanel(options = {}) {
 }
 
 async function saveDetailEdits() {
+  if (detailPanelMode === 'create') {
+    await saveDetailCreate();
+    return;
+  }
   const selected = getSelectedCredential();
   if (!selected) {
     return;
   }
-  const draft = readDetailEditDraftFromDom();
+  const draft = readDetailDraftFromDom();
   const validationError = validateDetailEditDraft(draft);
   if (validationError) {
     setDetailEditError(validationError);
     return;
   }
   setDetailEditError('');
+  const attachments = [];
+  for (const entry of detailEditPendingAttachments) {
+    attachments.push({
+      fileName: entry.fileName,
+      contentType: entry.contentType,
+      size: entry.size,
+      buffer: await entry.file.arrayBuffer(),
+    });
+  }
   const response = await sendBackgroundCommand({
     type: 'vaultlite.update_item',
     itemId: selected.itemId,
     itemType: draft.itemType,
     expectedRevision: Number.isFinite(selected.revision) ? Math.trunc(selected.revision) : 0,
     payload: draft,
+    folderId: detailEditFolderId || null,
+    attachments,
   });
   if (!response?.ok) {
     setDetailEditError(response?.message || 'Could not save item changes.');
@@ -4134,10 +4692,22 @@ async function saveDetailEdits() {
   );
   detailPanelMode = 'view';
   detailEditDraft = null;
+  detailEditFolderId = '';
+  detailEditPendingAttachments = [];
   detailEditPasswordVisible = false;
   renderCredentialList(currentItems);
+  persistPopupUiState();
+  const attachmentFailures = Array.isArray(response.attachmentFailures) ? response.attachmentFailures : [];
   void refreshSelectedItemHistory({ force: true, silent: true });
-  setAlert('success', 'Item updated.');
+  void refreshFolderState();
+  void refreshDetailAttachments({
+    force: true,
+    silent: true,
+  });
+  setAlert(
+    attachmentFailures.length > 0 ? 'warning' : 'success',
+    attachmentFailures.length > 0 ? 'Item updated, but one or more attachments failed to upload.' : 'Item updated.',
+  );
 }
 
 async function handleDetailAction(action, sourceButton = null, overrideSelected = null) {
@@ -4482,7 +5052,7 @@ function wireEvents() {
     }
   });
   elements.newItemBtn.addEventListener('click', () => {
-    setAlert('warning', 'New item creation is coming soon.');
+    openDetailCreatePanel('login');
   });
 
   elements.searchInput.addEventListener('input', () => {
@@ -4717,10 +5287,7 @@ function wireEvents() {
   });
 
   elements.detailEditCancelBtn.addEventListener('click', () => {
-    detailPanelMode = 'view';
-    detailEditDraft = null;
-    detailEditPasswordVisible = false;
-    setDetailEditError('');
+    clearDetailTransientPanels();
     renderCredentialDetails();
   });
 
@@ -4730,8 +5297,46 @@ function wireEvents() {
     });
   });
 
+  elements.detailFolderSelect.addEventListener('change', () => {
+    if (!isEditorMode()) {
+      return;
+    }
+    setActiveDetailFolderId(elements.detailFolderSelect.value || '');
+  });
+
+  elements.detailFolderCreateBtn.addEventListener('click', () => {
+    if (!isEditorMode()) {
+      return;
+    }
+    void createFolderFromDetailEditor();
+  });
+
+  elements.detailAttachmentAddBtn.addEventListener('click', () => {
+    if (!isEditorMode()) {
+      return;
+    }
+    elements.detailAttachmentInput.click();
+  });
+
+  elements.detailAttachmentInput.addEventListener('change', (event) => {
+    if (!isEditorMode()) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+    const file = target.files?.[0];
+    if (!file) {
+      return;
+    }
+    queueDetailAttachmentFile(file);
+    target.value = '';
+    renderDetailPanels();
+  });
+
   elements.detailTitle.addEventListener('keydown', (event) => {
-    if (detailPanelMode !== 'edit') {
+    if (!isEditorMode()) {
       return;
     }
     if (event.key === 'Enter') {
@@ -4740,12 +5345,53 @@ function wireEvents() {
   });
 
   elements.detailTitle.addEventListener('blur', () => {
-    if (detailPanelMode !== 'edit') {
+    if (!isEditorMode()) {
       return;
     }
     const normalized = normalizeInlineEditableText(elements.detailTitle);
     elements.detailTitle.textContent = normalized;
+    persistPopupUiState();
   });
+
+  elements.credentialDetailsContent.addEventListener('input', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !isEditorMode()) {
+      return;
+    }
+    if (target === elements.searchInput) {
+      return;
+    }
+    const draft = readDetailDraftFromDom();
+    if (!draft) {
+      return;
+    }
+    if (detailPanelMode === 'create') {
+      detailCreateDraft = draft;
+    } else {
+      detailEditDraft = draft;
+    }
+    persistPopupUiState();
+  });
+
+  elements.credentialDetailsContent.addEventListener(
+    'blur',
+    () => {
+      if (!isEditorMode()) {
+        return;
+      }
+      const draft = readDetailDraftFromDom();
+      if (!draft) {
+        return;
+      }
+      if (detailPanelMode === 'create') {
+        detailCreateDraft = draft;
+      } else {
+        detailEditDraft = draft;
+      }
+      persistPopupUiState();
+    },
+    true,
+  );
 
   elements.detailHistoryNavBackBtn.addEventListener('click', () => {
     if (detailPanelMode === 'history' && detailHistoryView === 'entry') {
@@ -4773,15 +5419,21 @@ function wireEvents() {
   });
 
   elements.detailCustomFieldAddBtn.addEventListener('click', () => {
-    if (!detailEditDraft || detailPanelMode !== 'edit') {
+    const activeDraft = getActiveDetailDraft();
+    if (!activeDraft || !isEditorMode()) {
       return;
     }
-    const draft = readDetailEditDraftFromDom();
+    const draft = readDetailDraftFromDom();
     if (draft) {
-      detailEditDraft = draft;
+      if (detailPanelMode === 'create') {
+        detailCreateDraft = draft;
+      } else {
+        detailEditDraft = draft;
+      }
     }
-    detailEditDraft.customFields = Array.isArray(detailEditDraft.customFields) ? detailEditDraft.customFields : [];
-    detailEditDraft.customFields.push({ label: '', value: '' });
+    const targetDraft = getActiveDetailDraft();
+    targetDraft.customFields = Array.isArray(targetDraft.customFields) ? targetDraft.customFields : [];
+    targetDraft.customFields.push({ label: '', value: '' });
     renderDetailPanels();
   });
 
@@ -4794,7 +5446,7 @@ function wireEvents() {
     if (!(removeButton instanceof HTMLElement)) {
       return;
     }
-    if (!detailEditDraft || detailPanelMode !== 'edit') {
+    if (!isEditorMode() || !getActiveDetailDraft()) {
       return;
     }
     const indexRaw = removeButton.getAttribute('data-custom-field-remove');
@@ -4802,13 +5454,17 @@ function wireEvents() {
     if (!Number.isFinite(index) || index < 0) {
       return;
     }
-    const draft = readDetailEditDraftFromDom();
+    const draft = readDetailDraftFromDom();
     if (!draft) {
       return;
     }
     draft.customFields = Array.isArray(draft.customFields) ? draft.customFields : [];
     draft.customFields.splice(index, 1);
-    detailEditDraft = draft;
+    if (detailPanelMode === 'create') {
+      detailCreateDraft = draft;
+    } else {
+      detailEditDraft = draft;
+    }
     renderDetailPanels();
   });
 
@@ -4836,6 +5492,49 @@ function wireEvents() {
     }
     target.textContent = normalizeInlineEditableText(target);
   }, true);
+
+  elements.detailAttachmentList.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !isEditorMode()) {
+      return;
+    }
+    const removeButton = target.closest('[data-create-attachment-remove]');
+    if (!(removeButton instanceof HTMLElement)) {
+      return;
+    }
+    const attachmentId = removeButton.getAttribute('data-create-attachment-remove');
+    if (!attachmentId) {
+      return;
+    }
+    setActivePendingAttachments(activePendingAttachments().filter((entry) => entry.id !== attachmentId));
+    renderDetailPanels();
+  });
+
+  elements.createFolderNameInput.addEventListener('input', () => {
+    setCreateFolderError('');
+    elements.createFolderConfirmBtn.disabled = elements.createFolderNameInput.value.trim().length === 0;
+  });
+
+  elements.createFolderNameInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && elements.createFolderNameInput.value.trim().length > 0) {
+      event.preventDefault();
+      resolveCreateFolderDialog(elements.createFolderNameInput.value);
+    }
+  });
+
+  elements.createFolderConfirmBtn.addEventListener('click', () => {
+    resolveCreateFolderDialog(elements.createFolderNameInput.value);
+  });
+
+  elements.createFolderCancelBtn.addEventListener('click', () => {
+    resolveCreateFolderDialog(null);
+  });
+
+  elements.createFolderModal.addEventListener('mousedown', (event) => {
+    if (event.target === elements.createFolderModal) {
+      resolveCreateFolderDialog(null);
+    }
+  });
 
   elements.detailHistoryList.addEventListener('click', (event) => {
     const target = event.target;
@@ -4955,6 +5654,11 @@ function wireEvents() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (!elements.createFolderModal.hidden) {
+        event.preventDefault();
+        resolveCreateFolderDialog(null);
+        return;
+      }
       if (!elements.confirmDeleteModal.hidden) {
         event.preventDefault();
         resolveDeleteConfirmation(false);
@@ -5041,18 +5745,22 @@ function wireEvents() {
     if (!(toggleButton instanceof HTMLElement)) {
       return;
     }
-    if (detailPanelMode !== 'edit') {
+    if (!isEditorMode()) {
       return;
     }
-    const selected = getSelectedCredential();
+    const selected = getActiveDetailItem();
     if (!selected || selected.itemType !== 'login') {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    const draft = readDetailEditDraftFromDom();
+    const draft = readDetailDraftFromDom();
     if (draft) {
-      detailEditDraft = draft;
+      if (detailPanelMode === 'create') {
+        detailCreateDraft = draft;
+      } else {
+        detailEditDraft = draft;
+      }
     }
     detailEditPasswordVisible = !detailEditPasswordVisible;
     renderDetailPanels();

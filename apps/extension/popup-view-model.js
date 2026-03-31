@@ -125,6 +125,63 @@ export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }
 
+const POPUP_DETAIL_DRAFT_TTL_MS = 15 * 60 * 1000;
+
+function sanitizeCustomFields(rawFields) {
+  if (!Array.isArray(rawFields)) {
+    return [];
+  }
+  return rawFields
+    .map((entry) => ({
+      label: typeof entry?.label === 'string' ? entry.label.slice(0, 256) : '',
+      value: typeof entry?.value === 'string' ? entry.value.slice(0, 8_000) : '',
+    }))
+    .filter((entry) => entry.label.length > 0 || entry.value.length > 0);
+}
+
+function sanitizeDraftByItemType(rawDraft) {
+  if (!rawDraft || typeof rawDraft !== 'object' || Array.isArray(rawDraft)) {
+    return null;
+  }
+  const itemType = rawDraft.itemType;
+  if (itemType === 'login') {
+    return {
+      itemType: 'login',
+      title: typeof rawDraft.title === 'string' ? rawDraft.title.slice(0, 512) : '',
+      username: typeof rawDraft.username === 'string' ? rawDraft.username.slice(0, 1_024) : '',
+      password: typeof rawDraft.password === 'string' ? rawDraft.password.slice(0, 4_096) : '',
+      urls: Array.isArray(rawDraft.urls)
+        ? rawDraft.urls.filter((value) => typeof value === 'string').slice(0, 20).map((value) => value.slice(0, 2_048))
+        : [],
+      notes: typeof rawDraft.notes === 'string' ? rawDraft.notes.slice(0, 16_000) : '',
+      customFields: sanitizeCustomFields(rawDraft.customFields),
+    };
+  }
+  if (itemType === 'card') {
+    return {
+      itemType: 'card',
+      title: typeof rawDraft.title === 'string' ? rawDraft.title.slice(0, 512) : '',
+      cardholderName: typeof rawDraft.cardholderName === 'string' ? rawDraft.cardholderName.slice(0, 1_024) : '',
+      brand: typeof rawDraft.brand === 'string' ? rawDraft.brand.slice(0, 256) : '',
+      number: typeof rawDraft.number === 'string' ? rawDraft.number.slice(0, 256) : '',
+      expiryMonth: typeof rawDraft.expiryMonth === 'string' ? rawDraft.expiryMonth.slice(0, 32) : '',
+      expiryYear: typeof rawDraft.expiryYear === 'string' ? rawDraft.expiryYear.slice(0, 32) : '',
+      securityCode: typeof rawDraft.securityCode === 'string' ? rawDraft.securityCode.slice(0, 64) : '',
+      notes: typeof rawDraft.notes === 'string' ? rawDraft.notes.slice(0, 16_000) : '',
+      customFields: sanitizeCustomFields(rawDraft.customFields),
+    };
+  }
+  if (itemType === 'document' || itemType === 'secure_note') {
+    return {
+      itemType,
+      title: typeof rawDraft.title === 'string' ? rawDraft.title.slice(0, 512) : '',
+      content: typeof rawDraft.content === 'string' ? rawDraft.content.slice(0, 32_000) : '',
+      customFields: sanitizeCustomFields(rawDraft.customFields),
+    };
+  }
+  return null;
+}
+
 export function toggleSelectedItem(previousItemId, nextItemId) {
   if (typeof nextItemId !== 'string' || nextItemId.length === 0) {
     return previousItemId ?? null;
@@ -238,6 +295,22 @@ export function parsePersistedPopupUiState(rawState) {
     typeFilterRaw === 'trash'
       ? typeFilterRaw
       : 'all';
+  const detailPanelModeRaw = source.detailPanelMode;
+  const detailPanelMode = detailPanelModeRaw === 'create' || detailPanelModeRaw === 'edit' ? detailPanelModeRaw : 'view';
+  const detailDraftUpdatedAt = Number(source.detailDraftUpdatedAt);
+  const detailDraftFresh =
+    Number.isFinite(detailDraftUpdatedAt) && Date.now() - detailDraftUpdatedAt <= POPUP_DETAIL_DRAFT_TTL_MS;
+  const detailDraft = detailDraftFresh ? sanitizeDraftByItemType(source.detailDraft) : null;
+  const detailTargetItemId =
+    typeof source.detailTargetItemId === 'string' && source.detailTargetItemId.trim().length > 0
+      ? source.detailTargetItemId
+      : null;
+  const detailFolderId =
+    typeof source.detailFolderId === 'string' && source.detailFolderId.trim().length > 0 ? source.detailFolderId : '';
+  const effectiveDetailPanelMode =
+    detailDraft && (detailPanelMode === 'create' || (detailPanelMode === 'edit' && detailTargetItemId))
+      ? detailPanelMode
+      : 'view';
 
   return {
     selectedItemId:
@@ -251,9 +324,24 @@ export function parsePersistedPopupUiState(rawState) {
       sortModeRaw === 'title_asc' || sortModeRaw === 'title_desc'
         ? sortModeRaw
         : 'default',
+    detailPanelMode: effectiveDetailPanelMode,
+    detailTargetItemId: effectiveDetailPanelMode === 'edit' ? detailTargetItemId : null,
+    detailFolderId: effectiveDetailPanelMode === 'view' ? '' : detailFolderId,
+    detailDraft: effectiveDetailPanelMode === 'view' ? null : detailDraft,
   };
 }
 
 export function buildPersistedPopupUiState(input) {
-  return parsePersistedPopupUiState(input);
+  const now = Date.now();
+  const parsed = parsePersistedPopupUiState({
+    ...(input && typeof input === 'object' ? input : {}),
+    detailDraftUpdatedAt: now,
+  });
+  if (parsed.detailDraft) {
+    return {
+      ...parsed,
+      detailDraftUpdatedAt: now,
+    };
+  }
+  return parsed;
 }

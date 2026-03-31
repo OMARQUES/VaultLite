@@ -14,7 +14,7 @@
   },
   "incognito": "spanning",
   "options_page": "options.html",
-  "permissions": ["storage", "scripting", "activeTab", "permissions", "alarms"],
+  "permissions": ["storage", "scripting", "activeTab", "permissions", "alarms", "clipboardWrite"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",

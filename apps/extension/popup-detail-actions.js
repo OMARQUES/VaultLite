@@ -100,7 +100,7 @@ export function buildDetailViewModel(item, options = {}) {
           label: 'Username',
           value: subtitle,
           defaultAction: 'copy_username',
-          actions: [{ id: 'copy_username', label: 'Copy username' }],
+          actions: [],
         },
         {
           label: 'Password',
@@ -112,7 +112,6 @@ export function buildDetailViewModel(item, options = {}) {
               id: 'toggle_password_visibility',
               label: passwordVisible ? 'Hide password' : 'Show password',
             },
-            { id: 'copy_password', label: 'Copy password' },
           ],
         },
         {
@@ -120,7 +119,6 @@ export function buildDetailViewModel(item, options = {}) {
           value: urlValue,
           defaultAction: 'copy_url',
           actions: [
-            { id: 'copy_url', label: 'Copy URL' },
             ...(navigableUrl ? [{ id: 'open_url', label: 'Open URL' }] : []),
           ],
         },

@@ -13,7 +13,7 @@ const HEARTBEAT_TIMEOUT_MS = 10_000;
 const HIDDEN_CLOSE_AFTER_MS = 5 * 60_000;
 
 export type RealtimeDomains = Array<
-  'vault' | 'vault_history' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'
+  'vault' | 'vault_history' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments' | 'folders'
 >;
 
 export function domainsForRealtimeTopic(topic: string): RealtimeDomains | null {
@@ -31,6 +31,9 @@ export function domainsForRealtimeTopic(topic: string): RealtimeDomains | null {
   }
   if (topic.startsWith('vault.attachment.')) {
     return ['attachments'];
+  }
+  if (topic.startsWith('vault.folder.')) {
+    return ['folders'];
   }
   return null;
 }

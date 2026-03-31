@@ -105,6 +105,10 @@ import {
   DeviceRevokeOutputSchema,
   VaultItemCreateInputSchema,
   VaultItemExtensionUpdateInputSchema,
+  VaultFoldersStateOutputSchema,
+  VaultFolderUpsertInputSchema,
+  VaultFolderAssignmentUpsertInputSchema,
+  VaultFolderMutationOutputSchema,
   VaultItemHistoryListOutputSchema,
   VaultItemHistoryRecordSchema,
   VaultItemListOutputSchema,
@@ -142,7 +146,7 @@ import {
 } from '@vaultlite/cloudflare-runtime';
 import { Hono } from 'hono';
 import { createHash, createHmac, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import { discoverSiteIcon, normalizeDomainCandidate, registrableDomain } from './site-icons';
 import {
   REALTIME_CLOSE_CODES,
@@ -155,6 +159,14 @@ const GENERIC_INVALID_CREDENTIALS = GenericAuthFailureSchema.parse({
   code: 'invalid_credentials',
   message: 'Invalid credentials',
 });
+
+const VaultItemExtensionCreateRouteInputSchema = VaultItemCreateInputSchema.extend({
+  encryptedDiffPayload: z
+    .string()
+    .min(1)
+    .max(MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES, 'Vault item diff payload exceeds maximum size')
+    .optional(),
+}).strict();
 
 interface VaultLiteApiOptions {
   storage: VaultLiteStorage;
@@ -612,6 +624,19 @@ function stableManualIconsEtag(input: {
   const payload = JSON.stringify({
     userId: input.userId,
     icons: [...input.icons].sort((left, right) => left.domain.localeCompare(right.domain)),
+  });
+  return `"${createHash('sha256').update(payload).digest('hex')}"`;
+}
+
+function stableFoldersStateEtag(input: {
+  userId: string;
+  folders: Array<{ folderId: string; name: string; createdAt: string; updatedAt: string }>;
+  assignments: Array<{ itemId: string; folderId: string; updatedAt: string }>;
+}): string {
+  const payload = JSON.stringify({
+    userId: input.userId,
+    folders: [...input.folders].sort((left, right) => left.folderId.localeCompare(right.folderId)),
+    assignments: [...input.assignments].sort((left, right) => left.itemId.localeCompare(right.itemId)),
   });
   return `"${createHash('sha256').update(payload).digest('hex')}"`;
 }
@@ -7979,6 +8004,147 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
   });
 
+  app.get('/api/vault/folders/state', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const snapshot = await options.storage.folders.listByOwnerUserId(sessionContext.user.userId);
+    const payload = VaultFoldersStateOutputSchema.parse({
+      folders: snapshot.folders.map((record) => ({
+        folderId: record.folderId,
+        name: record.name,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+      })),
+      assignments: snapshot.assignments.map((record) => ({
+        itemId: record.itemId,
+        folderId: record.folderId,
+        updatedAt: record.updatedAt,
+      })),
+    });
+    const etag = stableFoldersStateEtag({
+      userId: sessionContext.user.userId,
+      folders: payload.folders,
+      assignments: payload.assignments,
+    });
+    const ifNoneMatch = c.req.raw.headers.get('if-none-match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      const notModified = new Response(null, { status: 304 });
+      notModified.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+      notModified.headers.set('etag', etag);
+      return notModified;
+    }
+
+    const response = jsonResponse(200, payload);
+    response.headers.set('cache-control', 'private, max-age=0, must-revalidate');
+    response.headers.set('etag', etag);
+    return response;
+  });
+
+  app.post('/api/vault/folders/upsert', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const parsed = VaultFolderUpsertInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const nowIso = isoNow(options.clock);
+    const upsertedFolder = await options.storage.folders.upsertFolder({
+      ownerUserId: sessionContext.user.userId,
+      folderId: parsed.data.folderId,
+      name: parsed.data.name,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.folder.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        folderId: upsertedFolder.folderId,
+        name: upsertedFolder.name,
+        updatedAt: upsertedFolder.updatedAt,
+      },
+    });
+
+    return jsonResponse(
+      200,
+      VaultFolderMutationOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+      }),
+    );
+  });
+
+  app.post('/api/vault/folders/assign', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer' && !hasValidCsrf(c.req.raw)) {
+      return jsonResponse(403, { ok: false, code: 'csrf_invalid' });
+    }
+    const parsed = VaultFolderAssignmentUpsertInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+
+    const item = await options.storage.vaultItems.findByItemId(parsed.data.itemId, sessionContext.user.userId);
+    if (!item) {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+
+    if (parsed.data.folderId) {
+      const folderState = await options.storage.folders.listByOwnerUserId(sessionContext.user.userId);
+      const hasFolder = folderState.folders.some((entry) => entry.folderId === parsed.data.folderId);
+      if (!hasFolder) {
+        return jsonResponse(404, { ok: false, code: 'folder_not_found' });
+      }
+    }
+
+    const nowIso = isoNow(options.clock);
+    await options.storage.folders.setAssignment({
+      ownerUserId: sessionContext.user.userId,
+      itemId: parsed.data.itemId,
+      folderId: parsed.data.folderId,
+      updatedAt: nowIso,
+    });
+
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.folder.assignment_changed',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        itemId: parsed.data.itemId,
+        folderId: parsed.data.folderId,
+        updatedAt: nowIso,
+      },
+    });
+
+    return jsonResponse(
+      200,
+      VaultFolderMutationOutputSchema.parse({
+        ok: true,
+        result: 'success_changed',
+      }),
+    );
+  });
+
   app.post('/api/vault/items', async (c) => {
     const sessionContext = await requireAuthenticatedSession(c.req.raw);
     if (!sessionContext) {
@@ -7997,6 +8163,85 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       return parsedBody.response;
     }
     const parsedInput = VaultItemCreateInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedPayload')) {
+        return jsonResponse(413, { ok: false, code: 'payload_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
+    const encryptedDiffPayload =
+      parsedBody.body && typeof parsedBody.body === 'object' && 'encryptedDiffPayload' in parsedBody.body
+        ? typeof parsedBody.body.encryptedDiffPayload === 'string' && parsedBody.body.encryptedDiffPayload.length > 0
+          ? parsedBody.body.encryptedDiffPayload
+          : null
+        : null;
+    const nowIso = isoNow(options.clock);
+    const item = await options.storage.vaultItems.create({
+      itemId: options.idGenerator.nextId('item'),
+      ownerUserId: sessionContext.user.userId,
+      itemType: input.itemType,
+      revision: 1,
+      encryptedPayload: input.encryptedPayload,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await recordVaultItemHistory({
+      ownerUserId: sessionContext.user.userId,
+      itemId: item.itemId,
+      itemRevision: item.revision,
+      changeType: 'create',
+      encryptedDiffPayload,
+      sourceDeviceId: sessionContext.device.deviceId,
+      createdAt: nowIso,
+    });
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.item.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: nowIso,
+      payload: {
+        itemId: item.itemId,
+        itemType: item.itemType,
+        revision: item.revision,
+        updatedAt: item.updatedAt,
+        encryptedPayload: item.encryptedPayload,
+      },
+    });
+
+    return jsonResponse(
+      201,
+      VaultItemRecordSchema.parse({
+        itemId: item.itemId,
+        itemType: item.itemType,
+        revision: item.revision,
+        encryptedPayload: item.encryptedPayload,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      }),
+    );
+  });
+
+  app.post('/api/extension/vault/items', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_ITEM_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultItemExtensionCreateRouteInputSchema.safeParse(parsedBody.body);
     if (!parsedInput.success) {
       if (hasTooBigIssue(parsedInput.error, 'encryptedPayload')) {
         return jsonResponse(413, { ok: false, code: 'payload_too_large' });
@@ -8484,6 +8729,253 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
   });
 
+  app.post('/api/extension/attachments/uploads/init', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: ATTACHMENT_INIT_BODY_LIMIT_BYTES,
+      tooLargeCode: 'attachment_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = AttachmentUploadInitInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'size')) {
+        return jsonResponse(413, { ok: false, code: 'attachment_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
+    const item = await options.storage.vaultItems.findByItemId(input.itemId, sessionContext.user.userId);
+    if (!item) {
+      return jsonResponse(404, { ok: false, code: 'item_not_found' });
+    }
+
+    const nowIso = isoNow(options.clock);
+    const existing = await options.storage.attachmentBlobs.findByOwnerItemAndIdempotency(
+      sessionContext.user.userId,
+      input.itemId,
+      input.idempotencyKey,
+    );
+
+    if (existing && existing.expiresAt && existing.expiresAt > nowIso) {
+      return jsonResponse(
+        200,
+        AttachmentUploadInitOutputSchema.parse({
+          ...toAttachmentUploadRecord(existing),
+          uploadToken: existing.uploadToken ?? '',
+        }),
+      );
+    }
+
+    const pending = await options.storage.attachmentBlobs.put({
+      key: options.idGenerator.nextId('attachment'),
+      ownerUserId: sessionContext.user.userId,
+      itemId: input.itemId,
+      fileName: input.fileName,
+      lifecycleState: 'pending',
+      envelope: '',
+      contentType: input.contentType,
+      size: input.size,
+      idempotencyKey: input.idempotencyKey,
+      uploadToken: options.idGenerator.nextId('upload_token'),
+      expiresAt: addMinutes(options.clock.now(), ATTACHMENT_PENDING_TTL_MINUTES),
+      uploadedAt: null,
+      attachedAt: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    return jsonResponse(
+      201,
+      AttachmentUploadInitOutputSchema.parse({
+        ...toAttachmentUploadRecord(pending),
+        uploadToken: pending.uploadToken ?? '',
+      }),
+    );
+  });
+
+  app.put('/api/extension/attachments/uploads/:uploadId/content', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES,
+      tooLargeCode: 'upload_envelope_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = AttachmentUploadContentInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedEnvelope')) {
+        return jsonResponse(413, { ok: false, code: 'upload_envelope_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
+    const uploadId = c.req.param('uploadId');
+    const record = await options.storage.attachmentBlobs.get(uploadId);
+    if (!record || record.ownerUserId !== sessionContext.user.userId) {
+      return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+    }
+
+    const nowIso = isoNow(options.clock);
+    if (!record.expiresAt || record.expiresAt <= nowIso) {
+      return jsonResponse(410, { ok: false, code: 'attachment_upload_expired' });
+    }
+    if (record.lifecycleState !== 'pending') {
+      return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
+    }
+    if (!record.uploadToken || record.uploadToken !== input.uploadToken) {
+      return jsonResponse(403, { ok: false, code: 'attachment_upload_token_invalid' });
+    }
+
+    let parsedEnvelope: unknown;
+    try {
+      parsedEnvelope = JSON.parse(base64UrlToUtf8(input.encryptedEnvelope));
+    } catch {
+      return jsonResponse(400, { ok: false, code: 'attachment_envelope_invalid' });
+    }
+
+    const envelope = AttachmentEnvelopeSchema.safeParse(parsedEnvelope);
+    if (!envelope.success) {
+      return jsonResponse(400, { ok: false, code: 'attachment_envelope_invalid' });
+    }
+    const ciphertextByteLength = base64UrlDecodedByteLength(envelope.data.ciphertext);
+    if (
+      envelope.data.contentType !== record.contentType ||
+      envelope.data.originalSize !== record.size ||
+      ciphertextByteLength === null ||
+      ciphertextByteLength !== record.size
+    ) {
+      return jsonResponse(400, { ok: false, code: 'attachment_envelope_mismatch' });
+    }
+
+    const uploaded = await options.storage.attachmentBlobs.markUploaded({
+      key: uploadId,
+      ownerUserId: sessionContext.user.userId,
+      envelope: input.encryptedEnvelope,
+      updatedAt: nowIso,
+      uploadedAt: nowIso,
+    });
+
+    return jsonResponse(200, toAttachmentUploadRecord(uploaded));
+  });
+
+  app.post('/api/extension/attachments/uploads/finalize', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsed = AttachmentUploadFinalizeInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsed.data;
+    const record = await options.storage.attachmentBlobs.get(input.uploadId);
+    if (!record || record.ownerUserId !== sessionContext.user.userId) {
+      return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+    }
+    if (record.itemId !== input.itemId) {
+      return jsonResponse(409, { ok: false, code: 'attachment_already_bound_to_other_item' });
+    }
+
+    if (record.lifecycleState === 'attached') {
+      return jsonResponse(
+        200,
+        AttachmentUploadFinalizeOutputSchema.parse({
+          ok: true,
+          result: 'success_no_op',
+          upload: toAttachmentUploadRecord(record),
+        }),
+      );
+    }
+
+    const nowIso = isoNow(options.clock);
+    if (!record.expiresAt || record.expiresAt <= nowIso) {
+      return jsonResponse(410, { ok: false, code: 'attachment_upload_expired' });
+    }
+    if (record.lifecycleState !== 'uploaded') {
+      return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
+    }
+    const item = await options.storage.vaultItems.findByItemId(input.itemId, sessionContext.user.userId);
+    if (!item) {
+      return jsonResponse(404, { ok: false, code: 'item_not_found' });
+    }
+
+    try {
+      const attached = await options.storage.attachmentBlobs.markAttached({
+        key: input.uploadId,
+        ownerUserId: sessionContext.user.userId,
+        itemId: input.itemId,
+        updatedAt: nowIso,
+        attachedAt: nowIso,
+      });
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.attachment.state_changed',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: attached.updatedAt,
+        payload: {
+          uploadId: attached.key,
+          itemId: attached.itemId,
+          lifecycleState: 'attached',
+          contentType: attached.contentType,
+          size: attached.size,
+          uploadedAt: attached.uploadedAt,
+          attachedAt: attached.attachedAt,
+          updatedAt: attached.updatedAt,
+        },
+      });
+
+      return jsonResponse(
+        200,
+        AttachmentUploadFinalizeOutputSchema.parse({
+          ok: true,
+          result: 'success_changed',
+          upload: toAttachmentUploadRecord(attached),
+        }),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'attachment_finalize_failed';
+      if (message === 'attachment_not_found') {
+        return jsonResponse(404, { ok: false, code: 'attachment_not_found' });
+      }
+      if (message === 'attachment_already_bound_to_other_item') {
+        return jsonResponse(409, { ok: false, code: 'attachment_already_bound_to_other_item' });
+      }
+      if (message === 'attachment_upload_incomplete') {
+        return jsonResponse(409, { ok: false, code: 'attachment_upload_incomplete' });
+      }
+      return jsonResponse(500, { ok: false, code: 'attachment_finalize_failed' });
+    }
+  });
+
   app.post('/api/attachments/uploads/init', async (c) => {
     const sessionContext = await requireAuthenticatedSession(c.req.raw);
     if (!sessionContext) {
@@ -8762,7 +9254,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
   });
 
   app.get('/api/attachments', async (c) => {
-    const sessionContext = await requireAuthenticatedSession(c.req.raw);
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
     if (!sessionContext) {
       return jsonResponse(401, { ok: false, code: 'unauthorized' });
     }

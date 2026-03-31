@@ -61,6 +61,9 @@ import type {
   VaultItemRecord,
   VaultItemHistoryRecord,
   VaultItemHistoryRepository,
+  VaultFolderRecord,
+  VaultFolderAssignmentRecord,
+  VaultFolderRepository,
   VaultItemTombstoneRecord,
   VaultItemRepository,
   VaultLiteStorage,
@@ -698,6 +701,32 @@ CREATE INDEX IF NOT EXISTS idx_vault_item_history_owner_item_created
 
 CREATE INDEX IF NOT EXISTS idx_vault_item_history_owner_created
   ON vault_item_history (owner_user_id, created_at DESC, history_id DESC);`,
+  },
+  {
+    id: '0020_vault_folders',
+    filename: '0020_vault_folders.sql',
+    sql: `CREATE TABLE IF NOT EXISTS vault_folders (
+  owner_user_id TEXT NOT NULL,
+  folder_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (owner_user_id, folder_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_folders_owner_updated
+  ON vault_folders (owner_user_id, updated_at DESC, folder_id);
+
+CREATE TABLE IF NOT EXISTS vault_folder_assignments (
+  owner_user_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  folder_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (owner_user_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_folder_assignments_owner_folder
+  ON vault_folder_assignments (owner_user_id, folder_id, updated_at DESC, item_id);`,
   },
 ];
 
@@ -4412,6 +4441,95 @@ class CloudflareVaultItemRepository implements VaultItemRepository {
   }
 }
 
+class CloudflareVaultFolderRepository implements VaultFolderRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async listByOwnerUserId(ownerUserId: string): Promise<{
+    folders: VaultFolderRecord[];
+    assignments: VaultFolderAssignmentRecord[];
+  }> {
+    const [folders, assignments] = await Promise.all([
+      selectMany<VaultFolderRecord>(
+        this.db,
+        `SELECT owner_user_id AS ownerUserId,
+                folder_id AS folderId,
+                name,
+                created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM vault_folders
+         WHERE owner_user_id = ?
+         ORDER BY created_at ASC, folder_id ASC`,
+        [ownerUserId],
+      ),
+      selectMany<VaultFolderAssignmentRecord>(
+        this.db,
+        `SELECT owner_user_id AS ownerUserId,
+                item_id AS itemId,
+                folder_id AS folderId,
+                updated_at AS updatedAt
+         FROM vault_folder_assignments
+         WHERE owner_user_id = ?
+         ORDER BY item_id ASC`,
+        [ownerUserId],
+      ),
+    ]);
+    return { folders, assignments };
+  }
+
+  async upsertFolder(record: VaultFolderRecord): Promise<VaultFolderRecord> {
+    await executeOne(
+      this.db,
+      `INSERT INTO vault_folders (
+         owner_user_id, folder_id, name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(owner_user_id, folder_id) DO UPDATE SET
+         name = excluded.name,
+         updated_at = excluded.updated_at`,
+      [record.ownerUserId, record.folderId, record.name, record.createdAt, record.updatedAt],
+    );
+    return (
+      (await selectOne<VaultFolderRecord>(
+        this.db,
+        `SELECT owner_user_id AS ownerUserId,
+                folder_id AS folderId,
+                name,
+                created_at AS createdAt,
+                updated_at AS updatedAt
+         FROM vault_folders
+         WHERE owner_user_id = ? AND folder_id = ?`,
+        [record.ownerUserId, record.folderId],
+      )) ?? record
+    );
+  }
+
+  async setAssignment(input: {
+    ownerUserId: string;
+    itemId: string;
+    folderId: string | null;
+    updatedAt: string;
+  }): Promise<void> {
+    if (!input.folderId) {
+      await executeOne(
+        this.db,
+        `DELETE FROM vault_folder_assignments
+         WHERE owner_user_id = ? AND item_id = ?`,
+        [input.ownerUserId, input.itemId],
+      );
+      return;
+    }
+    await executeOne(
+      this.db,
+      `INSERT INTO vault_folder_assignments (
+         owner_user_id, item_id, folder_id, updated_at
+       ) VALUES (?, ?, ?, ?)
+       ON CONFLICT(owner_user_id, item_id) DO UPDATE SET
+         folder_id = excluded.folder_id,
+         updated_at = excluded.updated_at`,
+      [input.ownerUserId, input.itemId, input.folderId, input.updatedAt],
+    );
+  }
+}
+
 export async function applyCloudflareMigrations(db: D1DatabaseLike): Promise<void> {
   const migrations = await loadCloudflareMigrations();
 
@@ -4462,6 +4580,7 @@ export function createCloudflareVaultLiteStorage(input: {
   const realtimeOneTimeTokens = new CloudflareRealtimeOneTimeTokenRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
   const vaultItemHistory = new CloudflareVaultItemHistoryRepository(input.db);
+  const folders = new CloudflareVaultFolderRepository(input.db);
 
   return {
     deploymentState,
@@ -4492,6 +4611,7 @@ export function createCloudflareVaultLiteStorage(input: {
     attachmentBlobs: new CloudflareAttachmentBlobRepository(input.db, input.bucket),
     vaultItems,
     vaultItemHistory,
+    folders,
     async completeOnboardingAtomic(record: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult> {
       const invite = await invites.findUsableByTokenHash(record.inviteTokenHash, record.nowIso);
       if (!invite) {

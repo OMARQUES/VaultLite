@@ -16,7 +16,12 @@ export function shouldShowLockIcon(layoutMode) {
   return layoutMode === 'ready';
 }
 
-export function shouldUseExpandedPopup(layoutMode, selectedItemId) {
-  return layoutMode === 'ready' && typeof selectedItemId === 'string' && selectedItemId.length > 0;
+export function shouldUseExpandedPopup(layoutMode, selectedItemId, detailPanelMode = 'view') {
+  if (layoutMode !== 'ready') {
+    return false;
+  }
+  if (detailPanelMode === 'create') {
+    return true;
+  }
+  return typeof selectedItemId === 'string' && selectedItemId.length > 0;
 }
-

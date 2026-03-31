@@ -28,6 +28,7 @@ import {
   createLocalUnlockEnvelope,
   decryptLocalUnlockEnvelope,
   decryptVaultItemPayload,
+  encryptAttachmentBlobPayload,
   encryptVaultItemPayload,
   normalizeLocalUnlockKdfProfile,
   normalizeVaultItemPayload,
@@ -60,6 +61,7 @@ const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
 const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
 const STORAGE_SESSION_TOMBSTONE_CACHE_KEY = 'vaultlite.session_tombstone_cache.v1';
+const STORAGE_SESSION_FOLDER_STATE_CACHE_KEY = 'vaultlite.session_folder_state_cache.v1';
 const STORAGE_ICON_DOMAIN_REGISTRATION_KEY = 'vaultlite.icon_domain_registration.v1';
 const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
@@ -92,6 +94,8 @@ const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
 const PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY = 'vaultlite.password_generator_history.cache.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.password_generator_history.synced_at.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
+const FOLDER_STATE_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
+const ITEM_ATTACHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
 const REALTIME_CONNECT_INITIAL_JITTER_MAX_MS = 750;
@@ -137,6 +141,10 @@ let passwordGeneratorHistoryCache = [];
 let passwordGeneratorHistoryCacheLoaded = false;
 let passwordGeneratorHistoryCacheLastSyncedAt = 0;
 let passwordGeneratorHistorySyncInFlight = null;
+let folderStateSyncInFlight = null;
+const itemAttachmentCacheByItemId = new Map();
+const itemAttachmentSyncInFlightByItemId = new Map();
+let itemCreateInFlight = null;
 const itemUpdateInFlightByItemId = new Map();
 const itemDeleteInFlightByItemId = new Map();
 const itemRestoreInFlightByItemId = new Map();
@@ -149,6 +157,12 @@ let tombstoneCache = {
   cacheKey: null,
   loadedAt: 0,
   tombstones: [],
+};
+let folderStateCache = {
+  loadedAt: 0,
+  etag: null,
+  folders: [],
+  assignments: [],
 };
 let sessionListProjectionCache = {
   cacheKey: null,
@@ -1145,6 +1159,14 @@ function refreshFromRealtimeDomains(domains) {
     vaultItemHistoryCacheByItemId.clear();
     schedulePopupRealtimeNotification(['vault_history']);
   }
+  if (domains.includes('folders')) {
+    void syncFolderStateCacheFromServer({
+      force: true,
+      awaitCompletion: true,
+    }).then(() => {
+      schedulePopupRealtimeNotification(['folders']);
+    });
+  }
 }
 
 function handleRealtimeServerEvent(eventEnvelope) {
@@ -1207,8 +1229,26 @@ function handleRealtimeServerEvent(eventEnvelope) {
     schedulePopupRealtimeNotification(['vault_history']);
     return;
   }
+  if (topic.startsWith('vault.folder.')) {
+    void syncFolderStateCacheFromServer({
+      force: true,
+      awaitCompletion: true,
+    }).then(() => {
+      schedulePopupRealtimeNotification(['folders']);
+    });
+    return;
+  }
   if (topic.startsWith('vault.attachment.')) {
-    // Advisory in extension V1; existing APIs refresh lazily from popup actions.
+    const itemId =
+      typeof eventEnvelope?.payload?.itemId === 'string' && eventEnvelope.payload.itemId.trim().length > 0
+        ? eventEnvelope.payload.itemId.trim()
+        : null;
+    if (itemId) {
+      itemAttachmentCacheByItemId.delete(itemId);
+    } else {
+      itemAttachmentCacheByItemId.clear();
+    }
+    schedulePopupRealtimeNotification(['attachments']);
   }
 }
 
@@ -6059,6 +6099,424 @@ async function loadSessionTombstoneCacheBestEffort() {
   }
 }
 
+async function persistFolderStateCacheBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  try {
+    await sessionStorage.set({
+      [STORAGE_SESSION_FOLDER_STATE_CACHE_KEY]: {
+        loadedAt: Number.isFinite(folderStateCache.loadedAt) ? Math.trunc(folderStateCache.loadedAt) : Date.now(),
+        etag: typeof folderStateCache.etag === 'string' ? folderStateCache.etag : null,
+        folders: Array.isArray(folderStateCache.folders) ? folderStateCache.folders : [],
+        assignments: Array.isArray(folderStateCache.assignments) ? folderStateCache.assignments : [],
+      },
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+async function loadFolderStateCacheBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return false;
+  }
+  try {
+    const stored = await sessionStorage.get(STORAGE_SESSION_FOLDER_STATE_CACHE_KEY);
+    const raw = stored?.[STORAGE_SESSION_FOLDER_STATE_CACHE_KEY] ?? null;
+    if (!raw || typeof raw !== 'object') {
+      return false;
+    }
+    folderStateCache = {
+      loadedAt: Number.isFinite(Number(raw.loadedAt)) ? Math.trunc(Number(raw.loadedAt)) : 0,
+      etag: typeof raw.etag === 'string' ? raw.etag : null,
+      folders: Array.isArray(raw.folders)
+        ? raw.folders
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({
+              folderId: typeof entry.folderId === 'string' ? entry.folderId : '',
+              name: typeof entry.name === 'string' ? entry.name : '',
+              createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : nowIso(),
+              updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : nowIso(),
+            }))
+            .filter((entry) => entry.folderId && entry.name)
+        : [],
+      assignments: Array.isArray(raw.assignments)
+        ? raw.assignments
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({
+              itemId: typeof entry.itemId === 'string' ? entry.itemId : '',
+              folderId: typeof entry.folderId === 'string' ? entry.folderId : '',
+              updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : nowIso(),
+            }))
+            .filter((entry) => entry.itemId && entry.folderId)
+        : [],
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function folderAssignmentForItem(itemId) {
+  if (typeof itemId !== 'string' || itemId.length === 0 || !Array.isArray(folderStateCache.assignments)) {
+    return null;
+  }
+  const entry = folderStateCache.assignments.find((assignment) => assignment.itemId === itemId) ?? null;
+  return entry?.folderId ?? null;
+}
+
+function applyFolderStateCache(payload, etag) {
+  folderStateCache = {
+    loadedAt: Date.now(),
+    etag: typeof etag === 'string' && etag.length > 0 ? etag : null,
+    folders: Array.isArray(payload?.folders) ? payload.folders : [],
+    assignments: Array.isArray(payload?.assignments) ? payload.assignments : [],
+  };
+}
+
+async function syncFolderStateCacheFromServer(options = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const shouldUseCachedState =
+    !options.force &&
+    Array.isArray(folderStateCache.folders) &&
+    folderStateCache.loadedAt > 0 &&
+    Date.now() - folderStateCache.loadedAt < FOLDER_STATE_SYNC_COOLDOWN_MS;
+  if (shouldUseCachedState) {
+    return ok({
+      folders: folderStateCache.folders,
+      assignments: folderStateCache.assignments,
+      etag: folderStateCache.etag,
+    });
+  }
+  if (folderStateSyncInFlight) {
+    if (options.awaitCompletion === false) {
+      return ok({
+        folders: folderStateCache.folders,
+        assignments: folderStateCache.assignments,
+        etag: folderStateCache.etag,
+      });
+    }
+    return folderStateSyncInFlight;
+  }
+
+  folderStateSyncInFlight = (async () => {
+    try {
+      const response = await apiClient.listFoldersState({
+        bearerToken: sessionToken,
+        etag: options.force ? undefined : folderStateCache.etag ?? undefined,
+      });
+      if (response.status === 'ok') {
+        applyFolderStateCache(response.payload, response.etag);
+        await persistFolderStateCacheBestEffort();
+      } else if (response.status === 'not_modified') {
+        folderStateCache = {
+          ...folderStateCache,
+          loadedAt: Date.now(),
+          etag: response.etag ?? folderStateCache.etag,
+        };
+        await persistFolderStateCacheBestEffort();
+      }
+      return ok({
+        folders: folderStateCache.folders,
+        assignments: folderStateCache.assignments,
+        etag: folderStateCache.etag,
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      if (Array.isArray(folderStateCache.folders) && folderStateCache.folders.length > 0) {
+        return ok({
+          folders: folderStateCache.folders,
+          assignments: folderStateCache.assignments,
+          etag: folderStateCache.etag,
+        });
+      }
+      return fail('folder_state_unavailable', 'Folder state is unavailable right now.');
+    } finally {
+      folderStateSyncInFlight = null;
+    }
+  })();
+
+  if (options.awaitCompletion === false) {
+    void folderStateSyncInFlight;
+    return ok({
+      folders: folderStateCache.folders,
+      assignments: folderStateCache.assignments,
+      etag: folderStateCache.etag,
+    });
+  }
+  return folderStateSyncInFlight;
+}
+
+async function listFolderStateInternal(input = {}) {
+  if ((!Array.isArray(folderStateCache.folders) || folderStateCache.folders.length === 0) && state.phase === 'ready') {
+    await loadFolderStateCacheBestEffort();
+  }
+  const result = await syncFolderStateCacheFromServer({
+    force: input?.force === true,
+    awaitCompletion: false,
+  });
+  if (!result?.ok && Array.isArray(folderStateCache.folders)) {
+    return ok({
+      folders: folderStateCache.folders,
+      assignments: folderStateCache.assignments,
+      etag: folderStateCache.etag,
+    });
+  }
+  return result;
+}
+
+function nextFolderIdFromName(name) {
+  const idBase = String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+  return `${idBase || 'folder'}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+async function upsertVaultFolderInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const name = typeof input?.name === 'string' ? input.name.trim() : '';
+  if (!name) {
+    return fail('invalid_input', 'Folder name is required.');
+  }
+  const folderId =
+    typeof input?.folderId === 'string' && input.folderId.trim().length > 0
+      ? input.folderId.trim()
+      : nextFolderIdFromName(name);
+  try {
+    await apiClient.upsertFolder({
+      bearerToken: sessionToken,
+      folderId,
+      name,
+    });
+    const snapshot = await syncFolderStateCacheFromServer({
+      force: true,
+      awaitCompletion: true,
+    });
+    if (!snapshot?.ok) {
+      return snapshot;
+    }
+    schedulePopupRealtimeNotification(['folders']);
+    return ok({
+      folderId,
+      folders: snapshot.folders,
+      assignments: snapshot.assignments,
+      etag: snapshot.etag,
+    });
+  } catch (error) {
+    if (isUnauthorizedApiError(error)) {
+      await clearExtensionSessionToken();
+    }
+    return fail('vault_folder_upsert_failed', 'Could not create folder right now.');
+  }
+}
+
+function normalizeAttachmentRecord(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const uploadId = typeof entry.uploadId === 'string' ? entry.uploadId : '';
+  const itemId = typeof entry.itemId === 'string' ? entry.itemId : '';
+  if (!uploadId || !itemId) {
+    return null;
+  }
+  return {
+    uploadId,
+    itemId,
+    fileName:
+      typeof entry.fileName === 'string' && entry.fileName.trim().length > 0 ? entry.fileName.trim() : 'Attachment',
+    lifecycleState: typeof entry.lifecycleState === 'string' ? entry.lifecycleState : 'attached',
+    contentType:
+      typeof entry.contentType === 'string' && entry.contentType.trim().length > 0
+        ? entry.contentType.trim()
+        : 'application/octet-stream',
+    size: Number.isFinite(Number(entry.size)) ? Math.max(0, Math.trunc(Number(entry.size))) : 0,
+    expiresAt: typeof entry.expiresAt === 'string' ? entry.expiresAt : null,
+    uploadedAt: typeof entry.uploadedAt === 'string' ? entry.uploadedAt : null,
+    attachedAt: typeof entry.attachedAt === 'string' ? entry.attachedAt : null,
+    createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : null,
+    updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : nowIso(),
+  };
+}
+
+function cachedItemAttachments(itemId) {
+  const cached = itemAttachmentCacheByItemId.get(itemId) ?? null;
+  if (!cached) {
+    return null;
+  }
+  if (Date.now() - cached.loadedAt >= ITEM_ATTACHMENT_CACHE_TTL_MS) {
+    return null;
+  }
+  return cached.records;
+}
+
+function setCachedItemAttachments(itemId, records) {
+  itemAttachmentCacheByItemId.set(itemId, {
+    loadedAt: Date.now(),
+    records: Array.isArray(records) ? records : [],
+  });
+}
+
+function upsertCachedItemAttachments(itemId, records) {
+  const existing = itemAttachmentCacheByItemId.get(itemId)?.records ?? [];
+  const nextByUploadId = new Map(existing.map((entry) => [entry.uploadId, entry]));
+  for (const record of Array.isArray(records) ? records : []) {
+    const normalized = normalizeAttachmentRecord(record);
+    if (!normalized) {
+      continue;
+    }
+    nextByUploadId.set(normalized.uploadId, normalized);
+  }
+  setCachedItemAttachments(
+    itemId,
+    Array.from(nextByUploadId.values()).sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt))),
+  );
+}
+
+async function listItemAttachmentsInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Item id is required.');
+  }
+  const force = input?.force === true;
+  if (!force) {
+    const cached = cachedItemAttachments(itemId);
+    if (cached) {
+      return ok({ uploads: cached });
+    }
+  }
+  if (itemAttachmentSyncInFlightByItemId.has(itemId)) {
+    return itemAttachmentSyncInFlightByItemId.get(itemId);
+  }
+  const promise = (async () => {
+    try {
+      const response = await apiClient.listAttachments({
+        bearerToken: sessionToken,
+        itemId,
+      });
+      const uploads = Array.isArray(response?.uploads)
+        ? response.uploads.map((entry) => normalizeAttachmentRecord(entry)).filter((entry) => Boolean(entry))
+        : [];
+      uploads.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+      setCachedItemAttachments(itemId, uploads);
+      return ok({ uploads });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      const cached = itemAttachmentCacheByItemId.get(itemId)?.records ?? [];
+      if (cached.length > 0) {
+        return ok({ uploads: cached });
+      }
+      return fail('attachment_list_unavailable', 'Attachments are unavailable right now.');
+    } finally {
+      itemAttachmentSyncInFlightByItemId.delete(itemId);
+    }
+  })();
+  itemAttachmentSyncInFlightByItemId.set(itemId, promise);
+  return promise;
+}
+
+async function uploadAttachmentsForItem(apiClient, itemId, attachments) {
+  const attachmentFailures = [];
+  const uploadedRecords = [];
+  for (const attachment of Array.isArray(attachments) ? attachments : []) {
+    try {
+      const fileName =
+        typeof attachment?.fileName === 'string' && attachment.fileName.trim().length > 0
+          ? attachment.fileName.trim()
+          : `${itemId}.bin`;
+      const contentType =
+        typeof attachment?.contentType === 'string' && attachment.contentType.trim().length > 0
+          ? attachment.contentType.trim()
+          : 'application/octet-stream';
+      const rawBuffer =
+        attachment?.buffer instanceof ArrayBuffer
+          ? attachment.buffer
+          : ArrayBuffer.isView(attachment?.buffer)
+            ? attachment.buffer.buffer.slice(
+                attachment.buffer.byteOffset,
+                attachment.buffer.byteOffset + attachment.buffer.byteLength,
+              )
+            : null;
+      if (!rawBuffer) {
+        throw new Error('invalid_attachment_buffer');
+      }
+      const initResponse = await apiClient.initAttachmentUpload({
+        bearerToken: sessionToken,
+        itemId,
+        fileName,
+        contentType,
+        size: rawBuffer.byteLength,
+        idempotencyKey: `${itemId}:${fileName}:${rawBuffer.byteLength}:${randomBase64Url(6)}`,
+      });
+      const encryptedEnvelope = await encryptAttachmentBlobPayload({
+        accountKey: unlockedContext.accountKey,
+        plaintext: rawBuffer,
+        contentType,
+      });
+      await apiClient.uploadAttachmentContent(initResponse.uploadId, {
+        bearerToken: sessionToken,
+        uploadToken: initResponse.uploadToken,
+        encryptedEnvelope,
+      });
+      const finalizeResponse = await apiClient.finalizeAttachmentUpload({
+        bearerToken: sessionToken,
+        uploadId: initResponse.uploadId,
+        itemId,
+      });
+      const uploadedRecord = normalizeAttachmentRecord(finalizeResponse?.upload);
+      if (uploadedRecord) {
+        uploadedRecords.push(uploadedRecord);
+      }
+    } catch (error) {
+      attachmentFailures.push({
+        fileName:
+          typeof attachment?.fileName === 'string' && attachment.fileName.trim().length > 0
+            ? attachment.fileName.trim()
+            : 'Attachment',
+        message: error instanceof Error && error.message ? error.message : 'upload_failed',
+      });
+    }
+  }
+  if (uploadedRecords.length > 0) {
+    upsertCachedItemAttachments(itemId, uploadedRecords);
+  }
+  return {
+    attachmentFailures,
+    uploadedRecords,
+  };
+}
+
 function stringifyDiffValue(value) {
   if (value === null || value === undefined) {
     return '';
@@ -6140,6 +6598,125 @@ function normalizeHistoryDiffEntries(rawEntries) {
     .filter((entry) => entry.fieldPath.length > 0);
 }
 
+async function createVaultItemInternal(input) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const itemType =
+    typeof input?.itemType === 'string' && SUPPORTED_ITEM_TYPES.has(input.itemType)
+      ? input.itemType
+      : 'login';
+  if (!SUPPORTED_ITEM_TYPES.has(itemType)) {
+    return fail('invalid_input', 'Unsupported item type.');
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  if (itemCreateInFlight) {
+    return itemCreateInFlight;
+  }
+
+  itemCreateInFlight = (async () => {
+    try {
+      const payload = toStoredVaultPayload(itemType, input?.payload ?? {});
+      const encryptedPayload = await encryptVaultItemPayload({
+        accountKey: unlockedContext.accountKey,
+        itemType,
+        payload,
+      });
+      const diffEntries = computeVaultItemDiffEntries(itemType, {}, payload);
+      const encryptedDiffPayload =
+        diffEntries.length > 0
+          ? await encryptVaultItemPayload({
+            accountKey: unlockedContext.accountKey,
+            itemType: 'secure_note',
+            payload: {
+              version: 'vault-item-history-diff.v1',
+              itemType,
+              entries: diffEntries,
+            },
+          })
+          : undefined;
+      const created = await apiClient.createVaultItem({
+        bearerToken: sessionToken,
+        itemType,
+        encryptedPayload,
+        encryptedDiffPayload,
+      });
+
+      const itemId = typeof created?.itemId === 'string' ? created.itemId : '';
+      if (!itemId) {
+        return fail('vault_item_create_failed', 'Could not create item right now.');
+      }
+      const revision =
+        Number.isFinite(Number(created?.revision)) && Number(created.revision) > 0
+          ? Math.trunc(Number(created.revision))
+          : 1;
+      const normalizedPayload = normalizeVaultItemPayload(itemType, payload);
+      const createdCredential = {
+        itemId,
+        itemType,
+        revision,
+        ...normalizedPayload,
+      };
+
+      const folderId =
+        typeof input?.folderId === 'string' && input.folderId.trim().length > 0 ? input.folderId.trim() : null;
+      if (folderId) {
+        await apiClient.assignFolder({
+          bearerToken: sessionToken,
+          itemId,
+          folderId,
+        });
+        const nextAssignments = Array.isArray(folderStateCache.assignments)
+          ? folderStateCache.assignments.filter((entry) => entry?.itemId !== itemId)
+          : [];
+        nextAssignments.push({
+          itemId,
+          folderId,
+          updatedAt: nowIso(),
+        });
+        folderStateCache = {
+          ...folderStateCache,
+          loadedAt: Date.now(),
+          assignments: nextAssignments,
+        };
+        void persistFolderStateCacheBestEffort();
+      }
+
+      const { attachmentFailures } = await uploadAttachmentsForItem(apiClient, itemId, input?.attachments);
+
+      credentialsCache = {
+        loadedAt: Date.now(),
+        credentials: [...credentialsCache.credentials, createdCredential],
+      };
+      vaultItemHistoryCacheByItemId.delete(itemId);
+      hydrateSessionListProjectionCacheFromCredentials();
+      void Promise.all([
+        persistCredentialCacheToLocalBestEffort(null),
+        persistSessionListProjectionCacheBestEffort(),
+      ]);
+      void syncIconStateDomainRegistrations().catch(() => undefined);
+      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state', 'attachments', 'folders']);
+      return ok({
+        item: createdCredential,
+        attachmentFailures,
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      return fail('vault_item_create_failed', 'Could not create item right now.');
+    } finally {
+      itemCreateInFlight = null;
+    }
+  })();
+
+  return itemCreateInFlight;
+}
+
 async function updateVaultItemInternal(input) {
   const readyError = await ensureReadyState();
   if (readyError) {
@@ -6167,7 +6744,12 @@ async function updateVaultItemInternal(input) {
   }
   const payload = toStoredVaultPayload(itemType, input?.payload ?? {});
   const previousPayload = toStoredVaultPayload(itemType, targetCredential);
-  if (JSON.stringify(previousPayload) === JSON.stringify(payload)) {
+  const requestedFolderId =
+    typeof input?.folderId === 'string' && input.folderId.trim().length > 0 ? input.folderId.trim() : null;
+  const currentFolderId = folderAssignmentForItem(itemId);
+  const hasFolderChange = requestedFolderId !== currentFolderId;
+  const hasNewAttachments = Array.isArray(input?.attachments) && input.attachments.length > 0;
+  if (JSON.stringify(previousPayload) === JSON.stringify(payload) && !hasFolderChange && !hasNewAttachments) {
     return ok({
       item: targetCredential,
       result: 'success_no_op',
@@ -6216,6 +6798,30 @@ async function updateVaultItemInternal(input) {
         revision: Number.isFinite(updated?.revision) ? Math.trunc(updated.revision) : expectedRevision + 1,
         ...normalized,
       };
+      if (hasFolderChange) {
+        await apiClient.assignFolder({
+          bearerToken: sessionToken,
+          itemId,
+          folderId: requestedFolderId,
+        });
+        const nextAssignments = Array.isArray(folderStateCache.assignments)
+          ? folderStateCache.assignments.filter((entry) => entry?.itemId !== itemId)
+          : [];
+        if (requestedFolderId) {
+          nextAssignments.push({
+            itemId,
+            folderId: requestedFolderId,
+            updatedAt: nowIso(),
+          });
+        }
+        folderStateCache = {
+          ...folderStateCache,
+          loadedAt: Date.now(),
+          assignments: nextAssignments,
+        };
+        void persistFolderStateCacheBestEffort();
+      }
+      const { attachmentFailures } = await uploadAttachmentsForItem(apiClient, itemId, input?.attachments);
       credentialsCache = {
         loadedAt: Date.now(),
         credentials: credentialsCache.credentials.map((entry) =>
@@ -6229,10 +6835,11 @@ async function updateVaultItemInternal(input) {
         persistSessionListProjectionCacheBestEffort(),
       ]);
       void syncIconStateDomainRegistrations().catch(() => undefined);
-      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state']);
+      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state', 'attachments', 'folders']);
       return ok({
         item: updatedCredential,
         result: 'success_changed',
+        attachmentFailures,
       });
     } catch (error) {
       if (isUnauthorizedApiError(error)) {
@@ -7143,6 +7750,34 @@ async function handleCommand(command, senderContext, sender) {
         suggestedOnly: command.suggestedOnly === true,
         pageUrl: typeof command.pageUrl === 'string' ? command.pageUrl : '',
       });
+    }
+    case 'vaultlite.list_folders_state': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return listFolderStateInternal(command);
+    }
+    case 'vaultlite.upsert_folder': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return upsertVaultFolderInternal(command);
+    }
+    case 'vaultlite.list_item_attachments': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return listItemAttachmentsInternal(command);
+    }
+    case 'vaultlite.create_item': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return createVaultItemInternal(command);
     }
     case 'vaultlite.fill_credential': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'fill:dispatch');

@@ -27,11 +27,11 @@ describe('popup-layout-state', () => {
     expect(shouldShowLockIcon('ready')).toBe(true);
   });
 
-  test('expands popup only when ready has selected item', () => {
-    expect(shouldUseExpandedPopup('pairing', null)).toBe(false);
-    expect(shouldUseExpandedPopup('unlock', 'item_1')).toBe(false);
-    expect(shouldUseExpandedPopup('ready', null)).toBe(false);
-    expect(shouldUseExpandedPopup('ready', 'item_1')).toBe(true);
+  test('expands popup when ready has selected item or create mode is active', () => {
+    expect(shouldUseExpandedPopup('pairing', null, 'view')).toBe(false);
+    expect(shouldUseExpandedPopup('unlock', 'item_1', 'view')).toBe(false);
+    expect(shouldUseExpandedPopup('ready', null, 'view')).toBe(false);
+    expect(shouldUseExpandedPopup('ready', 'item_1', 'view')).toBe(true);
+    expect(shouldUseExpandedPopup('ready', null, 'create')).toBe(true);
   });
 });
-

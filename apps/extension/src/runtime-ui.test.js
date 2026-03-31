@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { ensureServerOriginPermission, sendBackgroundCommand } from '../runtime-ui.js';
+import { copyToClipboard, ensureServerOriginPermission, sendBackgroundCommand } from '../runtime-ui.js';
 
 describe('sendBackgroundCommand', () => {
   test('retries once when background connection fails transiently', async () => {
@@ -89,5 +89,45 @@ describe('ensureServerOriginPermission', () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe('permission_request_failed');
+  });
+});
+
+describe('copyToClipboard', () => {
+  test('falls back to execCommand copy when Clipboard API is unavailable', async () => {
+    const execCommand = vi.fn(() => true);
+    const appendSpy = vi.spyOn(document.body, 'appendChild');
+    const removeSpy = vi.spyOn(HTMLElement.prototype, 'remove');
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+
+    await copyToClipboard('hello world');
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(appendSpy).toHaveBeenCalled();
+    expect(removeSpy).toHaveBeenCalled();
+  });
+
+  test('prefers execCommand copy before Clipboard API when available', async () => {
+    const execCommand = vi.fn(() => true);
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    await copyToClipboard('hello world');
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

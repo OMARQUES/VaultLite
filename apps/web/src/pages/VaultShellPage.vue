@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import {
   onBeforeRouteLeave,
   onBeforeRouteUpdate,
@@ -43,6 +43,11 @@ import { foregroundRefreshCoordinator, withIntervalJitter } from '../lib/foregro
 import { decryptVaultItemPayload, encryptAttachmentBlobPayload } from '../lib/browser-crypto';
 import { createWebRealtimeClient, type WebRealtimeClient } from '../lib/realtime-client';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
+import {
+  assignVaultFolderOnServer,
+  createVaultFolderOnServer,
+  hydrateVaultFoldersFromServer,
+} from '../lib/vault-folder-sync';
 import {
   type CardVaultItemPayload,
   createVaultWorkspace,
@@ -137,6 +142,12 @@ const loginDraftFolderId = ref('');
 const documentDraftFolderId = ref('');
 const cardDraftFolderId = ref('');
 const secureNoteDraftFolderId = ref('');
+const editorFolderDialogOpen = ref(false);
+const editorFolderName = ref('');
+const editorFolderTarget = ref<'login' | 'document' | 'card' | 'secure_note'>('login');
+const editorFolderBusy = ref(false);
+const editorFolderError = ref('');
+const editorFolderNameFieldRef = ref<InstanceType<typeof TextField> | null>(null);
 const uiState = ref<VaultUiState>(loadVaultUiState(sessionStore.state.username));
 const attachmentInputRef = ref<HTMLInputElement | null>(null);
 const attachmentsByItemId = ref<Record<string, AttachmentUploadView[]>>({});
@@ -904,7 +915,7 @@ function onRealtimeNetworkOnline() {
 
 async function handleRealtimeDomainResync(
   domains: Array<
-    'vault' | 'vault_history' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'
+    'vault' | 'vault_history' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments' | 'folders'
   >,
 ) {
   if (domains.includes('vault')) {
@@ -918,6 +929,13 @@ async function handleRealtimeDomainResync(
   }
   if (domains.includes('attachments')) {
     requestAttachmentStateSync({ force: true });
+  }
+  if (domains.includes('folders')) {
+    void hydrateVaultFoldersFromServer(sessionStore.state.username, authClient, { force: true })
+      .then(() => {
+        refreshUiState();
+      })
+      .catch(() => undefined);
   }
   if (domains.includes('password_history') && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(PASSWORD_HISTORY_REALTIME_EVENT));
@@ -2122,9 +2140,67 @@ function toggleFavorite(itemId: string) {
   });
 }
 
-function assignItemFolder(itemId: string, folderId: string | null) {
+function setEditorFolderSelection(target: 'login' | 'document' | 'card' | 'secure_note', folderId: string) {
+  if (target === 'document') {
+    documentDraftFolderId.value = folderId;
+    return;
+  }
+  if (target === 'card') {
+    cardDraftFolderId.value = folderId;
+    return;
+  }
+  if (target === 'secure_note') {
+    secureNoteDraftFolderId.value = folderId;
+    return;
+  }
+  loginDraftFolderId.value = folderId;
+}
+
+function openEditorFolderDialog(target: 'login' | 'document' | 'card' | 'secure_note') {
+  editorFolderTarget.value = target;
+  editorFolderName.value = '';
+  editorFolderError.value = '';
+  editorFolderDialogOpen.value = true;
+  void nextTick(() => {
+    editorFolderNameFieldRef.value?.focus();
+  });
+}
+
+function closeEditorFolderDialog() {
+  editorFolderDialogOpen.value = false;
+  editorFolderBusy.value = false;
+  editorFolderName.value = '';
+  editorFolderError.value = '';
+}
+
+async function createFolderFromEditor() {
+  const trimmedName = editorFolderName.value.trim();
+  if (!trimmedName) {
+    return;
+  }
+  editorFolderBusy.value = true;
+  editorFolderError.value = '';
+  try {
+    const createdFolder = await createVaultFolderOnServer(sessionStore.state.username, authClient, trimmedName);
+    if (createdFolder?.folderId) {
+      setEditorFolderSelection(editorFolderTarget.value, createdFolder.folderId);
+    }
+    closeEditorFolderDialog();
+    setDirty();
+  } catch {
+    editorFolderError.value = 'Could not create folder right now.';
+    editorFolderBusy.value = false;
+  }
+}
+
+async function assignItemFolder(itemId: string, folderId: string | null) {
+  await assignVaultFolderOnServer(sessionStore.state.username, authClient, itemId, folderId);
   commitUiState((draft) => {
-    draft.folderAssignments[itemId] = folderId;
+    if (folderId) {
+      draft.folderAssignments[itemId] = folderId;
+    } else {
+      delete draft.folderAssignments[itemId];
+    }
   });
 }
 
@@ -3139,7 +3215,7 @@ async function saveCurrent() {
       await workspace.createLogin(buildLoginPayloadForSave());
       const createdItemId = workspace.state.items.at(-1)?.itemId;
       if (createdItemId) {
-        assignItemFolder(createdItemId, loginDraftFolderId.value || null);
+        await assignItemFolder(createdItemId, loginDraftFolderId.value || null);
       }
       dirty.value = false;
       if (createdItemId) {
@@ -3158,7 +3234,7 @@ async function saveCurrent() {
       await workspace.createDocument(documentPayload);
       const createdItemId = workspace.state.items.at(-1)?.itemId;
       if (createdItemId) {
-        assignItemFolder(createdItemId, documentDraftFolderId.value || null);
+        await assignItemFolder(createdItemId, documentDraftFolderId.value || null);
       }
       dirty.value = false;
       if (createdItemId) {
@@ -3176,7 +3252,7 @@ async function saveCurrent() {
       await workspace.createCard(buildCardPayloadForSave());
       const createdItemId = workspace.state.items.at(-1)?.itemId;
       if (createdItemId) {
-        assignItemFolder(createdItemId, cardDraftFolderId.value || null);
+        await assignItemFolder(createdItemId, cardDraftFolderId.value || null);
       }
       dirty.value = false;
       if (createdItemId) {
@@ -3194,7 +3270,7 @@ async function saveCurrent() {
       await workspace.createSecureNote(buildSecureNotePayloadForSave());
       const createdItemId = workspace.state.items.at(-1)?.itemId;
       if (createdItemId) {
-        assignItemFolder(createdItemId, secureNoteDraftFolderId.value || null);
+        await assignItemFolder(createdItemId, secureNoteDraftFolderId.value || null);
       }
       dirty.value = false;
       if (createdItemId) {
@@ -3242,7 +3318,7 @@ async function saveCurrent() {
         targetFolder = secureNoteDraftFolderId.value || null;
       }
       await workspace.updateItem(nextItem);
-      assignItemFolder(selectedItem.value.itemId, targetFolder);
+      await assignItemFolder(selectedItem.value.itemId, targetFolder);
       if (pendingDraftAttachments.value.length > 0) {
         await uploadQueuedDraftAttachments(selectedItem.value.itemId, 'Item');
       }
@@ -3503,6 +3579,11 @@ onMounted(() => {
   window.addEventListener(VAULT_HISTORY_REALTIME_EVENT, handleVaultHistoryRealtimeUpdate);
   document.addEventListener('visibilitychange', handleVisibilityChange);
   refreshManualSiteIcons();
+  void hydrateVaultFoldersFromServer(sessionStore.state.username, authClient)
+    .then(() => {
+      refreshUiState();
+    })
+    .catch(() => undefined);
   requestManualSiteIconRefresh();
   requestAttachmentStateSync({ force: true });
   scheduleForegroundRefreshFallback();
@@ -3932,7 +4013,8 @@ onBeforeUnmount(() => {
             <section class="editor-section">
               <h3>Organization</h3>
               <div class="editor-section__body">
-                <label class="field">
+                <div class="custom-field-row editor-folder-row">
+                <label class="field editor-folder-field">
                   <span class="field__label">Folder</span>
                   <select
                     v-model="loginDraftFolderId"
@@ -3945,6 +4027,16 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                 </label>
+                  <IconButton
+                    class="button--primary"
+                    type="button"
+                    label="Create folder from editor"
+                    title="Create folder"
+                    @click="openEditorFolderDialog('login')"
+                  >
+                    <AppIcon name="plus" :size="16" />
+                  </IconButton>
+                </div>
               </div>
             </section>
 
@@ -3960,7 +4052,8 @@ onBeforeUnmount(() => {
             <section class="editor-section">
               <h3>Organization</h3>
               <div class="editor-section__body">
-                <label class="field">
+                <div class="custom-field-row editor-folder-row">
+                <label class="field editor-folder-field">
                   <span class="field__label">Folder</span>
                   <select
                     v-model="documentDraftFolderId"
@@ -3973,6 +4066,16 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                 </label>
+                  <IconButton
+                    class="button--primary"
+                    type="button"
+                    label="Create folder from editor"
+                    title="Create folder"
+                    @click="openEditorFolderDialog('document')"
+                  >
+                    <AppIcon name="plus" :size="16" />
+                  </IconButton>
+                </div>
               </div>
             </section>
             <section class="editor-section">
@@ -4033,7 +4136,8 @@ onBeforeUnmount(() => {
             <section class="editor-section">
               <h3>Organization</h3>
               <div class="editor-section__body">
-                <label class="field">
+                <div class="custom-field-row editor-folder-row">
+                <label class="field editor-folder-field">
                   <span class="field__label">Folder</span>
                   <select
                     v-model="cardDraftFolderId"
@@ -4046,6 +4150,16 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                 </label>
+                  <IconButton
+                    class="button--primary"
+                    type="button"
+                    label="Create folder from editor"
+                    title="Create folder"
+                    @click="openEditorFolderDialog('card')"
+                  >
+                    <AppIcon name="plus" :size="16" />
+                  </IconButton>
+                </div>
               </div>
             </section>
 
@@ -4061,7 +4175,8 @@ onBeforeUnmount(() => {
             <section class="editor-section">
               <h3>Organization</h3>
               <div class="editor-section__body">
-                <label class="field">
+                <div class="custom-field-row editor-folder-row">
+                <label class="field editor-folder-field">
                   <span class="field__label">Folder</span>
                   <select
                     v-model="secureNoteDraftFolderId"
@@ -4074,6 +4189,16 @@ onBeforeUnmount(() => {
                     </option>
                   </select>
                 </label>
+                  <IconButton
+                    class="button--primary"
+                    type="button"
+                    label="Create folder from editor"
+                    title="Create folder"
+                    @click="openEditorFolderDialog('secure_note')"
+                  >
+                    <AppIcon name="plus" :size="16" />
+                  </IconButton>
+                </div>
               </div>
             </section>
             <section class="editor-section">
@@ -4992,6 +5117,17 @@ onBeforeUnmount(() => {
       <template #actions>
         <SecondaryButton type="button" @click="closeDiscardDialog">Keep editing</SecondaryButton>
         <DangerButton type="button" @click="discardChanges">Discard changes</DangerButton>
+      </template>
+    </DialogModal>
+
+    <DialogModal :open="editorFolderDialogOpen" title="New folder">
+      <TextField ref="editorFolderNameFieldRef" v-model="editorFolderName" label="Folder name" autocomplete="off" />
+      <p v-if="editorFolderError" class="module-empty-hint">{{ editorFolderError }}</p>
+      <template #actions>
+        <SecondaryButton type="button" @click="closeEditorFolderDialog">Cancel</SecondaryButton>
+        <PrimaryButton type="button" :disabled="!editorFolderName.trim() || editorFolderBusy" @click="createFolderFromEditor">
+          {{ editorFolderBusy ? 'Creating...' : 'Create folder' }}
+        </PrimaryButton>
       </template>
     </DialogModal>
 

@@ -257,6 +257,20 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
       });
     },
+    async createVaultItem(input) {
+      return requestJson(`${base}/api/extension/vault/items`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemType: input?.itemType,
+          encryptedPayload: input?.encryptedPayload,
+          encryptedDiffPayload:
+            typeof input?.encryptedDiffPayload === 'string' && input.encryptedDiffPayload.length > 0
+              ? input.encryptedDiffPayload
+              : undefined,
+        }),
+      });
+    },
     async updateVaultItem(input) {
       const itemId =
         typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
@@ -451,6 +465,68 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
       });
     },
+    async listFoldersState(input = {}) {
+      return requestWithNotModified(`${base}/api/vault/folders/state`, {
+        method: 'GET',
+        headers: buildHeaders({
+          bearerToken: input?.bearerToken,
+          extra: input?.etag ? { 'if-none-match': input.etag } : {},
+        }),
+      });
+    },
+    async upsertFolder(input = {}) {
+      return requestJson(`${base}/api/vault/folders/upsert`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          folderId: input?.folderId,
+          name: input?.name,
+        }),
+      });
+    },
+    async assignFolder(input = {}) {
+      return requestJson(`${base}/api/vault/folders/assign`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemId: input?.itemId,
+          folderId: typeof input?.folderId === 'string' ? input.folderId : null,
+        }),
+      });
+    },
+    async initAttachmentUpload(input = {}) {
+      return requestJson(`${base}/api/extension/attachments/uploads/init`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemId: input?.itemId,
+          fileName: input?.fileName,
+          contentType: input?.contentType,
+          size: input?.size,
+          idempotencyKey: input?.idempotencyKey,
+        }),
+      });
+    },
+    async uploadAttachmentContent(uploadId, input = {}) {
+      return requestJson(`${base}/api/extension/attachments/uploads/${encodeURIComponent(uploadId)}/content`, {
+        method: 'PUT',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          uploadToken: input?.uploadToken,
+          encryptedEnvelope: input?.encryptedEnvelope,
+        }),
+      });
+    },
+    async finalizeAttachmentUpload(input = {}) {
+      return requestJson(`${base}/api/extension/attachments/uploads/finalize`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          uploadId: input?.uploadId,
+          itemId: input?.itemId,
+        }),
+      });
+    },
     async listAttachmentState(input = {}) {
       const query = new URLSearchParams();
       if (typeof input?.cursor === 'string' && input.cursor.length > 0) {
@@ -461,6 +537,17 @@ export function createExtensionApiClient(serverOrigin) {
       }
       const suffix = query.size > 0 ? `?${query.toString()}` : '';
       return requestJson(`${base}/api/attachments/state${suffix}`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async listAttachments(input = {}) {
+      const query = new URLSearchParams();
+      if (typeof input?.itemId === 'string' && input.itemId.length > 0) {
+        query.set('itemId', input.itemId);
+      }
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return requestJson(`${base}/api/attachments${suffix}`, {
         method: 'GET',
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
       });

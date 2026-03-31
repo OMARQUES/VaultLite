@@ -319,4 +319,227 @@ describe('runtime api client manual icon payloads', () => {
     expect(init.headers.authorization).toBe('Bearer secret-token');
     expect(init.body).toBeUndefined();
   });
+
+  test('createVaultItem sends extension create payload without leaking bearer token', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        itemId: 'item_new_1',
+        itemType: 'login',
+        revision: 1,
+        encryptedPayload: 'encrypted_payload_v1',
+      }),
+    });
+
+    await api.createVaultItem({
+      bearerToken: 'secret-token',
+      itemType: 'login',
+      encryptedPayload: 'encrypted_payload_v1',
+      encryptedDiffPayload: 'encrypted_diff_payload_v1',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${serverOrigin}/api/extension/vault/items`);
+    expect(init.method).toBe('POST');
+    expect(init.headers.authorization).toBe('Bearer secret-token');
+    const parsedBody = JSON.parse(String(init.body));
+    expect(parsedBody).toEqual({
+      itemType: 'login',
+      encryptedPayload: 'encrypted_payload_v1',
+      encryptedDiffPayload: 'encrypted_diff_payload_v1',
+    });
+    expect(parsedBody).not.toHaveProperty('bearerToken');
+  });
+
+  test('folder endpoints use bearer auth and keep bearer token out of request body', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: {
+          get(name) {
+            return name.toLowerCase() === 'etag' ? '"folders_v1"' : null;
+          },
+        },
+        json: async () => ({
+          folders: [],
+          assignments: [],
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: 'success_changed' }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: 'success_changed' }),
+        clone() {
+          return this;
+        },
+      });
+
+    await api.listFoldersState({
+      bearerToken: 'secret-token',
+      etag: '"folders_v0"',
+    });
+    await api.upsertFolder({
+      bearerToken: 'secret-token',
+      folderId: 'folder_finance',
+      name: 'Finance',
+    });
+    await api.assignFolder({
+      bearerToken: 'secret-token',
+      itemId: 'item_1',
+      folderId: 'folder_finance',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${serverOrigin}/api/vault/folders/state`);
+    expect(fetchMock.mock.calls[0][1].headers.authorization).toBe('Bearer secret-token');
+    expect(fetchMock.mock.calls[0][1].headers['if-none-match']).toBe('"folders_v0"');
+
+    const [upsertUrl, upsertInit] = fetchMock.mock.calls[1];
+    expect(upsertUrl).toBe(`${serverOrigin}/api/vault/folders/upsert`);
+    expect(upsertInit.headers.authorization).toBe('Bearer secret-token');
+    expect(JSON.parse(String(upsertInit.body))).toEqual({
+      folderId: 'folder_finance',
+      name: 'Finance',
+    });
+
+    const [assignUrl, assignInit] = fetchMock.mock.calls[2];
+    expect(assignUrl).toBe(`${serverOrigin}/api/vault/folders/assign`);
+    expect(assignInit.headers.authorization).toBe('Bearer secret-token');
+    expect(JSON.parse(String(assignInit.body))).toEqual({
+      itemId: 'item_1',
+      folderId: 'folder_finance',
+    });
+  });
+
+  test('extension attachment upload endpoints use dedicated bearer routes', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          uploadId: 'upload_1',
+          uploadToken: 'upload_token_1',
+          itemId: 'item_1',
+          fileName: 'note.txt',
+          contentType: 'text/plain',
+          size: 42,
+          lifecycleState: 'pending',
+          expiresAt: '2026-03-31T12:00:00.000Z',
+          uploadedAt: null,
+          attachedAt: null,
+          createdAt: '2026-03-31T11:59:00.000Z',
+          updatedAt: '2026-03-31T11:59:00.000Z',
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          uploadId: 'upload_1',
+          itemId: 'item_1',
+          lifecycleState: 'uploaded',
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          result: 'success_changed',
+          upload: {
+            uploadId: 'upload_1',
+            itemId: 'item_1',
+            lifecycleState: 'attached',
+          },
+        }),
+        clone() {
+          return this;
+        },
+      });
+
+    await api.initAttachmentUpload({
+      bearerToken: 'secret-token',
+      itemId: 'item_1',
+      fileName: 'note.txt',
+      contentType: 'text/plain',
+      size: 42,
+      idempotencyKey: 'idem_1',
+    });
+    await api.uploadAttachmentContent('upload_1', {
+      bearerToken: 'secret-token',
+      uploadToken: 'upload_token_1',
+      encryptedEnvelope: 'encrypted_envelope_v1',
+    });
+    await api.finalizeAttachmentUpload({
+      bearerToken: 'secret-token',
+      uploadId: 'upload_1',
+      itemId: 'item_1',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${serverOrigin}/api/extension/attachments/uploads/init`);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      `${serverOrigin}/api/extension/attachments/uploads/upload_1/content`,
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe(`${serverOrigin}/api/extension/attachments/uploads/finalize`);
+    expect(fetchMock.mock.calls.every(([, init]) => init.headers.authorization === 'Bearer secret-token')).toBe(true);
+  });
+
+  test('lists item attachments through authenticated extension-compatible route', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        uploads: [
+          {
+            uploadId: 'upload_1',
+            itemId: 'item_1',
+            fileName: 'statement.pdf',
+            lifecycleState: 'attached',
+            contentType: 'application/pdf',
+            size: 1024,
+            expiresAt: '2026-03-31T12:00:00.000Z',
+            uploadedAt: '2026-03-31T11:59:00.000Z',
+            attachedAt: '2026-03-31T11:59:30.000Z',
+            createdAt: '2026-03-31T11:58:00.000Z',
+            updatedAt: '2026-03-31T11:59:30.000Z',
+          },
+        ],
+      }),
+      clone() {
+        return this;
+      },
+    });
+
+    await api.listAttachments({
+      bearerToken: 'secret-token',
+      itemId: 'item_1',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${serverOrigin}/api/attachments?itemId=item_1`);
+    expect(init.method).toBe('GET');
+    expect(init.headers.authorization).toBe('Bearer secret-token');
+  });
 });
