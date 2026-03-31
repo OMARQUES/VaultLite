@@ -123,16 +123,36 @@ const elements = {
   detailIconFileInput: byId('detailIconFileInput'),
   detailType: byId('detailType'),
   detailTitle: byId('detailTitle'),
+  detailMainSections: byId('detailMainSections'),
   detailPrimaryLabel: byId('detailPrimaryLabel'),
   detailPrimaryValue: byId('detailPrimaryValue'),
   detailSecondaryLabel: byId('detailSecondaryLabel'),
   detailSecondaryValue: byId('detailSecondaryValue'),
   detailTertiaryLabel: byId('detailTertiaryLabel'),
   detailTertiaryValue: byId('detailTertiaryValue'),
+  detailNotesRow: byId('detailNotesRow'),
+  detailNotesLabel: byId('detailNotesLabel'),
+  detailNotesValue: byId('detailNotesValue'),
+  detailNotesEditor: byId('detailNotesEditor'),
+  detailNotesActionA: byId('detailNotesActionA'),
+  detailCustomFieldsSection: byId('detailCustomFieldsSection'),
+  detailCustomFieldsTitle: byId('detailCustomFieldsTitle'),
+  detailCustomFieldsList: byId('detailCustomFieldsList'),
+  detailCustomFieldAddBtn: byId('detailCustomFieldAddBtn'),
+  detailHistorySummarySection: byId('detailHistorySummarySection'),
+  detailHistorySummaryToggle: byId('detailHistorySummaryToggle'),
+  detailHistorySummaryChevron: byId('detailHistorySummaryChevron'),
+  detailHistorySummaryTitle: byId('detailHistorySummaryTitle'),
+  detailHistorySummaryBody: byId('detailHistorySummaryBody'),
+  detailHistoryNavTitle: byId('detailHistoryNavTitle'),
+  detailHistoryNavBackBtn: byId('detailHistoryNavBackBtn'),
+  detailHistoryNavCloseBtn: byId('detailHistoryNavCloseBtn'),
   detailActionPrimary: byId('detailActionPrimary'),
   detailActionMenu: byId('detailActionMenu'),
   detailMenuPopover: byId('detailMenuPopover'),
-  detailActionIconWeb: byId('detailActionIconWeb'),
+  detailActionEdit: byId('detailActionEdit'),
+  detailActionHistory: byId('detailActionHistory'),
+  detailActionDelete: byId('detailActionDelete'),
   detailPrimaryRow: byId('detailPrimaryRow'),
   detailPrimaryActionA: byId('detailPrimaryActionA'),
   detailPrimaryActionB: byId('detailPrimaryActionB'),
@@ -142,6 +162,21 @@ const elements = {
   detailTertiaryRow: byId('detailTertiaryRow'),
   detailTertiaryActionA: byId('detailTertiaryActionA'),
   detailTertiaryActionB: byId('detailTertiaryActionB'),
+  detailEditCancelBtn: byId('detailEditCancelBtn'),
+  detailEditSaveBtn: byId('detailEditSaveBtn'),
+  detailEditError: byId('detailEditError'),
+  detailHistoryPanel: byId('detailHistoryPanel'),
+  detailHistoryListView: byId('detailHistoryListView'),
+  detailHistoryEntryView: byId('detailHistoryEntryView'),
+  detailHistoryList: byId('detailHistoryList'),
+  detailHistoryEntryDetail: byId('detailHistoryEntryDetail'),
+  detailHistoryEmpty: byId('detailHistoryEmpty'),
+  confirmDeleteModal: byId('confirmDeleteModal'),
+  confirmDeleteTitle: byId('confirmDeleteTitle'),
+  confirmDeleteBody: byId('confirmDeleteBody'),
+  confirmDeleteConfirmBtn: byId('confirmDeleteConfirmBtn'),
+  confirmDeleteCancelBtn: byId('confirmDeleteCancelBtn'),
+  copyToast: byId('copyToast'),
   lockBtn: byId('lockBtn'),
 };
 
@@ -205,6 +240,20 @@ let transportReconnectTimer = null;
 let lastStableStateSnapshot = null;
 let lastStableStateSnapshotAt = 0;
 let readySearchShouldAutoFocus = true;
+let detailPanelMode = 'view';
+let detailEditDraft = null;
+let detailEditPasswordVisible = false;
+let detailHistoryLoading = false;
+let detailHistoryError = '';
+let detailHistoryCursor = null;
+let detailHistoryRecords = [];
+let detailHistoryItemId = null;
+let detailHistorySelectedId = null;
+let detailHistoryView = 'list';
+let detailHistorySummaryExpanded = false;
+const detailHistoryRevealKeys = new Set();
+let detailDeleteConfirmResolver = null;
+let copyToastTimer = null;
 let passwordGeneratorOpen = false;
 let passwordGeneratorState = createDefaultGeneratorState();
 let passwordGeneratorValue = generatePassword(passwordGeneratorState);
@@ -266,6 +315,229 @@ function ensureDetailSecretStateForItem(itemId) {
   if (detailSecretState.itemId !== itemId) {
     resetDetailSecretState(itemId);
   }
+}
+
+function supportsPopupEditing(itemType) {
+  return itemType === 'login' || itemType === 'card' || itemType === 'document' || itemType === 'secure_note';
+}
+
+function cloneCustomFieldsForEdit(fields) {
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields
+    .map((entry) => ({
+      label: typeof entry?.label === 'string' ? entry.label : '',
+      value: typeof entry?.value === 'string' ? entry.value : '',
+    }))
+    .filter((entry) => entry.label || entry.value);
+}
+
+function createEditDraftFromSelected(selected) {
+  const payload = selected?.payload && typeof selected.payload === 'object' ? selected.payload : null;
+  if (!selected || !payload || !supportsPopupEditing(selected.itemType)) {
+    return null;
+  }
+  if (selected.itemType === 'login') {
+    return {
+      itemType: 'login',
+      title: typeof payload.title === 'string' ? payload.title : selected.title ?? '',
+      username: typeof payload.username === 'string' ? payload.username : '',
+      password: typeof payload.password === 'string' ? payload.password : '',
+      urls: Array.isArray(payload.urls) ? payload.urls.filter((entry) => typeof entry === 'string') : [],
+      notes: typeof payload.notes === 'string' ? payload.notes : '',
+      customFields: cloneCustomFieldsForEdit(payload.customFields),
+    };
+  }
+  if (selected.itemType === 'card') {
+    return {
+      itemType: 'card',
+      title: typeof payload.title === 'string' ? payload.title : selected.title ?? '',
+      cardholderName: typeof payload.cardholderName === 'string' ? payload.cardholderName : '',
+      brand: typeof payload.brand === 'string' ? payload.brand : '',
+      number: typeof payload.number === 'string' ? payload.number : '',
+      expiryMonth: typeof payload.expiryMonth === 'string' ? payload.expiryMonth : '',
+      expiryYear: typeof payload.expiryYear === 'string' ? payload.expiryYear : '',
+      securityCode: typeof payload.securityCode === 'string' ? payload.securityCode : '',
+      notes: typeof payload.notes === 'string' ? payload.notes : '',
+      customFields: cloneCustomFieldsForEdit(payload.customFields),
+    };
+  }
+  if (selected.itemType === 'document') {
+    return {
+      itemType: 'document',
+      title: typeof payload.title === 'string' ? payload.title : selected.title ?? '',
+      content: typeof payload.content === 'string' ? payload.content : '',
+      customFields: cloneCustomFieldsForEdit(payload.customFields),
+    };
+  }
+  return {
+    itemType: 'secure_note',
+    title: typeof payload.title === 'string' ? payload.title : selected.title ?? '',
+    content: typeof payload.content === 'string' ? payload.content : '',
+    customFields: cloneCustomFieldsForEdit(payload.customFields),
+  };
+}
+
+function escapeAttribute(value) {
+  return sanitizeText(String(value ?? ''));
+}
+
+function normalizeInlineEditableText(node) {
+  if (!(node instanceof HTMLElement)) {
+    return '';
+  }
+  return (node.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function historyChangeTypeLabel(changeType) {
+  if (changeType === 'create') {
+    return 'Created';
+  }
+  if (changeType === 'delete') {
+    return 'Deleted';
+  }
+  if (changeType === 'restore') {
+    return 'Restored';
+  }
+  return 'Updated';
+}
+
+function normalizeHistoryDiffLabel(path) {
+  if (typeof path !== 'string' || path.trim().length === 0) {
+    return 'Field';
+  }
+  if (path.startsWith('customFields')) {
+    return 'Custom field';
+  }
+  if (path === 'urls') {
+    return 'URLs';
+  }
+  if (path === 'securityCode') {
+    return 'Security code';
+  }
+  if (path === 'expiryMonth') {
+    return 'Expiry month';
+  }
+  if (path === 'expiryYear') {
+    return 'Expiry year';
+  }
+  if (path === 'cardholderName') {
+    return 'Cardholder name';
+  }
+  return path.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (char) => char.toUpperCase());
+}
+
+function parseHistoryValueByField(fieldPath, rawValue) {
+  if (typeof rawValue !== 'string' || rawValue.length === 0) {
+    return '';
+  }
+  if (fieldPath === 'urls') {
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((entry) => typeof entry === 'string').join('\n');
+      }
+    } catch {
+      // keep raw when payload is not JSON array.
+    }
+  }
+  return rawValue;
+}
+
+function parseCustomFieldsHistoryValue(rawValue) {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => ({
+        label: typeof entry?.label === 'string' ? entry.label.trim() : '',
+        value: typeof entry?.value === 'string' ? entry.value : '',
+      }))
+      .filter((entry) => entry.label.length > 0 || entry.value.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function buildHistoryDiffValueHtml(fieldPath, rawValue, visible) {
+  if (!visible) {
+    return `<p class="detail-value">••••••</p>`;
+  }
+
+  if (fieldPath === 'customFields') {
+    const customFields = parseCustomFieldsHistoryValue(rawValue);
+    if (!customFields.length) {
+      return `<p class="detail-history-empty-value">—</p>`;
+    }
+    return customFields
+      .map(
+        (entry) => `
+          <div class="detail-history-value-row">
+            <p class="detail-label">${sanitizeText(entry.label || 'Field')}</p>
+            <p class="detail-value">${sanitizeText(entry.value || '—')}</p>
+          </div>
+        `,
+      )
+      .join('');
+  }
+
+  if (fieldPath === 'urls') {
+    const parsedValue = parseHistoryValueByField(fieldPath, rawValue);
+    if (typeof parsedValue !== 'string' || parsedValue.trim().length === 0) {
+      return `<p class="detail-history-empty-value">—</p>`;
+    }
+    return parsedValue
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(
+        (line) => `
+          <div class="detail-history-value-row">
+            <p class="detail-value">${sanitizeText(line)}</p>
+          </div>
+        `,
+      )
+      .join('');
+  }
+
+  const parsedValue = parseHistoryValueByField(fieldPath, rawValue);
+  const normalized = typeof parsedValue === 'string' ? parsedValue : '';
+  if (normalized.trim().length === 0) {
+    return `<p class="detail-history-empty-value">—</p>`;
+  }
+  return `<p class="detail-value">${sanitizeText(normalized)}</p>`;
+}
+
+function summarizeHistoryRecord(record) {
+  const entries = Array.isArray(record?.diffEntries) ? record.diffEntries : [];
+  if (!entries.length) {
+    if (record?.changeType === 'create') {
+      return 'Item created';
+    }
+    if (record?.changeType === 'delete') {
+      return 'Item moved to trash';
+    }
+    if (record?.changeType === 'restore') {
+      return 'Item restored';
+    }
+    return 'Updated';
+  }
+  const labels = [];
+  for (const entry of entries) {
+    const normalized = normalizeHistoryDiffLabel(entry?.fieldPath ?? '');
+    if (!labels.includes(normalized)) {
+      labels.push(normalized);
+    }
+  }
+  const shown = labels.slice(0, 3);
+  const suffix = labels.length > shown.length ? ` +${labels.length - shown.length}` : '';
+  return `Changed: ${shown.join(', ')}${suffix}`;
 }
 
 function clearLinkPollingTimer() {
@@ -692,7 +964,13 @@ function setBusy(nextBusy) {
     ['searchClearBtn', elements.searchClearBtn],
     ['detailActionPrimary', elements.detailActionPrimary],
     ['detailActionMenu', elements.detailActionMenu],
-    ['detailActionIconWeb', elements.detailActionIconWeb],
+    ['detailHistoryNavBackBtn', elements.detailHistoryNavBackBtn],
+    ['detailHistoryNavCloseBtn', elements.detailHistoryNavCloseBtn],
+    ['detailActionEdit', elements.detailActionEdit],
+    ['detailActionHistory', elements.detailActionHistory],
+    ['detailActionDelete', elements.detailActionDelete],
+    ['confirmDeleteConfirmBtn', elements.confirmDeleteConfirmBtn],
+    ['confirmDeleteCancelBtn', elements.confirmDeleteCancelBtn],
     ['lockBtn', elements.lockBtn],
   ];
   controls.forEach((control) => {
@@ -707,6 +985,9 @@ function setBusy(nextBusy) {
     button.disabled = nextBusy;
   });
   if (!nextBusy) {
+    if (resolveEffectivePopupPhase(currentState) === 'ready') {
+      renderCredentialDetails();
+    }
     if (!elements.readySection.hidden) {
       scheduleReadySearchFocus();
     }
@@ -1419,6 +1700,13 @@ function scheduleRealtimePopupRefresh(domains) {
     const shouldRefreshList = domainsToApply.some(
       (domain) => domain === 'vault' || domain === 'icons_manual' || domain === 'icons_state',
     );
+    const shouldRefreshHistory = domainsToApply.includes('vault_history');
+    if (shouldRefreshHistory && resolvePopupPhase(currentState) === 'ready') {
+      void refreshSelectedItemHistory({
+        force: true,
+        silent: detailPanelMode !== 'history',
+      });
+    }
     if (!shouldRefreshList || resolvePopupPhase(currentState) !== 'ready') {
       return;
     }
@@ -1457,6 +1745,17 @@ function currentFilterSelectionValue() {
     return 'suggested';
   }
   return activeTypeFilter;
+}
+
+function enforceClientTypeFilter(items) {
+  const source = Array.isArray(items) ? items : [];
+  if (activeTypeFilter === 'trash') {
+    return source.filter((item) => item?.isDeleted === true);
+  }
+  if (activeTypeFilter !== 'all') {
+    return source.filter((item) => item?.isDeleted !== true && item?.itemType === activeTypeFilter);
+  }
+  return source.filter((item) => item?.isDeleted !== true);
 }
 
 function renderFilterDropdown() {
@@ -1619,15 +1918,570 @@ function configureDetailRow(nodes, rowModel) {
 
   nodes.row.hidden = false;
   nodes.label.textContent = rowModel.label;
-  nodes.value.textContent = rowModel.value || '—';
+  const rowActions = Array.isArray(rowModel.actions) ? rowModel.actions : [];
+  const passwordToggleAction =
+    rowModel.password === true
+      ? rowActions.find((action) => action && action.id === 'toggle_password_visibility') ?? null
+      : null;
+  const visibleActions = passwordToggleAction
+    ? rowActions.filter((action) => action && action.id !== 'toggle_password_visibility')
+    : rowActions;
+  if (passwordToggleAction) {
+    const toggleLabel =
+      typeof passwordToggleAction.label === 'string' && passwordToggleAction.label.trim().length > 0
+        ? passwordToggleAction.label
+        : 'Show password';
+    const toggleIcon = toggleLabel.toLowerCase().includes('hide') ? 'visibility_off' : 'visibility';
+    nodes.value.innerHTML = `
+      <span class="detail-password-text">${sanitizeText(rowModel.value || '—')}</span>
+      <button
+        type="button"
+        class="detail-password-inline-toggle row-action"
+        data-inline-row-action="${sanitizeText(passwordToggleAction.id)}"
+        aria-label="${sanitizeText(toggleLabel)}"
+        title="${sanitizeText(toggleLabel)}"
+      >
+        <span class="material-symbols-rounded row-action-glyph" aria-hidden="true">${sanitizeText(toggleIcon)}</span>
+      </button>
+    `;
+  } else {
+    nodes.value.textContent = rowModel.value || '—';
+  }
   nodes.value.classList.toggle('detail-password', rowModel.password === true);
+
+  if (detailPanelMode === 'edit') {
+    nodes.row.dataset.defaultAction = '';
+    nodes.row.classList.remove('is-clickable');
+    hideRowAction(nodes.actionA);
+    hideRowAction(nodes.actionB);
+    return;
+  }
 
   const defaultAction = rowModel.defaultAction || '';
   nodes.row.dataset.defaultAction = defaultAction;
   nodes.row.classList.toggle('is-clickable', Boolean(defaultAction));
 
-  showRowAction(nodes.actionA, rowModel.actions?.[0]);
-  showRowAction(nodes.actionB, rowModel.actions?.[1]);
+  showRowAction(nodes.actionA, visibleActions[0]);
+  showRowAction(nodes.actionB, visibleActions[1]);
+}
+
+function setDetailEditError(message) {
+  const normalized = typeof message === 'string' ? message.trim() : '';
+  if (!normalized) {
+    elements.detailEditError.hidden = true;
+    elements.detailEditError.textContent = '';
+    return;
+  }
+  elements.detailEditError.hidden = false;
+  elements.detailEditError.textContent = normalized;
+}
+
+function resolveHistorySourceLabel(record) {
+  if (typeof record?.sourceDeviceName === 'string' && record.sourceDeviceName.trim().length > 0) {
+    return record.sourceDeviceName;
+  }
+  if (typeof record?.sourceDeviceId === 'string' && record.sourceDeviceId.trim().length > 0) {
+    return record.sourceDeviceId;
+  }
+  return 'Unknown device';
+}
+
+function ensureHistorySelection() {
+  if (!Array.isArray(detailHistoryRecords) || detailHistoryRecords.length === 0) {
+    detailHistorySelectedId = null;
+    return;
+  }
+  if (!detailHistorySelectedId) {
+    detailHistorySelectedId = detailHistoryRecords[0].historyId;
+    return;
+  }
+  if (!detailHistoryRecords.some((record) => record.historyId === detailHistorySelectedId)) {
+    detailHistorySelectedId = detailHistoryRecords[0].historyId;
+  }
+}
+
+function renderInlineEditorsForRows(selectedItem) {
+  if (detailPanelMode !== 'edit' || !detailEditDraft || !selectedItem) {
+    return;
+  }
+
+  if (selectedItem.itemType === 'login') {
+    elements.detailPrimaryValue.classList.remove('detail-password');
+    elements.detailPrimaryValue.innerHTML = `
+      <input data-edit-field="username" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.username)}" />
+    `;
+    elements.detailSecondaryValue.classList.remove('detail-password');
+    const passwordEditorType = detailEditPasswordVisible ? 'text' : 'password';
+    const passwordToggleLabel = detailEditPasswordVisible ? 'Hide password' : 'Show password';
+    const passwordToggleGlyph = detailEditPasswordVisible ? 'visibility_off' : 'visibility';
+    elements.detailSecondaryValue.innerHTML = `
+      <div class="detail-password-editor-shell">
+        <input data-edit-field="password" class="detail-row-editor" type="${passwordEditorType}" value="${escapeAttribute(detailEditDraft.password)}" />
+        <button
+          type="button"
+          class="detail-password-inline-toggle row-action"
+          data-edit-password-toggle="true"
+          aria-label="${passwordToggleLabel}"
+          title="${passwordToggleLabel}"
+        >
+          <span class="material-symbols-rounded row-action-glyph" aria-hidden="true">${passwordToggleGlyph}</span>
+        </button>
+      </div>
+    `;
+    elements.detailTertiaryValue.classList.remove('detail-password');
+    elements.detailTertiaryValue.innerHTML = `
+      <textarea data-edit-field="urls" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(detailEditDraft.urls.join('\n'))}</textarea>
+    `;
+    return;
+  }
+
+  if (selectedItem.itemType === 'card') {
+    elements.detailPrimaryValue.classList.remove('detail-password');
+    elements.detailPrimaryValue.innerHTML = `
+      <input data-edit-field="number" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.number)}" />
+    `;
+    elements.detailSecondaryValue.classList.remove('detail-password');
+    elements.detailSecondaryValue.innerHTML = `
+      <input data-edit-field="securityCode" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.securityCode)}" />
+    `;
+    elements.detailTertiaryValue.classList.remove('detail-password');
+    elements.detailTertiaryValue.innerHTML = `
+      <div class="detail-row-editor-split">
+        <input data-edit-field="expiryMonth" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.expiryMonth)}" placeholder="MM" />
+        <input data-edit-field="expiryYear" class="detail-row-editor" type="text" value="${escapeAttribute(detailEditDraft.expiryYear)}" placeholder="YYYY" />
+      </div>
+    `;
+    return;
+  }
+
+  if (selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note') {
+    elements.detailSecondaryValue.classList.remove('detail-password');
+    elements.detailSecondaryValue.innerHTML = `
+      <textarea data-edit-field="content" class="detail-row-editor detail-row-editor--textarea">${escapeAttribute(detailEditDraft.content)}</textarea>
+    `;
+  }
+}
+
+function resolveNotesValueForSelected(selectedItem) {
+  const payload = selectedItem?.payload && typeof selectedItem.payload === 'object' ? selectedItem.payload : null;
+  if (!payload) {
+    return { label: 'Notes', value: '', editField: 'notes' };
+  }
+  if (selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note') {
+    return {
+      label: 'Content',
+      value: typeof payload.content === 'string' ? payload.content : '',
+      editField: 'content',
+    };
+  }
+  return {
+    label: 'Notes',
+    value: typeof payload.notes === 'string' ? payload.notes : '',
+    editField: 'notes',
+  };
+}
+
+function renderNotesSection(selectedItem) {
+  if (!selectedItem) {
+    elements.detailNotesRow.hidden = true;
+    return;
+  }
+  const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const notesState = resolveNotesValueForSelected(selectedItem);
+  elements.detailNotesRow.hidden = false;
+  elements.detailNotesLabel.textContent = notesState.label;
+  if (isEditMode) {
+    elements.detailNotesRow.dataset.defaultAction = '';
+    elements.detailNotesRow.classList.remove('is-clickable');
+    const draftValue =
+      selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note'
+        ? detailEditDraft?.content ?? ''
+        : detailEditDraft?.notes ?? '';
+    elements.detailNotesValue.hidden = true;
+    elements.detailNotesEditor.hidden = false;
+    elements.detailNotesEditor.setAttribute('data-edit-field', notesState.editField);
+    elements.detailNotesEditor.value = draftValue;
+    hideRowAction(elements.detailNotesActionA);
+    return;
+  }
+  elements.detailNotesValue.hidden = false;
+  elements.detailNotesEditor.hidden = true;
+  elements.detailNotesEditor.removeAttribute('data-edit-field');
+  elements.detailNotesValue.textContent = notesState.value || '—';
+  const copyActionId =
+    selectedItem.itemType === 'document' || selectedItem.itemType === 'secure_note' ? 'copy_content' : 'copy_note';
+  if (notesState.value && notesState.value.trim().length > 0) {
+    elements.detailNotesRow.dataset.defaultAction = copyActionId;
+    elements.detailNotesRow.classList.add('is-clickable');
+    showRowAction(elements.detailNotesActionA, {
+      id: copyActionId,
+      label: `Copy ${notesState.label.toLowerCase()}`,
+    });
+  } else {
+    elements.detailNotesRow.dataset.defaultAction = '';
+    elements.detailNotesRow.classList.remove('is-clickable');
+    hideRowAction(elements.detailNotesActionA);
+  }
+}
+
+function renderCustomFieldsSection(selectedItem) {
+  if (!selectedItem) {
+    elements.detailCustomFieldsSection.hidden = true;
+    elements.detailCustomFieldsList.innerHTML = '';
+    elements.detailCustomFieldAddBtn.hidden = true;
+    elements.detailCustomFieldsTitle.hidden = true;
+    return;
+  }
+  const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const fields = isEditMode
+    ? Array.isArray(detailEditDraft?.customFields)
+      ? detailEditDraft.customFields
+      : []
+    : cloneCustomFieldsForEdit(selectedItem.payload?.customFields);
+  const payload = selectedItem.payload && typeof selectedItem.payload === 'object' ? selectedItem.payload : {};
+  const extraRows = [];
+  const renderReadonlyNativeRow = (label, value) => `
+    <section class="detail-custom-field-native">
+      <div class="detail-row">
+        <div class="detail-row-content">
+          <p class="detail-label">${sanitizeText(label)}</p>
+          <p class="detail-value">${sanitizeText(value || '—')}</p>
+        </div>
+      </div>
+    </section>
+  `;
+  if (selectedItem.itemType === 'card') {
+    if (isEditMode) {
+      extraRows.push(`
+        <div class="detail-custom-field-row">
+          <div class="detail-custom-field-row-head">
+            <p class="detail-custom-field-label">Cardholder name</p>
+          </div>
+          <input
+            data-edit-field="cardholderName"
+            class="detail-row-editor"
+            type="text"
+            value="${escapeAttribute(detailEditDraft.cardholderName ?? '')}"
+          />
+        </div>
+      `);
+      extraRows.push(`
+        <div class="detail-custom-field-row">
+          <div class="detail-custom-field-row-head">
+            <p class="detail-custom-field-label">Brand</p>
+          </div>
+          <input
+            data-edit-field="brand"
+            class="detail-row-editor"
+            type="text"
+            value="${escapeAttribute(detailEditDraft.brand ?? '')}"
+          />
+        </div>
+      `);
+    } else {
+      extraRows.push(renderReadonlyNativeRow('Cardholder name', payload.cardholderName || '—'));
+      extraRows.push(renderReadonlyNativeRow('Brand', payload.brand || '—'));
+    }
+  }
+  elements.detailCustomFieldsTitle.hidden = !isEditMode;
+  elements.detailCustomFieldAddBtn.hidden = !isEditMode;
+  elements.detailCustomFieldsSection.hidden = !isEditMode && fields.length === 0 && extraRows.length === 0;
+  if (!isEditMode && fields.length === 0 && extraRows.length === 0) {
+    elements.detailCustomFieldsList.innerHTML = '';
+    return;
+  }
+  if (isEditMode) {
+    const customRowsHtml =
+      fields
+        .map(
+          (entry, index) => `
+            <div class="detail-custom-field-row" data-custom-field-row="${index}">
+              <div class="detail-custom-field-row-head">
+                <p
+                  data-custom-field-label-inline="${index}"
+                  class="detail-custom-field-inline-label"
+                  contenteditable="true"
+                  spellcheck="false"
+                  role="textbox"
+                  aria-label="Custom field label"
+                  data-placeholder="Field label"
+                >${escapeAttribute(entry.label)}</p>
+                <button type="button" class="btn-secondary" data-custom-field-remove="${index}">Remove</button>
+              </div>
+              <textarea
+                data-custom-field-value="${index}"
+                class="detail-row-editor detail-row-editor--textarea"
+                placeholder="Value"
+              >${escapeAttribute(entry.value)}</textarea>
+            </div>
+          `,
+        )
+        .join('');
+    elements.detailCustomFieldsList.innerHTML =
+      `${extraRows.join('')}${customRowsHtml || '<p class="empty-state">No custom fields yet.</p>'}`;
+    return;
+  }
+  const customRows = fields
+    .map(
+      (entry) => `
+        <section class="detail-custom-field-native">
+          <div class="detail-row">
+            <div class="detail-row-content">
+              <p class="detail-label">${sanitizeText(entry.label || 'Field')}</p>
+              <p class="detail-value">${sanitizeText(entry.value || '—')}</p>
+            </div>
+          </div>
+        </section>
+      `,
+    )
+    .join('');
+  elements.detailCustomFieldsList.innerHTML = `${extraRows.join('')}${customRows}`;
+}
+
+function renderDetailHistorySummary(selectedItem) {
+  if (!selectedItem || detailPanelMode === 'history') {
+    elements.detailHistorySummarySection.hidden = true;
+    elements.detailHistorySummarySection.classList.remove('is-expanded');
+    return;
+  }
+  elements.detailHistorySummarySection.hidden = false;
+  if (detailHistoryLoading && detailHistoryRecords.length === 0) {
+    elements.detailHistorySummaryTitle.textContent = 'Loading history...';
+    elements.detailHistorySummaryBody.hidden = true;
+    elements.detailHistorySummarySection.classList.remove('is-expanded');
+    elements.detailHistorySummaryChevron.textContent = 'chevron_right';
+    return;
+  }
+  const latest = detailHistoryRecords[0] ?? null;
+  if (!latest) {
+    elements.detailHistorySummaryTitle.textContent = 'No history entries yet.';
+    elements.detailHistorySummaryBody.hidden = true;
+    elements.detailHistorySummarySection.classList.remove('is-expanded');
+    elements.detailHistorySummaryChevron.textContent = 'chevron_right';
+    return;
+  }
+  elements.detailHistorySummaryTitle.textContent = `Last edited ${formatTime(latest.createdAt)}`;
+  if (!detailHistorySummaryExpanded) {
+    elements.detailHistorySummaryBody.hidden = true;
+    elements.detailHistorySummarySection.classList.remove('is-expanded');
+    elements.detailHistorySummaryChevron.textContent = 'chevron_right';
+    return;
+  }
+  elements.detailHistorySummaryChevron.textContent = 'expand_more';
+  elements.detailHistorySummaryBody.hidden = false;
+  elements.detailHistorySummarySection.classList.add('is-expanded');
+  elements.detailHistorySummaryBody.innerHTML = `
+    <p>${sanitizeText(historyChangeTypeLabel(latest.changeType))} ${sanitizeText(formatTime(latest.createdAt))}</p>
+    <p>${sanitizeText(resolveHistorySourceLabel(latest))}</p>
+  `;
+}
+
+function renderDetailHistoryPanel() {
+  const showPanel = detailPanelMode === 'history';
+  elements.detailHistoryPanel.hidden = !showPanel;
+  if (!showPanel) {
+    elements.detailHistoryListView.hidden = false;
+    elements.detailHistoryEntryView.hidden = true;
+    elements.detailHistoryList.innerHTML = '';
+    elements.detailHistoryEntryDetail.innerHTML = '';
+    elements.detailHistoryEmpty.hidden = true;
+    return;
+  }
+  const showEntryView = detailHistoryView === 'entry';
+  elements.detailHistoryListView.hidden = showEntryView;
+  elements.detailHistoryEntryView.hidden = !showEntryView;
+  if (detailHistoryLoading) {
+    if (showEntryView) {
+      elements.detailHistoryEntryDetail.innerHTML = '<p class="empty-state">Loading history...</p>';
+    } else {
+      elements.detailHistoryList.innerHTML = '<p class="empty-state">Loading history...</p>';
+    }
+    elements.detailHistoryEmpty.hidden = true;
+    return;
+  }
+  if (detailHistoryError) {
+    if (showEntryView) {
+      elements.detailHistoryEntryDetail.innerHTML = `<p class="empty-state">${sanitizeText(detailHistoryError)}</p>`;
+    } else {
+      elements.detailHistoryList.innerHTML = `<p class="empty-state">${sanitizeText(detailHistoryError)}</p>`;
+    }
+    elements.detailHistoryEmpty.hidden = true;
+    return;
+  }
+  if (!Array.isArray(detailHistoryRecords) || detailHistoryRecords.length === 0) {
+    elements.detailHistoryList.innerHTML = '';
+    elements.detailHistoryEntryDetail.innerHTML = '';
+    elements.detailHistoryEmpty.hidden = showEntryView;
+    return;
+  }
+  ensureHistorySelection();
+  elements.detailHistoryEmpty.hidden = true;
+
+  const selectedRecord =
+    detailHistoryRecords.find((record) => record.historyId === detailHistorySelectedId) ?? detailHistoryRecords[0];
+  if (!showEntryView) {
+    const timelineHtml = detailHistoryRecords
+      .map((record) => {
+        const isActive = record.historyId === detailHistorySelectedId;
+        const summary = summarizeHistoryRecord(record);
+        return `
+          <button
+            type="button"
+            class="detail-history-timeline-item ${isActive ? 'is-active' : ''}"
+            data-history-select="${sanitizeText(record.historyId)}"
+          >
+            <p class="detail-history-timeline-item-title">${sanitizeText(historyChangeTypeLabel(record?.changeType ?? 'update'))}</p>
+            <p class="detail-history-timeline-item-meta">${sanitizeText(formatTime(record?.createdAt ?? ''))}</p>
+            <p class="detail-history-timeline-item-meta">${sanitizeText(resolveHistorySourceLabel(record))}</p>
+            <p class="detail-history-timeline-item-hint">${sanitizeText(summary)}</p>
+          </button>
+        `;
+      })
+      .join('');
+    elements.detailHistoryList.innerHTML = timelineHtml;
+    elements.detailHistoryEntryDetail.innerHTML = '';
+    return;
+  }
+
+  const selectedDiffEntries = Array.isArray(selectedRecord?.diffEntries) ? selectedRecord.diffEntries : [];
+  const diffHtml = selectedDiffEntries
+    .map((entry) => {
+      const fieldPath = typeof entry?.fieldPath === 'string' ? entry.fieldPath : 'field';
+      const isPasswordField = fieldPath === 'password';
+      const revealKey = `${selectedRecord.historyId}:${entry.fieldPath}`;
+      const visible = !isPasswordField || detailHistoryRevealKeys.has(revealKey);
+      const beforeHtml = buildHistoryDiffValueHtml(fieldPath, typeof entry?.before === 'string' ? entry.before : '', visible);
+      const afterHtml = buildHistoryDiffValueHtml(fieldPath, typeof entry?.after === 'string' ? entry.after : '', visible);
+      return `
+        <div class="detail-history-field-block">
+          <p class="detail-history-field-title">${sanitizeText(normalizeHistoryDiffLabel(fieldPath))}</p>
+          <div class="detail-history-compare-grid">
+            <section class="detail-history-compare-side">
+              <div class="detail-row">
+                <div class="detail-row-content">
+                  <p class="detail-label">Before</p>
+                  <div class="detail-history-value-stack">${beforeHtml}</div>
+                </div>
+              </div>
+            </section>
+            <section class="detail-history-compare-side">
+              <div class="detail-row">
+                <div class="detail-row-content">
+                  <p class="detail-label">After</p>
+                  <div class="detail-history-value-stack">${afterHtml}</div>
+                </div>
+              </div>
+            </section>
+          </div>
+          ${isPasswordField ? `<button type="button" class="btn-secondary detail-history-reveal" data-history-reveal="${sanitizeText(revealKey)}">${visible ? 'Hide' : 'Reveal'}</button>` : ''}
+        </div>
+      `;
+    })
+    .join('');
+
+  elements.detailHistoryList.innerHTML = '';
+  elements.detailHistoryEntryDetail.innerHTML = `
+    <div class="detail-history-entry-head">
+      <p class="detail-history-entry-title">${sanitizeText(historyChangeTypeLabel(selectedRecord?.changeType ?? 'update'))}</p>
+      <p class="detail-history-entry-meta">${sanitizeText(formatTime(selectedRecord?.createdAt ?? ''))} • ${sanitizeText(resolveHistorySourceLabel(selectedRecord))}</p>
+    </div>
+    <div class="detail-history-diff">${diffHtml || '<p class="detail-history-entry-meta">No field diffs recorded.</p>'}</div>
+  `;
+}
+
+function renderDetailPanels() {
+  const selected = getSelectedCredential();
+  const isEditMode = detailPanelMode === 'edit' && !!detailEditDraft;
+  const isHistoryMode = detailPanelMode === 'history';
+  const isHistoryEntryMode = isHistoryMode && detailHistoryView === 'entry';
+  elements.detailMainSections.hidden = isHistoryMode || !selected;
+  elements.detailActionPrimary.hidden = isEditMode || isHistoryMode;
+  elements.detailActionMenu.hidden = isEditMode || isHistoryMode;
+  elements.detailEditCancelBtn.hidden = !isEditMode;
+  elements.detailEditSaveBtn.hidden = !isEditMode;
+  elements.detailHistoryNavTitle.hidden = !isHistoryMode;
+  elements.detailHistoryNavBackBtn.hidden = !isHistoryEntryMode;
+  elements.detailHistoryNavCloseBtn.hidden = !isHistoryMode;
+  elements.detailHistoryNavTitle.textContent = 'History';
+  elements.detailHistoryNavBackBtn.disabled = false;
+  elements.credentialDetailsContent.classList.toggle('vault-detail-history', isHistoryMode);
+  if (isHistoryMode) {
+    elements.detailIconShell.classList.remove('is-editable');
+    elements.detailIconEditBtn.hidden = true;
+    elements.detailIconEditBtn.disabled = true;
+  }
+  elements.detailTitle.contentEditable = isEditMode ? 'true' : 'false';
+  elements.detailTitle.classList.toggle('is-inline-editing', isEditMode);
+  elements.detailTitle.dataset.placeholder = 'Item title';
+  if (!isEditMode) {
+    setDetailEditError('');
+  }
+  if (isEditMode && selected && detailEditDraft) {
+    if (normalizeInlineEditableText(elements.detailTitle).length === 0) {
+      elements.detailTitle.textContent = detailEditDraft.title;
+    }
+    renderInlineEditorsForRows(selected);
+  }
+  if (isHistoryMode) {
+    elements.detailNotesRow.hidden = true;
+    elements.detailCustomFieldsSection.hidden = true;
+  } else {
+    renderNotesSection(selected);
+    renderCustomFieldsSection(selected);
+  }
+  renderDetailHistorySummary(selected);
+  renderDetailHistoryPanel();
+}
+
+function clearDetailTransientPanels(options = {}) {
+  const preserveDeleteConfirmation = options?.preserveDeleteConfirmation === true;
+  if (!preserveDeleteConfirmation && !elements.confirmDeleteModal.hidden) {
+    resolveDeleteConfirmation(false);
+  }
+  detailPanelMode = 'view';
+  detailEditDraft = null;
+  detailEditPasswordVisible = false;
+  detailHistoryLoading = false;
+  detailHistoryError = '';
+  detailHistoryCursor = null;
+  detailHistoryRecords = [];
+  detailHistoryItemId = null;
+  detailHistorySelectedId = null;
+  detailHistoryView = 'list';
+  detailHistorySummaryExpanded = false;
+  detailHistoryRevealKeys.clear();
+  elements.detailTitle.contentEditable = 'false';
+  elements.detailTitle.classList.remove('is-inline-editing');
+  renderDetailPanels();
+}
+
+function syncDetailPanelStateForSelected() {
+  const selected = getSelectedCredential();
+  if (!selected) {
+    clearDetailTransientPanels({
+      preserveDeleteConfirmation: true,
+    });
+    return;
+  }
+  if (detailPanelMode === 'edit') {
+    detailEditDraft = createEditDraftFromSelected(selected);
+    if (!detailEditDraft) {
+      detailPanelMode = 'view';
+    }
+  }
+  if (detailHistoryItemId !== selected.itemId) {
+    detailHistoryItemId = selected.itemId;
+    detailHistoryLoading = false;
+    detailHistoryError = '';
+    detailHistoryCursor = null;
+    detailHistoryRecords = [];
+    detailHistorySelectedId = null;
+    detailHistoryView = 'list';
+    detailHistorySummaryExpanded = false;
+    detailHistoryRevealKeys.clear();
+    void refreshSelectedItemHistory({ force: false, silent: true });
+  }
+  renderDetailPanels();
 }
 
 function closeDetailMenu() {
@@ -1638,6 +2492,32 @@ function toggleDetailMenu() {
   elements.detailMenuPopover.hidden = !elements.detailMenuPopover.hidden;
 }
 
+function resolveDeleteConfirmation(result) {
+  if (typeof detailDeleteConfirmResolver !== 'function') {
+    return;
+  }
+  const resolver = detailDeleteConfirmResolver;
+  detailDeleteConfirmResolver = null;
+  elements.confirmDeleteModal.hidden = true;
+  resolver(result === true);
+}
+
+function openDeleteConfirmationDialog(itemTitle) {
+  if (typeof detailDeleteConfirmResolver === 'function') {
+    resolveDeleteConfirmation(false);
+  }
+  const normalizedTitle =
+    typeof itemTitle === 'string' && itemTitle.trim().length > 0 ? itemTitle.trim() : 'this item';
+  elements.confirmDeleteTitle.textContent = `Delete “${normalizedTitle}”?`;
+  elements.confirmDeleteBody.textContent =
+    'This item will be moved to Trash immediately. You can restore deleted items for a limited time.';
+  elements.confirmDeleteModal.hidden = false;
+  elements.confirmDeleteConfirmBtn.focus();
+  return new Promise((resolve) => {
+    detailDeleteConfirmResolver = resolve;
+  });
+}
+
 function renderCredentialDetails() {
   const selectedItem = getSelectedCredential();
   applyLayoutState(resolveEffectivePopupPhase(currentState));
@@ -1645,14 +2525,26 @@ function renderCredentialDetails() {
 
   if (!selectedItem) {
     resetDetailSecretState(null);
+    clearDetailTransientPanels({
+      preserveDeleteConfirmation: true,
+    });
     elements.credentialDetailsLoading.hidden = true;
     elements.credentialDetailsContent.hidden = true;
     elements.detailIconShell.classList.remove('is-editable');
     elements.detailIconEditBtn.hidden = true;
     elements.detailIconEditBtn.disabled = true;
-    elements.detailActionIconWeb.disabled = true;
+    elements.detailActionEdit.disabled = true;
+    elements.detailActionHistory.disabled = true;
+    elements.detailActionDelete.disabled = true;
     elements.detailActionPrimary.disabled = true;
+    elements.detailActionPrimary.hidden = false;
     elements.detailActionMenu.disabled = true;
+    elements.detailActionMenu.hidden = false;
+    elements.detailEditCancelBtn.hidden = true;
+    elements.detailEditSaveBtn.hidden = true;
+    elements.detailTitle.contentEditable = 'false';
+    elements.detailTitle.classList.remove('is-inline-editing');
+    elements.detailMainSections.hidden = true;
     detailRows.forEach((nodes) => {
       configureDetailRow(nodes, null);
     });
@@ -1665,11 +2557,18 @@ function renderCredentialDetails() {
   elements.credentialDetailsContent.hidden = detailLoading;
   if (detailLoading) {
     closeDetailMenu();
+    clearDetailTransientPanels({
+      preserveDeleteConfirmation: true,
+    });
+    elements.detailTitle.contentEditable = 'false';
+    elements.detailTitle.classList.remove('is-inline-editing');
+    elements.detailMainSections.hidden = true;
     popupAutosizer?.schedule();
     return;
   }
 
   ensureDetailSecretStateForItem(selectedItem.itemId);
+  const isDeletedItem = selectedItem.isDeleted === true;
   const detailModel = buildDetailViewModel(selectedItem, {
     passwordVisible: detailSecretState.passwordVisible,
     passwordValue: detailSecretState.passwordValue,
@@ -1679,7 +2578,9 @@ function renderCredentialDetails() {
   elements.detailIconShell.classList.toggle('is-editable', iconEditable);
   elements.detailIconEditBtn.hidden = !iconEditable;
   elements.detailIconEditBtn.disabled = disableActions || !iconEditable;
-  elements.detailActionIconWeb.disabled = disableActions || !iconEditable;
+  elements.detailActionEdit.disabled = disableActions || isDeletedItem || !supportsPopupEditing(selectedItem.itemType);
+  elements.detailActionHistory.disabled = disableActions;
+  elements.detailActionDelete.disabled = disableActions || isDeletedItem;
   elements.detailMonogram.textContent = buildCredentialMonogram(selectedItem.title);
   const detailFaviconUrl = activeFaviconUrl(selectedItem);
   if (detailFaviconUrl) {
@@ -1701,7 +2602,49 @@ function renderCredentialDetails() {
 
   elements.detailActionPrimary.disabled = disableActions;
   elements.detailActionMenu.disabled = disableActions;
+  syncDetailPanelStateForSelected();
   popupAutosizer?.schedule();
+}
+
+function resolveCopyToastMessage(field) {
+  if (field === 'username') {
+    return 'Copied username';
+  }
+  if (field === 'password') {
+    return 'Copied password';
+  }
+  if (field === 'url') {
+    return 'Copied URL';
+  }
+  if (field === 'card_number') {
+    return 'Copied card number';
+  }
+  if (field === 'card_cvv') {
+    return 'Copied security code';
+  }
+  if (field === 'card_expiry') {
+    return 'Copied expiry';
+  }
+  if (field === 'content') {
+    return 'Copied content';
+  }
+  if (field === 'title') {
+    return 'Copied title';
+  }
+  return 'Copied';
+}
+
+function showCopyToast(message) {
+  const text = typeof message === 'string' && message.trim().length > 0 ? message.trim() : 'Copied';
+  elements.copyToast.textContent = text;
+  elements.copyToast.hidden = false;
+  if (copyToastTimer !== null) {
+    window.clearTimeout(copyToastTimer);
+  }
+  copyToastTimer = window.setTimeout(() => {
+    elements.copyToast.hidden = true;
+    copyToastTimer = null;
+  }, 1200);
 }
 
 function captureListScrollAnchor() {
@@ -1849,6 +2792,7 @@ function renderCredentialList(items, options = {}) {
     elements.credentialsList.querySelector('.vault-row.is-selected')?.getAttribute('data-item-id') ?? null;
   const previousAnchor = captureListScrollAnchor();
   const nextItemsRaw = Array.isArray(items) ? items : [];
+  const trashScopeActive = activeTypeFilter === 'trash';
   currentItems = sortCredentialItems(nextItemsRaw);
   const nextSelectedItemId = selectItemIdAfterRefresh(selectedItemId, currentItems);
   if (!(preserveSelectionOnEmpty && currentItems.length === 0 && nextSelectedItemId === null)) {
@@ -1921,6 +2865,17 @@ function renderCredentialList(items, options = {}) {
         <div class="empty-state">
           <p>No results for this search.</p>
           <button type="button" data-empty-action="clear-search">Clear search</button>
+        </div>
+      `;
+      renderCredentialDetails();
+      popupAutosizer?.schedule();
+      return;
+    }
+
+    if (trashScopeActive) {
+      elements.credentialsList.innerHTML = `
+        <div class="empty-state">
+          <p>No deleted items.</p>
         </div>
       `;
       renderCredentialDetails();
@@ -2012,7 +2967,20 @@ function renderCredentialList(items, options = {}) {
       });
       const rowClass = quickAction ? ' has-row-action' : '';
       let sideAction = '';
-      if (quickAction?.type === 'open-url') {
+      if (item?.isDeleted === true) {
+        sideAction = `
+          <button
+            type="button"
+            class="vault-row-side-hit is-restore"
+            data-row-action="restore-item"
+            data-item-id="${sanitizeText(item.itemId)}"
+            title="Restore item"
+            aria-label="Restore item"
+          >
+            Restore
+          </button>
+        `;
+      } else if (quickAction?.type === 'open-url') {
         sideAction = `
           <button
             type="button"
@@ -2041,8 +3009,10 @@ function renderCredentialList(items, options = {}) {
           </button>
         `;
       }
+      const resolvedRowClass =
+        sideAction && !rowClass.includes('has-row-action') ? `${rowClass} has-row-action` : rowClass;
       return `
-        <article class="vault-row${selectedClass}${rowClass}" data-item-id="${sanitizeText(item.itemId)}" tabindex="0">
+        <article class="vault-row${selectedClass}${resolvedRowClass}" data-item-id="${sanitizeText(item.itemId)}" tabindex="0">
           <div class="vault-row-main-hit" data-row-action="show-details" data-item-id="${sanitizeText(item.itemId)}">
             <div class="vault-row-content">
               ${buildListLeadingVisual(item)}
@@ -2148,10 +3118,11 @@ function renderState(payload) {
     }
   }
 
-  if (payload.items) {
-    renderCredentialList(payload.items);
-    if (effectivePhase === 'ready' && Array.isArray(payload.items) && payload.items.length > 0) {
-      lastReadyListSnapshot = payload.items.slice(0, 400);
+  const filteredItems = Array.isArray(payload.items) ? enforceClientTypeFilter(payload.items) : null;
+  if (filteredItems) {
+    renderCredentialList(filteredItems);
+    if (effectivePhase === 'ready' && filteredItems.length > 0) {
+      lastReadyListSnapshot = filteredItems.slice(0, 400);
       lastReadyListPageSnapshot = {
         url: typeof payload.page?.url === 'string' ? payload.page.url : activePageUrl,
         eligible: payload.page?.eligible === true,
@@ -2822,12 +3793,13 @@ async function copyField(itemId, field, sourceButton = null) {
     if (sourceButton) {
       pulseCopyIcon(sourceButton);
     }
+    showCopyToast(resolveCopyToastMessage(field));
   } catch {
     setAlert('danger', 'Clipboard write failed on this browser context.');
   }
 }
 
-async function copyRawValue(rawValue, sourceButton = null) {
+async function copyRawValue(rawValue, sourceButton = null, message = 'Copied') {
   if (!rawValue) {
     setAlert('warning', 'No value available to copy.');
     return;
@@ -2837,6 +3809,7 @@ async function copyRawValue(rawValue, sourceButton = null) {
     if (sourceButton) {
       pulseCopyIcon(sourceButton);
     }
+    showCopyToast(message);
   } catch {
     setAlert('danger', 'Clipboard write failed on this browser context.');
   }
@@ -2916,9 +3889,330 @@ async function updateManualIconFromFile(file) {
   });
 }
 
-async function handleDetailAction(action, sourceButton = null) {
+function normalizePopupItemFromPayload(baseItem, payload, revision) {
+  const itemType = baseItem?.itemType ?? 'login';
+  const safePayload = payload && typeof payload === 'object' ? payload : {};
+  let subtitle = '—';
+  let firstUrl = '';
+  let urlHostSummary = baseItem?.urlHostSummary ?? 'No URL';
+  let searchText = baseItem?.searchText ?? baseItem?.title ?? '';
+
+  if (itemType === 'login') {
+    subtitle = typeof safePayload.username === 'string' && safePayload.username ? safePayload.username : '—';
+    const urls = Array.isArray(safePayload.urls) ? safePayload.urls.filter((entry) => typeof entry === 'string') : [];
+    firstUrl = urls[0] ?? '';
+    if (firstUrl) {
+      try {
+        urlHostSummary = new URL(firstUrl).hostname;
+      } catch {
+        urlHostSummary = baseItem?.urlHostSummary ?? 'No URL';
+      }
+    } else {
+      urlHostSummary = 'No URL';
+    }
+    searchText = `${safePayload.title ?? ''} ${safePayload.username ?? ''}`.trim();
+  } else if (itemType === 'card') {
+    const numberRaw = typeof safePayload.number === 'string' ? safePayload.number : '';
+    subtitle = numberRaw ? numberRaw : '••••';
+    urlHostSummary = 'card';
+    searchText = `${safePayload.title ?? ''} ${safePayload.cardholderName ?? ''}`.trim();
+  } else if (itemType === 'document' || itemType === 'secure_note') {
+    const content = typeof safePayload.content === 'string' ? safePayload.content : '';
+    subtitle = content ? content.slice(0, 80) : '—';
+    urlHostSummary = itemType;
+    searchText = `${safePayload.title ?? ''} ${content}`.trim();
+  }
+
+  return {
+    ...baseItem,
+    revision,
+    title: typeof safePayload.title === 'string' ? safePayload.title : baseItem?.title ?? 'Untitled item',
+    subtitle,
+    searchText,
+    firstUrl,
+    urlHostSummary,
+    payload: safePayload,
+  };
+}
+
+function readDetailEditDraftFromDom() {
+  const selected = getSelectedCredential();
+  if (!selected || !detailEditDraft || !supportsPopupEditing(selected.itemType)) {
+    return null;
+  }
+  const titleValue = normalizeInlineEditableText(elements.detailTitle) || detailEditDraft.title;
+  const customFields = Array.from(elements.detailCustomFieldsList.querySelectorAll('[data-custom-field-row]'))
+    .map((row) => {
+      const index = Number(row.getAttribute('data-custom-field-row'));
+      if (!Number.isFinite(index)) {
+        return null;
+      }
+      const labelInput = row.querySelector(`[data-custom-field-label-inline="${index}"]`);
+      const valueInput = row.querySelector(`[data-custom-field-value="${index}"]`);
+      const label = labelInput instanceof HTMLElement ? normalizeInlineEditableText(labelInput) : '';
+      const value = valueInput instanceof HTMLTextAreaElement ? valueInput.value : '';
+      return {
+        label,
+        value,
+      };
+    })
+    .filter((entry) => entry && (entry.label.trim().length > 0 || entry.value.trim().length > 0));
+  const readField = (field) => {
+    const element = elements.credentialDetailsContent.querySelector(`[data-edit-field=\"${field}\"]`);
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return element.value;
+    }
+    return '';
+  };
+  if (selected.itemType === 'login') {
+    const urlsRaw = readField('urls')
+      .split('\n')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return {
+      itemType: 'login',
+      title: titleValue.trim(),
+      username: readField('username').trim(),
+      password: readField('password'),
+      urls: urlsRaw,
+      notes: readField('notes'),
+      customFields,
+    };
+  }
+  if (selected.itemType === 'card') {
+    return {
+      itemType: 'card',
+      title: titleValue.trim(),
+      cardholderName: readField('cardholderName').trim(),
+      brand: readField('brand').trim(),
+      number: readField('number').trim(),
+      expiryMonth: readField('expiryMonth').trim(),
+      expiryYear: readField('expiryYear').trim(),
+      securityCode: readField('securityCode').trim(),
+      notes: readField('notes'),
+      customFields,
+    };
+  }
+  return {
+    itemType: selected.itemType,
+    title: titleValue.trim(),
+    content: readField('content'),
+    customFields,
+  };
+}
+
+function validateDetailEditDraft(draft) {
+  if (!draft || !supportsPopupEditing(draft.itemType)) {
+    return 'Invalid item payload.';
+  }
+  if (typeof draft.title !== 'string' || draft.title.trim().length === 0) {
+    return 'Title is required.';
+  }
+  if (draft.itemType === 'login') {
+    if (!draft.username || draft.username.trim().length === 0) {
+      return 'Username is required for login items.';
+    }
+    if (!draft.password || draft.password.length === 0) {
+      return 'Password is required for login items.';
+    }
+  }
+  if (draft.itemType === 'card') {
+    if (!draft.number || draft.number.trim().length === 0) {
+      return 'Card number is required.';
+    }
+  }
+  return null;
+}
+
+async function refreshSelectedItemHistory(options = {}) {
   const selected = getSelectedCredential();
   if (!selected) {
+    detailHistoryRecords = [];
+    detailHistoryCursor = null;
+    detailHistoryError = '';
+    detailHistoryLoading = false;
+    renderDetailPanels();
+    return;
+  }
+  const forceRefresh = options.force === true;
+  const silentRefresh = options.silent === true;
+  if (
+    !forceRefresh &&
+    detailHistoryItemId === selected.itemId &&
+    Array.isArray(detailHistoryRecords) &&
+    detailHistoryRecords.length > 0
+  ) {
+    renderDetailPanels();
+    return;
+  }
+  detailHistoryLoading = !silentRefresh;
+  detailHistoryItemId = selected.itemId;
+  detailHistoryError = '';
+  renderDetailPanels();
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.list_item_history',
+    itemId: selected.itemId,
+    force: forceRefresh,
+    limit: 40,
+  });
+  detailHistoryLoading = false;
+  if (!response?.ok) {
+    detailHistoryError = response?.message || 'Could not load item history.';
+    renderDetailPanels();
+    return;
+  }
+  detailHistoryError = '';
+  detailHistoryRecords = Array.isArray(response.records) ? response.records : [];
+  detailHistoryCursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
+  detailHistorySelectedId = detailHistoryRecords[0]?.historyId ?? null;
+  renderDetailPanels();
+}
+
+function openDetailEditPanel() {
+  const selected = getSelectedCredential();
+  detailEditDraft = createEditDraftFromSelected(selected);
+  if (!detailEditDraft) {
+    setAlert('warning', 'This item is not ready for editing yet. Try again after sync.');
+    return;
+  }
+  detailPanelMode = 'edit';
+  detailEditPasswordVisible = false;
+  setDetailEditError('');
+  closeDetailMenu();
+  elements.detailTitle.textContent = detailEditDraft.title;
+  renderCredentialDetails();
+}
+
+async function openDetailHistoryPanel(options = {}) {
+  detailPanelMode = 'history';
+  detailHistoryView = 'list';
+  closeDetailMenu();
+  renderCredentialDetails();
+  await refreshSelectedItemHistory({
+    force: options.force === true,
+  });
+}
+
+async function saveDetailEdits() {
+  const selected = getSelectedCredential();
+  if (!selected) {
+    return;
+  }
+  const draft = readDetailEditDraftFromDom();
+  const validationError = validateDetailEditDraft(draft);
+  if (validationError) {
+    setDetailEditError(validationError);
+    return;
+  }
+  setDetailEditError('');
+  const response = await sendBackgroundCommand({
+    type: 'vaultlite.update_item',
+    itemId: selected.itemId,
+    itemType: draft.itemType,
+    expectedRevision: Number.isFinite(selected.revision) ? Math.trunc(selected.revision) : 0,
+    payload: draft,
+  });
+  if (!response?.ok) {
+    setDetailEditError(response?.message || 'Could not save item changes.');
+    if (response?.code === 'revision_conflict' || response?.code === 'item_deleted_conflict') {
+      void refreshStateAndMaybeList({
+        showLoading: false,
+      });
+    }
+    return;
+  }
+
+  const updatedPayload = response?.item && typeof response.item === 'object' ? response.item : draft;
+  const nextRevision =
+    Number.isFinite(response?.item?.revision) && response.item.revision > 0
+      ? Math.trunc(response.item.revision)
+      : Number.isFinite(selected.revision)
+        ? Math.trunc(selected.revision) + 1
+        : 1;
+  currentItems = currentItems.map((entry) =>
+    entry.itemId === selected.itemId ? normalizePopupItemFromPayload(entry, updatedPayload, nextRevision) : entry,
+  );
+  detailPanelMode = 'view';
+  detailEditDraft = null;
+  detailEditPasswordVisible = false;
+  renderCredentialList(currentItems);
+  void refreshSelectedItemHistory({ force: true, silent: true });
+  setAlert('success', 'Item updated.');
+}
+
+async function handleDetailAction(action, sourceButton = null, overrideSelected = null) {
+  const selected = overrideSelected ?? getSelectedCredential();
+  if (!selected) {
+    return;
+  }
+
+  if (action === 'open_edit') {
+    if (selected.isDeleted === true) {
+      setAlert('warning', 'Deleted items cannot be edited.');
+      return;
+    }
+    openDetailEditPanel();
+    return;
+  }
+  if (action === 'open_history') {
+    await openDetailHistoryPanel();
+    return;
+  }
+  if (action === 'delete_item') {
+    if (selected.isDeleted === true) {
+      setAlert('warning', 'Item is already in Trash.');
+      return;
+    }
+    const confirmed = await openDeleteConfirmationDialog(selected.title || 'this item');
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await sendBackgroundCommand({
+        type: 'vaultlite.delete_item',
+        itemId: selected.itemId,
+      });
+      if (!response?.ok) {
+        setAlert('danger', response?.message || 'Could not delete item right now.');
+        if (response?.code === 'not_found') {
+          await refreshStateAndMaybeList({ showLoading: false });
+        }
+        return;
+      }
+      setAlert('success', 'Item moved to Trash.');
+      detailPanelMode = 'view';
+      detailEditDraft = null;
+      detailEditPasswordVisible = false;
+      await refreshStateAndMaybeList({ showLoading: false });
+    } finally {
+      setBusy(false);
+    }
+    return;
+  }
+
+  if (action === 'restore_item') {
+    setBusy(true);
+    try {
+      const response = await sendBackgroundCommand({
+        type: 'vaultlite.restore_item',
+        itemId: selected.itemId,
+      });
+      if (!response?.ok) {
+        setAlert('danger', response?.message || 'Could not restore item right now.');
+        if (response?.code === 'not_found') {
+          await refreshStateAndMaybeList({ showLoading: false });
+        }
+        return;
+      }
+      setAlert('success', 'Item restored.');
+      detailPanelMode = 'view';
+      detailEditDraft = null;
+      detailEditPasswordVisible = false;
+      await refreshStateAndMaybeList({ showLoading: false });
+    } finally {
+      setBusy(false);
+    }
     return;
   }
 
@@ -2967,7 +4261,7 @@ async function handleDetailAction(action, sourceButton = null) {
     return;
   }
   if (action === 'copy_url') {
-    await copyRawValue(selected.firstUrl || selected.urlHostSummary || '', sourceButton);
+    await copyRawValue(selected.firstUrl || selected.urlHostSummary || '', sourceButton, 'Copied URL');
     return;
   }
   if (action === 'open_url') {
@@ -3101,6 +4395,7 @@ function wireEvents() {
         await pushPasswordGeneratorHistoryEntry(passwordGeneratorValue);
         await copyToClipboard(passwordGeneratorValue);
         setPasswordGeneratorCopyFeedback(true);
+        showCopyToast('Copied password');
       } catch {
         setAlert('warning', 'Could not copy generated password.');
       }
@@ -3179,6 +4474,7 @@ function wireEvents() {
       void (async () => {
         try {
           await copyToClipboard(entry.password);
+          showCopyToast('Copied password');
         } catch {
           setAlert('warning', 'Could not copy generated password.');
         }
@@ -3232,6 +4528,16 @@ function wireEvents() {
           actionButton.blur();
         }
         void runAction(async () => triggerFill(actionItemId));
+        return;
+      }
+      if (action === 'restore-item') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (actionButton instanceof HTMLElement) {
+          actionButton.blur();
+        }
+        const targetItem = getCredentialByItemId(actionItemId);
+        void runAction(async () => handleDetailAction('restore_item', actionButton, targetItem));
         return;
       }
       if (action === 'show-details') {
@@ -3373,19 +4679,200 @@ function wireEvents() {
     toggleDetailMenu();
   });
 
-  elements.detailActionIconWeb.addEventListener('click', (event) => {
+  elements.detailActionEdit.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const host = selectedManualIconHost();
-    if (!host) {
-      setAlert('warning', 'This login has no valid URL host for icon editing.');
-      closeDetailMenu();
-      return;
-    }
+    closeDetailMenu();
+    openDetailEditPanel();
+  });
+
+  elements.detailActionHistory.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     closeDetailMenu();
     void runAction(async () => {
-      await openManualIconInWebSettings(host);
+      await openDetailHistoryPanel();
     });
+  });
+
+  elements.detailActionDelete.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeDetailMenu();
+    void handleDetailAction('delete_item');
+  });
+
+  elements.confirmDeleteConfirmBtn.addEventListener('click', () => {
+    resolveDeleteConfirmation(true);
+  });
+
+  elements.confirmDeleteCancelBtn.addEventListener('click', () => {
+    resolveDeleteConfirmation(false);
+  });
+
+  elements.confirmDeleteModal.addEventListener('mousedown', (event) => {
+    if (event.target === elements.confirmDeleteModal) {
+      resolveDeleteConfirmation(false);
+    }
+  });
+
+  elements.detailEditCancelBtn.addEventListener('click', () => {
+    detailPanelMode = 'view';
+    detailEditDraft = null;
+    detailEditPasswordVisible = false;
+    setDetailEditError('');
+    renderCredentialDetails();
+  });
+
+  elements.detailEditSaveBtn.addEventListener('click', () => {
+    void runAction(async () => {
+      await saveDetailEdits();
+    });
+  });
+
+  elements.detailTitle.addEventListener('keydown', (event) => {
+    if (detailPanelMode !== 'edit') {
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+    }
+  });
+
+  elements.detailTitle.addEventListener('blur', () => {
+    if (detailPanelMode !== 'edit') {
+      return;
+    }
+    const normalized = normalizeInlineEditableText(elements.detailTitle);
+    elements.detailTitle.textContent = normalized;
+  });
+
+  elements.detailHistoryNavBackBtn.addEventListener('click', () => {
+    if (detailPanelMode === 'history' && detailHistoryView === 'entry') {
+      detailHistoryView = 'list';
+      renderCredentialDetails();
+      return;
+    }
+  });
+
+  elements.detailHistoryNavCloseBtn.addEventListener('click', () => {
+    detailPanelMode = 'view';
+    detailHistoryView = 'list';
+    renderCredentialDetails();
+  });
+
+  elements.detailHistorySummaryToggle.addEventListener('click', () => {
+    if (!detailHistoryRecords.length) {
+      void runAction(async () => {
+        await openDetailHistoryPanel({ force: true });
+      });
+      return;
+    }
+    detailHistorySummaryExpanded = !detailHistorySummaryExpanded;
+    renderDetailPanels();
+  });
+
+  elements.detailCustomFieldAddBtn.addEventListener('click', () => {
+    if (!detailEditDraft || detailPanelMode !== 'edit') {
+      return;
+    }
+    const draft = readDetailEditDraftFromDom();
+    if (draft) {
+      detailEditDraft = draft;
+    }
+    detailEditDraft.customFields = Array.isArray(detailEditDraft.customFields) ? detailEditDraft.customFields : [];
+    detailEditDraft.customFields.push({ label: '', value: '' });
+    renderDetailPanels();
+  });
+
+  elements.detailCustomFieldsList.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const removeButton = target.closest('[data-custom-field-remove]');
+    if (!(removeButton instanceof HTMLElement)) {
+      return;
+    }
+    if (!detailEditDraft || detailPanelMode !== 'edit') {
+      return;
+    }
+    const indexRaw = removeButton.getAttribute('data-custom-field-remove');
+    const index = Number(indexRaw);
+    if (!Number.isFinite(index) || index < 0) {
+      return;
+    }
+    const draft = readDetailEditDraftFromDom();
+    if (!draft) {
+      return;
+    }
+    draft.customFields = Array.isArray(draft.customFields) ? draft.customFields : [];
+    draft.customFields.splice(index, 1);
+    detailEditDraft = draft;
+    renderDetailPanels();
+  });
+
+  elements.detailCustomFieldsList.addEventListener('keydown', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    if (!target.hasAttribute('data-custom-field-label-inline')) {
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      target.blur();
+    }
+  });
+
+  elements.detailCustomFieldsList.addEventListener('blur', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    if (!target.hasAttribute('data-custom-field-label-inline')) {
+      return;
+    }
+    target.textContent = normalizeInlineEditableText(target);
+  }, true);
+
+  elements.detailHistoryList.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const selectButton = target.closest('[data-history-select]');
+    if (selectButton instanceof HTMLElement) {
+      const historyId = selectButton.getAttribute('data-history-select');
+      if (historyId) {
+        detailHistorySelectedId = historyId;
+        detailHistoryView = 'entry';
+        renderCredentialDetails();
+      }
+      return;
+    }
+  });
+
+  elements.detailHistoryEntryDetail.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const revealButton = target.closest('[data-history-reveal]');
+    if (!(revealButton instanceof HTMLElement)) {
+      return;
+    }
+    const revealKey = revealButton.getAttribute('data-history-reveal');
+    if (!revealKey) {
+      return;
+    }
+    if (detailHistoryRevealKeys.has(revealKey)) {
+      detailHistoryRevealKeys.delete(revealKey);
+    } else {
+      detailHistoryRevealKeys.add(revealKey);
+    }
+    renderDetailPanels();
   });
 
   elements.detailIconEditBtn.addEventListener('click', (event) => {
@@ -3468,6 +4955,11 @@ function wireEvents() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (!elements.confirmDeleteModal.hidden) {
+        event.preventDefault();
+        resolveDeleteConfirmation(false);
+        return;
+      }
       closePasswordGeneratorPanel();
       closeDetailMenu();
       filterDropdown?.close();
@@ -3502,6 +4994,68 @@ function wireEvents() {
         void runAction(async () => handleDetailAction(action, button));
       });
     });
+  });
+
+  elements.detailNotesRow.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (target.closest('button')) {
+      return;
+    }
+    const defaultAction = elements.detailNotesRow.dataset.defaultAction;
+    if (!defaultAction) {
+      return;
+    }
+    void runAction(async () => handleDetailAction(defaultAction));
+  });
+
+  elements.detailNotesActionA.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const action = elements.detailNotesActionA.dataset.action;
+    if (!action) {
+      return;
+    }
+    void runAction(async () => handleDetailAction(action, elements.detailNotesActionA));
+  });
+
+  elements.credentialDetailsContent.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const inlineRowActionButton = target.closest('[data-inline-row-action]');
+    if (inlineRowActionButton instanceof HTMLElement) {
+      const action = inlineRowActionButton.getAttribute('data-inline-row-action');
+      if (!action) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void runAction(async () => handleDetailAction(action, inlineRowActionButton));
+      return;
+    }
+    const toggleButton = target.closest('[data-edit-password-toggle]');
+    if (!(toggleButton instanceof HTMLElement)) {
+      return;
+    }
+    if (detailPanelMode !== 'edit') {
+      return;
+    }
+    const selected = getSelectedCredential();
+    if (!selected || selected.itemType !== 'login') {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const draft = readDetailEditDraftFromDom();
+    if (draft) {
+      detailEditDraft = draft;
+    }
+    detailEditPasswordVisible = !detailEditPasswordVisible;
+    renderDetailPanels();
   });
 }
 

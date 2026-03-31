@@ -38,6 +38,7 @@ describe('cloudflare migration loading', () => {
       '0016_realtime_one_time_tokens',
       '0017_icons_state_v43',
       '0018_automatic_icon_registry',
+      '0019_vault_item_history',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

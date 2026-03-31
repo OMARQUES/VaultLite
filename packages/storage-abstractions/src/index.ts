@@ -340,6 +340,19 @@ export interface VaultItemRecord {
   updatedAt: string;
 }
 
+export type VaultItemHistoryChangeType = 'create' | 'update' | 'delete' | 'restore';
+
+export interface VaultItemHistoryRecord {
+  historyId: string;
+  ownerUserId: string;
+  itemId: string;
+  itemRevision: number;
+  changeType: VaultItemHistoryChangeType;
+  encryptedDiffPayload: string | null;
+  sourceDeviceId: string | null;
+  createdAt: string;
+}
+
 export interface DeploymentStateRecord {
   bootstrapState: BootstrapDeploymentState;
   ownerUserId: string | null;
@@ -795,6 +808,21 @@ export interface VaultItemRepository {
   }>;
 }
 
+export interface VaultItemHistoryRepository {
+  create(record: VaultItemHistoryRecord): Promise<VaultItemHistoryRecord>;
+  listByItem(input: {
+    ownerUserId: string;
+    itemId: string;
+    limit: number;
+    cursor?: string | null;
+  }): Promise<{ records: VaultItemHistoryRecord[]; nextCursor: string | null }>;
+  pruneByOwnerOlderThan(input: {
+    ownerUserId: string;
+    cutoffIso: string;
+    limit: number;
+  }): Promise<number>;
+}
+
 export interface CompleteOnboardingAtomicInput {
   nowIso: string;
   inviteTokenHash: string;
@@ -862,6 +890,7 @@ export interface VaultLiteStorage {
   auditEvents: AuditEventRepository;
   attachmentBlobs: AttachmentBlobRepository;
   vaultItems: VaultItemRepository;
+  vaultItemHistory: VaultItemHistoryRepository;
   completeOnboardingAtomic(input: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult>;
   revokeDeviceAndSessionsAtomic(input: RevokeDeviceAndSessionsAtomicInput): Promise<void>;
   rotatePasswordAtomic(input: RotatePasswordAtomicInput): Promise<RotatePasswordAtomicResult>;
@@ -902,6 +931,7 @@ export function createInMemoryVaultLiteStorage(input: {
   const rateLimits = new Map<string, AuthRateLimitRecord>();
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
+  const vaultItemHistory = new Map<string, VaultItemHistoryRecord>();
   const vaultItemTombstones = new Map<string, VaultItemTombstoneRecord>();
   const idempotencyRecords = new Map<string, IdempotencyRecord>();
   const auditEvents = new Map<string, AuditEventRecord>();
@@ -2395,6 +2425,68 @@ export function createInMemoryVaultLiteStorage(input: {
           status: 'success_changed' as const,
           item: { ...restoredItem },
         };
+      },
+    },
+    vaultItemHistory: {
+      async create(record) {
+        const normalized: VaultItemHistoryRecord = {
+          ...record,
+          encryptedDiffPayload: record.encryptedDiffPayload ?? null,
+          sourceDeviceId: record.sourceDeviceId ?? null,
+        };
+        vaultItemHistory.set(
+          `${normalized.ownerUserId}:${normalized.itemId}:${normalized.historyId}`,
+          normalized,
+        );
+        return { ...normalized };
+      },
+      async listByItem(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(200, Math.trunc(inputRecord.limit)))
+          : 50;
+        const allRecords = Array.from(vaultItemHistory.values())
+          .filter(
+            (record) =>
+              record.ownerUserId === inputRecord.ownerUserId && record.itemId === inputRecord.itemId,
+          )
+          .sort((left, right) => {
+            const createdCompare = right.createdAt.localeCompare(left.createdAt);
+            if (createdCompare !== 0) {
+              return createdCompare;
+            }
+            return right.historyId.localeCompare(left.historyId);
+          });
+        let startIndex = 0;
+        const cursor = typeof inputRecord.cursor === 'string' ? inputRecord.cursor : null;
+        if (cursor) {
+          const cursorIndex = allRecords.findIndex((record) => record.historyId === cursor);
+          if (cursorIndex >= 0) {
+            startIndex = cursorIndex + 1;
+          }
+        }
+        const page = allRecords.slice(startIndex, startIndex + safeLimit).map((record) => ({ ...record }));
+        const hasMore = allRecords.length > startIndex + safeLimit;
+        const nextCursor = hasMore && page.length > 0 ? page[page.length - 1].historyId : null;
+        return {
+          records: page,
+          nextCursor,
+        };
+      },
+      async pruneByOwnerOlderThan(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(2_000, Math.trunc(inputRecord.limit)))
+          : 200;
+        const candidates = Array.from(vaultItemHistory.entries())
+          .filter(
+            ([, record]) =>
+              record.ownerUserId === inputRecord.ownerUserId && record.createdAt < inputRecord.cutoffIso,
+          )
+          .sort((left, right) => left[1].createdAt.localeCompare(right[1].createdAt))
+          .slice(0, safeLimit);
+        for (const [key] of candidates) {
+          vaultItemHistory.delete(key);
+        }
+        return candidates.length;
       },
     },
     async completeOnboardingAtomic(inputRecord) {

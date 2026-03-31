@@ -139,6 +139,7 @@ function createVaultClientStub(): VaultLiteVaultClient {
     updateItem: vi.fn(),
     deleteItem: vi.fn(),
     restoreItem: vi.fn(),
+    listItemHistory: vi.fn(async () => ({ records: [], nextCursor: null })),
     initAttachmentUpload: vi.fn(),
     uploadAttachmentContent: vi.fn(),
     finalizeAttachmentUpload: vi.fn(),
@@ -669,11 +670,13 @@ describe('vault import', () => {
     };
 
     const archive = zipSync({
-      'export.attributes': [toZipBytes(JSON.stringify({ version: 3, description: '1Password Unencrypted Export' }))],
-      'export.data': [toZipBytes(JSON.stringify(exportData))],
+      'export.attributes': toZipBytes(JSON.stringify({ version: 3, description: '1Password Unencrypted Export' })),
+      'export.data': toZipBytes(JSON.stringify(exportData)),
     });
-    const archiveBuffer = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength);
-    const file = new File([archiveBuffer], 'sample.1pux', { type: 'application/zip' });
+    const archiveBytes = new Uint8Array(Array.from(archive));
+    const file = new File([archiveBytes.buffer as ArrayBuffer], 'sample.1pux', {
+      type: 'application/zip',
+    });
 
     const preview = await parseVaultImportFile({
       file,

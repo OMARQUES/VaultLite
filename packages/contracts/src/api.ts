@@ -168,6 +168,7 @@ export const RealtimeConnectTokenOutputSchema = z
 export const RealtimeTopicSchema = z.enum([
   'vault.item.upserted',
   'vault.item.tombstoned',
+  'vault.history.upserted',
   'icons.state.upserted',
   'icons.state.removed',
   'icons.manual.upserted',
@@ -195,6 +196,16 @@ export const RealtimeVaultItemTombstonedPayloadSchema = z
     itemType: z.enum(VAULT_ITEM_TYPES),
     revision: z.number().int().positive(),
     deletedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeVaultHistoryUpsertedPayloadSchema = z
+  .object({
+    historyId: z.string().min(1),
+    itemId: z.string().min(1),
+    itemRevision: z.number().int().positive(),
+    changeType: z.enum(['create', 'update', 'delete', 'restore']),
+    createdAt: isoDatetimeSchema,
   })
   .strict();
 
@@ -339,6 +350,7 @@ export const RealtimeServerMessageSchema = z.discriminatedUnion('type', [
       domains: z.array(
         z.enum([
           'vault',
+          'vault_history',
           'icons_manual',
           'icons_state',
           'password_history',
@@ -756,6 +768,45 @@ export const VaultItemUpdateInputSchema = z
       'Vault item payload exceeds maximum size',
     ),
     expectedRevision: z.number().int().positive(),
+    encryptedDiffPayload: encryptedPayloadSchema.max(
+      MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES,
+      'Vault item diff payload exceeds maximum size',
+    ).optional(),
+  })
+  .strict();
+
+export const VaultItemExtensionUpdateInputSchema = VaultItemUpdateInputSchema;
+
+export const VaultItemHistoryChangeTypeSchema = z.enum(['create', 'update', 'delete', 'restore']);
+
+export const VaultItemHistoryDiffClassificationSchema = z.enum(['sensitive', 'non_sensitive']);
+
+export const VaultItemHistoryDiffEntrySchema = z
+  .object({
+    fieldPath: z.string().min(1),
+    before: z.string(),
+    after: z.string(),
+    classification: VaultItemHistoryDiffClassificationSchema,
+  })
+  .strict();
+
+export const VaultItemHistoryRecordSchema = z
+  .object({
+    historyId: z.string().min(1),
+    itemId: z.string().min(1),
+    itemRevision: z.number().int().positive(),
+    changeType: VaultItemHistoryChangeTypeSchema,
+    encryptedDiffPayload: encryptedPayloadSchema.nullable(),
+    sourceDeviceId: z.string().min(1).nullable(),
+    sourceDeviceName: z.string().min(1).nullable(),
+    createdAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const VaultItemHistoryListOutputSchema = z
+  .object({
+    records: z.array(VaultItemHistoryRecordSchema),
+    nextCursor: z.string().min(1).nullable(),
   })
   .strict();
 
@@ -1674,6 +1725,7 @@ export type RealtimeConnectTokenOutput = z.infer<typeof RealtimeConnectTokenOutp
 export type RealtimeTopic = z.infer<typeof RealtimeTopicSchema>;
 export type RealtimeVaultItemUpsertedPayload = z.infer<typeof RealtimeVaultItemUpsertedPayloadSchema>;
 export type RealtimeVaultItemTombstonedPayload = z.infer<typeof RealtimeVaultItemTombstonedPayloadSchema>;
+export type RealtimeVaultHistoryUpsertedPayload = z.infer<typeof RealtimeVaultHistoryUpsertedPayloadSchema>;
 export type RealtimeIconsStateUpsertedPayload = z.infer<typeof RealtimeIconsStateUpsertedPayloadSchema>;
 export type RealtimeIconsStateRemovedPayload = z.infer<typeof RealtimeIconsStateRemovedPayloadSchema>;
 export type RealtimeIconsManualUpsertedPayload = z.infer<typeof RealtimeIconsManualUpsertedPayloadSchema>;
@@ -1719,6 +1771,12 @@ export type VaultItemListOutput = z.infer<typeof VaultItemListOutputSchema>;
 export type VaultItemRestoreOutput = z.infer<typeof VaultItemRestoreOutputSchema>;
 export type VaultItemCreateInput = z.infer<typeof VaultItemCreateInputSchema>;
 export type VaultItemUpdateInput = z.infer<typeof VaultItemUpdateInputSchema>;
+export type VaultItemExtensionUpdateInput = z.infer<typeof VaultItemExtensionUpdateInputSchema>;
+export type VaultItemHistoryChangeType = z.infer<typeof VaultItemHistoryChangeTypeSchema>;
+export type VaultItemHistoryDiffClassification = z.infer<typeof VaultItemHistoryDiffClassificationSchema>;
+export type VaultItemHistoryDiffEntry = z.infer<typeof VaultItemHistoryDiffEntrySchema>;
+export type VaultItemHistoryRecord = z.infer<typeof VaultItemHistoryRecordSchema>;
+export type VaultItemHistoryListOutput = z.infer<typeof VaultItemHistoryListOutputSchema>;
 export type AttachmentUploadInitInput = z.infer<typeof AttachmentUploadInitInputSchema>;
 export type AttachmentUploadContentInput = z.infer<typeof AttachmentUploadContentInputSchema>;
 export type AttachmentUploadFinalizeInput = z.infer<typeof AttachmentUploadFinalizeInputSchema>;

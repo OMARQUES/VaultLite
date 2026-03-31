@@ -217,6 +217,18 @@ describe('popup view model helpers', () => {
 
   test('parses persisted popup ui state safely', () => {
     expect(parsePersistedPopupUiState({
+      selectedItemId: 'item_9',
+      searchQuery: 'deleted',
+      typeFilter: 'trash',
+      suggestedOnly: false,
+    })).toEqual({
+      selectedItemId: 'item_9',
+      searchQuery: 'deleted',
+      typeFilter: 'trash',
+      suggestedOnly: false,
+      sortMode: 'default',
+    });
+    expect(parsePersistedPopupUiState({
       selectedItemId: 'item_1',
       searchQuery: 'amazon',
       typeFilter: 'card',

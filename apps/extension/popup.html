@@ -1404,6 +1404,11 @@
         letter-spacing: 0.01em;
       }
 
+      .vault-row-side-hit.is-restore {
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+
       .vault-row-side-hit:disabled {
         opacity: 0.52;
         pointer-events: auto;
@@ -1536,11 +1541,29 @@
         margin-bottom: 12px;
       }
 
+      .vault-detail-history .detail-head {
+        grid-template-columns: minmax(0, 1fr) auto;
+        position: relative;
+      }
+
       .detail-head-main {
         display: grid;
         grid-template-columns: 54px minmax(0, 1fr);
         gap: 10px;
         align-items: center;
+      }
+
+      .vault-detail-history .detail-head-main {
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 8px;
+        min-width: 0;
+        overflow: hidden;
+        /* Reserve center lane for HISTORY + nav while avoiding over-truncation. */
+        max-width: min(420px, calc(50% - 64px));
+      }
+
+      .vault-detail-history .detail-head-main > div {
+        min-width: 0;
       }
 
       .detail-icon-shell {
@@ -1554,6 +1577,12 @@
         align-items: center;
         justify-content: center;
         background: linear-gradient(180deg, #2c3748, #20293a);
+      }
+
+      .vault-detail-history .detail-icon-shell {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
       }
 
       .detail-icon-shell.is-editable:hover .detail-favicon,
@@ -1616,6 +1645,10 @@
         font-weight: 700;
       }
 
+      .vault-detail-history .detail-type {
+        font-size: 10px;
+      }
+
       .detail-title {
         margin: 0;
         font-size: 28px;
@@ -1624,38 +1657,652 @@
         letter-spacing: -0.03em;
       }
 
+      .vault-detail-history .detail-title {
+        font-size: clamp(14px, 2vw, 18px);
+        line-height: 1.02;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+      }
+
+      .detail-title.is-inline-editing {
+        border: 1px solid var(--vl-border);
+        border-radius: 10px;
+        background: var(--vl-input);
+        min-height: 42px;
+        line-height: 1.08;
+        padding: 6px 10px;
+        outline: none;
+      }
+
+      .detail-title.is-inline-editing:empty::before {
+        content: attr(data-placeholder);
+        color: var(--vl-text-muted);
+      }
+
       .detail-top-actions {
         display: inline-flex;
         gap: 8px;
         align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .vault-detail-history .detail-top-actions {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+      }
+
+      .detail-history-nav-title {
+        margin: 0;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--vl-text-muted);
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        pointer-events: none;
+      }
+
+      .vault-detail-history .detail-history-nav-title {
+        top: 10px;
+        z-index: 1;
+      }
+
+      .detail-history-nav-btn {
+        width: 34px;
+        min-width: 34px;
+        height: 34px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
       }
 
       .detail-menu {
         position: absolute;
         right: 0;
         top: calc(100% + 8px);
-        width: 210px;
+        width: 220px;
         border: 1px solid var(--vl-border);
-        border-radius: 12px;
+        border-radius: 14px;
         background: var(--vl-surface-2);
-        padding: 6px;
+        padding: 8px;
         display: grid;
-        gap: 4px;
+        gap: 2px;
         box-shadow: 0 14px 26px rgba(0, 0, 0, 0.42);
         z-index: 30;
       }
 
-      .detail-menu button {
+      .detail-menu-item {
         width: 100%;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
         justify-content: flex-start;
         text-align: left;
-        height: 34px;
+        height: 38px;
         border-radius: 10px;
         background: transparent;
+        border: 1px solid transparent;
+        color: var(--vl-text);
+        padding: 0 10px;
+      }
+
+      .detail-menu-item .material-symbols-rounded {
+        font-size: 18px;
+        line-height: 1;
+        color: var(--vl-text-soft);
+      }
+
+      .detail-menu-item:hover {
+        border-color: color-mix(in srgb, var(--vl-border) 90%, transparent);
+        background: color-mix(in srgb, var(--vl-surface) 55%, transparent);
+      }
+
+      .detail-menu-item.is-danger {
+        color: #ff9aa8;
+      }
+
+      .detail-menu-item.is-danger .material-symbols-rounded {
+        color: #ff9aa8;
+      }
+
+      .detail-menu-separator {
+        margin: 4px 0;
+        height: 1px;
+        border: 0;
+        background: color-mix(in srgb, var(--vl-border) 78%, transparent);
       }
 
       .detail-menu-wrap {
         position: relative;
+      }
+
+      .detail-inline-panel {
+        border-top: 1px solid color-mix(in srgb, var(--vl-divider) 95%, transparent);
+        padding: 12px 0 0;
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-main-sections {
+        display: grid;
+        gap: 0;
+      }
+
+      .detail-inline-panel__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .detail-inline-panel__title {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text-muted);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .detail-inline-panel__actions {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .btn-secondary {
+        height: 32px;
+        border-radius: 10px;
+        border: 1px solid var(--vl-border);
+        background: color-mix(in srgb, var(--vl-surface-2) 72%, transparent);
+        color: var(--vl-text);
+        padding: 0 12px;
+        font-size: 13px;
+      }
+
+      .btn-secondary:hover {
+        border-color: color-mix(in srgb, var(--vl-border) 95%, transparent);
+      }
+
+      #detailEditCancelBtn,
+      #detailEditSaveBtn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        min-width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 10px;
+      }
+
+      #detailEditCancelBtn .material-symbols-rounded,
+      #detailEditSaveBtn .material-symbols-rounded {
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      #detailEditCancelBtn span:not(.material-symbols-rounded),
+      #detailEditSaveBtn span:not(.material-symbols-rounded) {
+        display: none;
+      }
+
+      .detail-edit-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-edit-field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .detail-edit-field > span {
+        font-size: 12px;
+        color: var(--vl-text-muted);
+      }
+
+      .detail-edit-field input,
+      .detail-edit-field textarea {
+        width: 100%;
+        border: 1px solid var(--vl-border);
+        border-radius: 10px;
+        background: var(--vl-input);
+        color: var(--vl-text);
+        font: inherit;
+        min-height: 36px;
+        padding: 8px 10px;
+      }
+
+      .detail-edit-field textarea {
+        min-height: 78px;
+        resize: vertical;
+      }
+
+      .detail-edit-error {
+        margin: 0;
+        font-size: 12px;
+        color: #ff9aa8;
+      }
+
+      .detail-history-list {
+        display: grid;
+        gap: 10px;
+        max-height: 220px;
+        overflow: auto;
+        padding-right: 2px;
+      }
+
+      .detail-history-entry {
+        border: 1px solid color-mix(in srgb, var(--vl-border) 88%, transparent);
+        border-radius: 11px;
+        padding: 8px 10px;
+        background: color-mix(in srgb, var(--vl-surface-2) 48%, transparent);
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-history-entry-head {
+        display: grid;
+        gap: 2px;
+      }
+
+      .detail-history-entry-title {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text);
+      }
+
+      .detail-history-entry-meta {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vl-text-soft);
+      }
+
+      .detail-history-diff {
+        display: grid;
+        gap: 6px;
+      }
+
+      .detail-history-diff-line {
+        display: grid;
+        gap: 4px;
+      }
+
+      .detail-history-diff-label {
+        font-size: 12px;
+        color: var(--vl-text-muted);
+      }
+
+      .detail-history-diff-values {
+        font-size: 12px;
+        color: var(--vl-text);
+        display: grid;
+        gap: 2px;
+      }
+
+      .detail-history-reveal {
+        justify-self: start;
+      }
+
+      .detail-history-summary {
+        border-top: 1px solid color-mix(in srgb, var(--vl-divider) 95%, transparent);
+        padding: 12px 0 0;
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-history-summary-toggle {
+        width: 100%;
+        border: none;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .detail-history-summary-toggle .material-symbols-rounded {
+        font-size: 16px;
+        line-height: 1;
+        color: var(--vl-text-soft);
+      }
+
+      .detail-history-summary-title {
+        margin: 0;
+        font-size: 14px;
+        color: var(--vl-text);
+        line-height: 1.35;
+      }
+
+      .detail-history-summary-body {
+        display: grid;
+        gap: 4px;
+      }
+
+      .detail-history-summary.is-expanded .detail-history-summary-body {
+        margin-left: 20px;
+        border-left: 1px solid color-mix(in srgb, var(--vl-border) 90%, transparent);
+        padding-left: 10px;
+      }
+
+      .detail-history-summary-body p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text-soft);
+        line-height: 1.35;
+      }
+
+      .detail-history-layout {
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-history-list-view,
+      .detail-history-entry-view {
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-history-list-view {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        scrollbar-color: transparent transparent;
+      }
+
+      .detail-history-list-view::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+
+      .detail-history-timeline {
+        display: grid;
+        gap: 8px;
+        max-height: 360px;
+        overflow: auto;
+        padding-right: 2px;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        scrollbar-color: transparent transparent;
+      }
+
+      .detail-history-timeline::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+
+      .detail-history-timeline-item {
+        width: 100%;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 86%, transparent);
+        border-radius: 10px;
+        background: #202328;
+        color: inherit;
+        height: auto;
+        min-height: 92px;
+        padding: 10px 12px;
+        text-align: left;
+        display: grid;
+        gap: 4px;
+        align-content: start;
+        white-space: normal;
+        transition:
+          background-color 220ms cubic-bezier(0.4, 0, 0.2, 1),
+          border-color 220ms cubic-bezier(0.4, 0, 0.2, 1),
+          box-shadow 220ms cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .detail-history-timeline-item:hover {
+        background: #25272c;
+      }
+
+      .detail-history-timeline-item.is-active {
+        background: #2562ea;
+        border-color: color-mix(in srgb, #2562ea 75%, #1f56d6);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, #9dbdff 28%, transparent);
+      }
+
+      .detail-history-timeline-item.is-active:hover {
+        background: #2562ea;
+      }
+
+      .detail-history-timeline-item-title {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text);
+      }
+
+      .detail-history-timeline-item-meta {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vl-text-soft);
+      }
+
+      .detail-history-timeline-item.is-active .detail-history-timeline-item-title,
+      .detail-history-timeline-item.is-active .detail-history-timeline-item-meta,
+      .detail-history-timeline-item.is-active .detail-history-timeline-item-hint {
+        color: #f4f8ff;
+      }
+
+      .detail-history-timeline-item-hint {
+        margin: 2px 0 0;
+        font-size: 12px;
+        color: var(--vl-text);
+        line-height: 1.3;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      .detail-history-entry-detail {
+        border: 1px solid color-mix(in srgb, var(--vl-border) 88%, transparent);
+        border-radius: 12px;
+        padding: 12px;
+        background: color-mix(in srgb, var(--vl-surface-2) 48%, transparent);
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-history-compare-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+
+      .detail-history-compare-side {
+        border: 1px solid color-mix(in srgb, var(--vl-border) 88%, transparent);
+        border-radius: 11px;
+        padding: 8px 10px;
+        background: color-mix(in srgb, var(--vl-surface-2) 64%, transparent);
+      }
+
+      .detail-history-field-block {
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-history-field-title {
+        margin: 0;
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--vl-text-muted);
+      }
+
+      .detail-history-compare-side .detail-row {
+        padding: 0;
+      }
+
+      .detail-history-compare-side .detail-value {
+        white-space: pre-wrap;
+      }
+
+      .detail-history-value-stack {
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-history-value-row {
+        display: grid;
+        gap: 3px;
+      }
+
+      .detail-history-empty-value {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text-soft);
+        line-height: 1.35;
+      }
+
+      .detail-row-editor {
+        width: 100%;
+        border: 1px solid var(--vl-border);
+        border-radius: 10px;
+        background: var(--vl-input);
+        color: var(--vl-text);
+        font: inherit;
+        min-height: 36px;
+        padding: 8px 10px;
+      }
+
+      .detail-row-editor.detail-row-editor--textarea {
+        min-height: 64px;
+        resize: vertical;
+      }
+
+      .detail-row-editor-split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .detail-password-editor-shell {
+        position: relative;
+      }
+
+      .detail-password-editor-shell .detail-row-editor {
+        padding-right: 44px;
+      }
+
+      .detail-password-inline-toggle {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 28px;
+        height: 28px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--vl-text-soft);
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .detail-password-inline-toggle:hover {
+        background: color-mix(in srgb, var(--vl-surface) 55%, transparent);
+        color: var(--vl-text);
+      }
+
+      .detail-password-inline-toggle .material-symbols-rounded {
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .detail-password-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        line-height: 1.2;
+      }
+
+      .detail-custom-fields-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .detail-custom-fields-title {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vl-text-muted);
+      }
+
+      .detail-custom-fields-list {
+        display: grid;
+        gap: 0;
+      }
+
+      .detail-custom-field-row {
+        border: 1px solid color-mix(in srgb, var(--vl-border) 88%, transparent);
+        border-radius: 10px;
+        padding: 8px;
+        display: grid;
+        gap: 6px;
+        background: color-mix(in srgb, var(--vl-surface-2) 44%, transparent);
+      }
+
+      .detail-custom-field-row-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .detail-custom-field-label {
+        margin: 0;
+        font-size: 12px;
+        color: var(--vl-text-muted);
+      }
+
+      .detail-custom-field-value {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text);
+        line-height: 1.35;
+        word-break: break-word;
+      }
+
+      .detail-custom-field-inline-label {
+        margin: 0;
+        font-size: 13px;
+        color: var(--vl-text);
+        min-height: 22px;
+        padding: 2px 6px;
+        border-radius: 8px;
+      }
+
+      .detail-custom-field-inline-label[contenteditable='true'] {
+        border: 1px solid var(--vl-border);
+        background: var(--vl-input);
+        outline: none;
+      }
+
+      .detail-custom-field-inline-label[contenteditable='true']:empty::before {
+        content: attr(data-placeholder);
+        color: var(--vl-text-muted);
+      }
+
+      .detail-custom-field-native {
+        border-top: 1px solid color-mix(in srgb, var(--vl-divider) 95%, transparent);
       }
 
       .detail-section {
@@ -1686,14 +2333,99 @@
       }
 
       .detail-password {
+        position: relative;
         border: 1px solid var(--vl-border);
         border-radius: 12px;
         background: var(--vl-input);
         min-height: 42px;
         display: flex;
         align-items: center;
-        padding: 0 12px;
+        gap: 8px;
+        padding: 0 40px 0 12px;
         letter-spacing: 0.14em;
+      }
+
+      .confirm-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 120;
+        background: rgba(6, 8, 12, 0.6);
+        display: grid;
+        place-items: center;
+        padding: 16px;
+      }
+
+      .confirm-modal {
+        width: min(100%, 380px);
+        border-radius: 16px;
+        border: 1px solid color-mix(in srgb, var(--vl-border) 86%, transparent);
+        background: #26282d;
+        box-shadow: 0 22px 44px rgba(0, 0, 0, 0.45);
+        padding: 18px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .confirm-modal-title {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+      }
+
+      .confirm-modal-body {
+        margin: 0;
+        color: var(--vl-text-soft);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      .confirm-modal-actions {
+        display: grid;
+        gap: 10px;
+      }
+
+      .confirm-modal-delete-btn {
+        width: 100%;
+        height: 42px;
+        border: 1px solid color-mix(in srgb, #ef5a3f 75%, #cc3c20);
+        border-radius: 12px;
+        background: #cf3f22;
+        color: #fff5f2;
+        font-size: 17px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .confirm-modal-delete-btn:hover {
+        background: #b9371d;
+      }
+
+      .confirm-modal-cancel-btn {
+        width: 100%;
+        height: 42px;
+        justify-content: center;
+      }
+
+      .copy-toast {
+        position: fixed;
+        left: 50%;
+        bottom: 16px;
+        transform: translateX(-50%);
+        z-index: 130;
+        max-width: calc(100% - 24px);
+        border-radius: 999px;
+        border: 1px solid color-mix(in srgb, #ffffff 70%, #d9dce2);
+        background: #ffffff;
+        color: #1d222a;
+        padding: 8px 16px;
+        font-size: 15px;
+        font-weight: 500;
+        line-height: 1.2;
+        box-shadow: 0 14px 28px rgba(0, 0, 0, 0.28);
+        pointer-events: none;
       }
 
       .detail-row-actions {
@@ -2135,57 +2867,125 @@
                     </div>
                   </div>
                   <div class="detail-top-actions">
+                    <button type="button" id="detailEditSaveBtn" class="btn-primary" hidden>
+                      <span class="material-symbols-rounded" aria-hidden="true">check</span>
+                      <span>Save</span>
+                    </button>
+                    <button type="button" id="detailEditCancelBtn" class="btn-secondary" hidden>
+                      <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                      <span>Cancel</span>
+                    </button>
+                    <p id="detailHistoryNavTitle" class="detail-history-nav-title" hidden>History</p>
+                    <button type="button" id="detailHistoryNavBackBtn" class="btn-secondary detail-history-nav-btn" title="Back to history list" aria-label="Back to history list" hidden>
+                      <span class="material-symbols-rounded" aria-hidden="true">arrow_back</span>
+                    </button>
+                    <button type="button" id="detailHistoryNavCloseBtn" class="btn-secondary detail-history-nav-btn" title="Close history" aria-label="Close history" hidden>
+                      <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                    </button>
                     <button type="button" id="detailActionPrimary" class="btn-primary">Fill</button>
                     <div class="detail-menu-wrap">
                       <button type="button" id="detailActionMenu" class="icon-button" title="More actions" aria-label="More actions">
                         <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
                       </button>
                       <div id="detailMenuPopover" class="detail-menu" hidden>
-                        <button type="button" id="detailActionIconWeb">Edit icon in web app</button>
-                        <button type="button" disabled>Edit</button>
-                        <button type="button" disabled>Generate password</button>
-                        <button type="button" disabled>Delete item</button>
+                        <button type="button" id="detailActionEdit" class="detail-menu-item">
+                          <span class="material-symbols-rounded" aria-hidden="true">edit</span>
+                          <span>Edit item</span>
+                        </button>
+                        <button type="button" id="detailActionHistory" class="detail-menu-item">
+                          <span class="material-symbols-rounded" aria-hidden="true">history</span>
+                          <span>View history</span>
+                        </button>
+                        <hr class="detail-menu-separator" />
+                        <button type="button" id="detailActionDelete" class="detail-menu-item is-danger">
+                          <span class="material-symbols-rounded" aria-hidden="true">delete</span>
+                          <span>Delete</span>
+                        </button>
                       </div>
                     </div>
                   </div>
                 </header>
 
-                <section class="detail-section">
-                  <div class="detail-row" id="detailPrimaryRow">
-                    <div class="detail-row-content">
-                      <p class="detail-label" id="detailPrimaryLabel">Username</p>
-                      <p class="detail-value" id="detailPrimaryValue">—</p>
-                    </div>
-                    <div class="detail-row-actions">
-                      <button type="button" class="row-action" id="detailPrimaryActionA" hidden aria-label="Primary row action"></button>
-                      <button type="button" class="row-action" id="detailPrimaryActionB" hidden aria-label="Primary secondary action"></button>
-                    </div>
-                  </div>
-                </section>
+                <p id="detailEditError" class="detail-edit-error" hidden></p>
 
-                <section class="detail-section">
-                  <div class="detail-row" id="detailSecondaryRow">
-                    <div class="detail-row-content">
-                      <p class="detail-label" id="detailSecondaryLabel">Password</p>
-                      <p class="detail-value detail-password" id="detailSecondaryValue">••••••••••••</p>
+                <div id="detailMainSections" class="detail-main-sections">
+                  <section class="detail-section">
+                    <div class="detail-row" id="detailPrimaryRow">
+                      <div class="detail-row-content">
+                        <p class="detail-label" id="detailPrimaryLabel">Username</p>
+                        <p class="detail-value" id="detailPrimaryValue">—</p>
+                      </div>
+                      <div class="detail-row-actions">
+                        <button type="button" class="row-action" id="detailPrimaryActionA" hidden aria-label="Primary row action"></button>
+                        <button type="button" class="row-action" id="detailPrimaryActionB" hidden aria-label="Primary secondary action"></button>
+                      </div>
                     </div>
-                    <div class="detail-row-actions">
-                      <button type="button" class="row-action" id="detailSecondaryActionA" hidden aria-label="Secondary row action"></button>
-                      <button type="button" class="row-action" id="detailSecondaryActionB" hidden aria-label="Secondary secondary action"></button>
-                    </div>
-                  </div>
-                </section>
+                  </section>
 
-                <section class="detail-section">
-                  <div class="detail-row" id="detailTertiaryRow">
-                    <div class="detail-row-content">
-                      <p class="detail-label" id="detailTertiaryLabel">URL</p>
-                      <p class="detail-value" id="detailTertiaryValue">No URL</p>
+                  <section class="detail-section">
+                    <div class="detail-row" id="detailSecondaryRow">
+                      <div class="detail-row-content">
+                        <p class="detail-label" id="detailSecondaryLabel">Password</p>
+                        <p class="detail-value detail-password" id="detailSecondaryValue">••••••••••••</p>
+                      </div>
+                      <div class="detail-row-actions">
+                        <button type="button" class="row-action" id="detailSecondaryActionA" hidden aria-label="Secondary row action"></button>
+                        <button type="button" class="row-action" id="detailSecondaryActionB" hidden aria-label="Secondary secondary action"></button>
+                      </div>
                     </div>
-                    <div class="detail-row-actions">
-                      <button type="button" class="row-action" id="detailTertiaryActionA" hidden aria-label="Tertiary row action"></button>
-                      <button type="button" class="row-action" id="detailTertiaryActionB" hidden aria-label="Tertiary secondary action"></button>
+                  </section>
+
+                  <section class="detail-section">
+                    <div class="detail-row" id="detailTertiaryRow">
+                      <div class="detail-row-content">
+                        <p class="detail-label" id="detailTertiaryLabel">URL</p>
+                        <p class="detail-value" id="detailTertiaryValue">No URL</p>
+                      </div>
+                      <div class="detail-row-actions">
+                        <button type="button" class="row-action" id="detailTertiaryActionA" hidden aria-label="Tertiary row action"></button>
+                        <button type="button" class="row-action" id="detailTertiaryActionB" hidden aria-label="Tertiary secondary action"></button>
+                      </div>
                     </div>
+                  </section>
+
+                  <section class="detail-section">
+                    <div class="detail-row" id="detailNotesRow">
+                      <div class="detail-row-content">
+                        <p class="detail-label" id="detailNotesLabel">Notes</p>
+                        <p class="detail-value" id="detailNotesValue">—</p>
+                        <textarea id="detailNotesEditor" class="detail-row-editor detail-row-editor--textarea" hidden></textarea>
+                      </div>
+                      <div class="detail-row-actions">
+                        <button type="button" class="row-action" id="detailNotesActionA" hidden aria-label="Notes action"></button>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="detail-section" id="detailCustomFieldsSection" hidden>
+                    <div class="detail-custom-fields-header">
+                      <p id="detailCustomFieldsTitle" class="detail-custom-fields-title">Custom fields</p>
+                      <button type="button" id="detailCustomFieldAddBtn" class="btn-secondary" hidden>Add field</button>
+                    </div>
+                    <div id="detailCustomFieldsList" class="detail-custom-fields-list"></div>
+                  </section>
+
+                  <section id="detailHistorySummarySection" class="detail-history-summary" hidden>
+                    <button type="button" id="detailHistorySummaryToggle" class="detail-history-summary-toggle">
+                      <span id="detailHistorySummaryChevron" class="material-symbols-rounded" aria-hidden="true">chevron_right</span>
+                      <p id="detailHistorySummaryTitle" class="detail-history-summary-title">No history yet.</p>
+                    </button>
+                    <div id="detailHistorySummaryBody" class="detail-history-summary-body" hidden></div>
+                  </section>
+                </div>
+
+                <section id="detailHistoryPanel" class="detail-inline-panel" hidden>
+                  <div id="detailHistoryListView" class="detail-history-list-view">
+                    <div id="detailHistoryList" class="detail-history-timeline"></div>
+                    <p id="detailHistoryEmpty" class="empty-state" hidden>No history entries yet.</p>
+                  </div>
+
+                  <div id="detailHistoryEntryView" class="detail-history-entry-view" hidden>
+                    <div id="detailHistoryEntryDetail" class="detail-history-entry-detail"></div>
                   </div>
                 </section>
               </div>
@@ -2198,6 +2998,19 @@
           accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon"
           hidden
         />
+        <div id="confirmDeleteModal" class="confirm-modal-backdrop" hidden>
+          <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmDeleteTitle" aria-describedby="confirmDeleteBody">
+            <h2 id="confirmDeleteTitle" class="confirm-modal-title">Delete item?</h2>
+            <p id="confirmDeleteBody" class="confirm-modal-body">
+              This item will be moved to Trash. You can restore it for a limited time.
+            </p>
+            <div class="confirm-modal-actions">
+              <button type="button" id="confirmDeleteConfirmBtn" class="confirm-modal-delete-btn">Delete</button>
+              <button type="button" id="confirmDeleteCancelBtn" class="btn-secondary confirm-modal-cancel-btn">Cancel</button>
+            </div>
+          </section>
+        </div>
+        <div id="copyToast" class="copy-toast" role="status" aria-live="polite" hidden>Copied</div>
       </div>
     </main>
 

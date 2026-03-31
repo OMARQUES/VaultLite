@@ -196,6 +196,7 @@ describe('createVaultWorkspace', () => {
       itemType: 'login',
       encryptedPayload: expect.any(String),
       expectedRevision: 1,
+      encryptedDiffPayload: expect.any(String),
     });
   });
 

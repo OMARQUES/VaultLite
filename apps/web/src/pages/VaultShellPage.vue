@@ -40,7 +40,7 @@ import {
   type ManualSiteIconMap,
 } from '../lib/manual-site-icons';
 import { foregroundRefreshCoordinator, withIntervalJitter } from '../lib/foreground-refresh-coordinator';
-import { encryptAttachmentBlobPayload } from '../lib/browser-crypto';
+import { decryptVaultItemPayload, encryptAttachmentBlobPayload } from '../lib/browser-crypto';
 import { createWebRealtimeClient, type WebRealtimeClient } from '../lib/realtime-client';
 import { createVaultLiteVaultClient } from '../lib/vault-client';
 import {
@@ -59,6 +59,7 @@ type VaultScope = 'all' | 'favorites' | 'trash';
 type VaultTypeFilter = 'all' | 'login' | 'document' | 'card' | 'secure_note';
 type AttachmentUploadState = 'pending' | 'uploaded' | 'attached' | 'deleted' | 'orphaned';
 const PASSWORD_HISTORY_REALTIME_EVENT = 'vaultlite.password_history.updated';
+const VAULT_HISTORY_REALTIME_EVENT = 'vaultlite.vault_history.updated';
 
 interface AttachmentUploadView {
   uploadId: string;
@@ -89,6 +90,24 @@ interface LocalAttachmentAsset {
   size: number;
   previewUrl: string | null;
   downloadUrl: string;
+}
+
+interface VaultHistoryDiffViewEntry {
+  fieldPath: string;
+  before: string;
+  after: string;
+  classification: 'sensitive' | 'non_sensitive';
+}
+
+interface VaultHistoryRecordView {
+  historyId: string;
+  itemId: string;
+  itemRevision: number;
+  changeType: string;
+  sourceDeviceId: string | null;
+  sourceDeviceName: string | null;
+  createdAt: string;
+  diffEntries: VaultHistoryDiffViewEntry[];
 }
 
 const route = useRoute();
@@ -125,6 +144,10 @@ const pendingDraftAttachments = ref<PendingAttachmentDraft[]>([]);
 const localAttachmentAssetsByUploadId = ref<Record<string, LocalAttachmentAsset>>({});
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
+const historyByItemId = ref<Record<string, VaultHistoryRecordView[]>>({});
+const historyErrorByItemId = ref<Record<string, string>>({});
+const historyLoadingItemId = ref<string | null>(null);
+const historyRevealByItemId = ref<Record<string, Record<string, boolean>>>({});
 const faviconSourceIndexByItemAndHost = ref<Record<string, number>>({});
 const manualSiteIconsByHost = ref<ManualSiteIconMap>({});
 const canonicalSiteIconsByHost = ref<
@@ -164,6 +187,7 @@ const REALTIME_WATCHDOG_MS = 15 * 60_000;
 const ATTACHMENTS_STATE_PAGE_SIZE = 200;
 const ATTACHMENTS_STATE_SYNC_DEBOUNCE_MS = 300;
 const ATTACHMENTS_STATE_SYNC_COOLDOWN_MS = 10_000;
+const ITEM_HISTORY_PAGE_SIZE = 40;
 const attachmentObjectUrls = new Set<string>();
 const realtimeEnabled = ref(false);
 const realtimeHealthy = ref(false);
@@ -186,6 +210,7 @@ let attachmentStateSyncScheduledForce = false;
 let lastAttachmentStateSyncAt = 0;
 let attachmentStateHydratedAtLeastOnce = false;
 let foregroundRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+const historySyncInFlightByItemId = new Map<string, Promise<void>>();
 
 const loginDraft = reactive<LoginVaultItemPayload>({
   title: '',
@@ -646,6 +671,181 @@ function requestAttachmentStateSync(options: { force?: boolean } = {}) {
     .catch(() => undefined);
 }
 
+function historyDiffLabel(fieldPath: string): string {
+  if (fieldPath === 'urls') {
+    return 'URLs';
+  }
+  if (fieldPath === 'securityCode') {
+    return 'Security code';
+  }
+  if (fieldPath === 'expiryMonth') {
+    return 'Expiry month';
+  }
+  if (fieldPath === 'expiryYear') {
+    return 'Expiry year';
+  }
+  if (fieldPath === 'cardholderName') {
+    return 'Cardholder name';
+  }
+  return fieldPath.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (value) => value.toUpperCase());
+}
+
+function historyChangeTypeLabel(changeType: string): string {
+  if (changeType === 'create') {
+    return 'Created';
+  }
+  if (changeType === 'delete') {
+    return 'Deleted';
+  }
+  if (changeType === 'restore') {
+    return 'Restored';
+  }
+  return 'Updated';
+}
+
+function historyRevealKey(historyId: string, fieldPath: string): string {
+  return `${historyId}:${fieldPath}`;
+}
+
+function isHistoryDiffRevealed(itemId: string, historyId: string, fieldPath: string): boolean {
+  const itemReveal = historyRevealByItemId.value[itemId] ?? {};
+  return itemReveal[historyRevealKey(historyId, fieldPath)] === true;
+}
+
+function toggleHistoryDiffReveal(itemId: string, historyId: string, fieldPath: string) {
+  const key = historyRevealKey(historyId, fieldPath);
+  const itemReveal = { ...(historyRevealByItemId.value[itemId] ?? {}) };
+  itemReveal[key] = !itemReveal[key];
+  historyRevealByItemId.value = {
+    ...historyRevealByItemId.value,
+    [itemId]: itemReveal,
+  };
+}
+
+function historyDiffDisplayValue(
+  itemId: string,
+  historyId: string,
+  entry: VaultHistoryDiffViewEntry,
+  side: 'before' | 'after',
+): string {
+  if (entry.classification === 'non_sensitive') {
+    return side === 'before' ? entry.before || '—' : entry.after || '—';
+  }
+  if (isHistoryDiffRevealed(itemId, historyId, entry.fieldPath)) {
+    return side === 'before' ? entry.before || '—' : entry.after || '—';
+  }
+  return '••••••';
+}
+
+async function refreshItemHistory(itemId: string, options: { force?: boolean } = {}) {
+  if (!itemId || sessionStore.state.phase !== 'ready') {
+    return;
+  }
+  if (!options.force && historySyncInFlightByItemId.has(itemId)) {
+    return historySyncInFlightByItemId.get(itemId);
+  }
+
+  const run = (async () => {
+    historyLoadingItemId.value = itemId;
+    historyErrorByItemId.value = {
+      ...historyErrorByItemId.value,
+      [itemId]: '',
+    };
+    try {
+      const { accountKey } = sessionStore.getUnlockedVaultContext();
+      const page = await vaultClient.listItemHistory(itemId, {
+        limit: ITEM_HISTORY_PAGE_SIZE,
+      });
+      const records: VaultHistoryRecordView[] = [];
+      for (const record of page.records ?? []) {
+        let diffEntries: VaultHistoryDiffViewEntry[] = [];
+        if (typeof record.encryptedDiffPayload === 'string' && record.encryptedDiffPayload.length > 0) {
+          try {
+            const decrypted = await decryptVaultItemPayload({
+              accountKey,
+              encryptedPayload: record.encryptedDiffPayload,
+            });
+            const entries = Array.isArray((decrypted as { entries?: unknown[] }).entries)
+              ? (decrypted as { entries: unknown[] }).entries
+              : [];
+            diffEntries = entries
+              .map((entry) => {
+                if (!entry || typeof entry !== 'object') {
+                  return null;
+                }
+                const candidate = entry as Partial<VaultHistoryDiffViewEntry>;
+                if (typeof candidate.fieldPath !== 'string' || candidate.fieldPath.trim().length === 0) {
+                  return null;
+                }
+                return {
+                  fieldPath: candidate.fieldPath,
+                  before: typeof candidate.before === 'string' ? candidate.before : '',
+                  after: typeof candidate.after === 'string' ? candidate.after : '',
+                  classification: candidate.classification === 'non_sensitive' ? 'non_sensitive' : 'sensitive',
+                } satisfies VaultHistoryDiffViewEntry;
+              })
+              .filter((entry): entry is VaultHistoryDiffViewEntry => Boolean(entry));
+          } catch {
+            diffEntries = [];
+          }
+        }
+        records.push({
+          historyId: record.historyId,
+          itemId: record.itemId,
+          itemRevision: record.itemRevision,
+          changeType: record.changeType,
+          sourceDeviceId: record.sourceDeviceId,
+          sourceDeviceName: record.sourceDeviceName,
+          createdAt: record.createdAt,
+          diffEntries,
+        });
+      }
+      historyByItemId.value = {
+        ...historyByItemId.value,
+        [itemId]: records,
+      };
+    } catch (error) {
+      historyErrorByItemId.value = {
+        ...historyErrorByItemId.value,
+        [itemId]: toHumanErrorMessage(error),
+      };
+    } finally {
+      if (historyLoadingItemId.value === itemId) {
+        historyLoadingItemId.value = null;
+      }
+      historySyncInFlightByItemId.delete(itemId);
+    }
+  })();
+
+  historySyncInFlightByItemId.set(itemId, run);
+  return run;
+}
+
+function requestSelectedItemHistoryRefresh(options: { force?: boolean } = {}) {
+  if (!selectedItemInContext.value || isTrashContext.value) {
+    return;
+  }
+  const itemId = selectedItemInContext.value.itemId;
+  void foregroundRefreshCoordinator
+    .run(
+      `vault_history:${itemId}`,
+      async () => {
+        await refreshItemHistory(itemId, {
+          force: options.force === true,
+        });
+      },
+      {
+        force: options.force === true,
+        cooldownMs: FOREGROUND_REFRESH_COOLDOWN_MS,
+      },
+    )
+    .catch(() => undefined);
+}
+
+function handleVaultHistoryRealtimeUpdate() {
+  requestSelectedItemHistoryRefresh({ force: true });
+}
+
 function scheduleForegroundRefreshFallback() {
   if (foregroundRefreshTimer !== null) {
     clearTimeout(foregroundRefreshTimer);
@@ -703,7 +903,9 @@ function onRealtimeNetworkOnline() {
 }
 
 async function handleRealtimeDomainResync(
-  domains: Array<'vault' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'>,
+  domains: Array<
+    'vault' | 'vault_history' | 'icons_manual' | 'icons_state' | 'password_history' | 'attachments'
+  >,
 ) {
   if (domains.includes('vault')) {
     void workspace.triggerSync('realtime_vault_resync').catch(() => undefined);
@@ -719,6 +921,9 @@ async function handleRealtimeDomainResync(
   }
   if (domains.includes('password_history') && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(PASSWORD_HISTORY_REALTIME_EVENT));
+  }
+  if (domains.includes('vault_history') && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(VAULT_HISTORY_REALTIME_EVENT));
   }
 }
 
@@ -894,6 +1099,20 @@ const canEditDetailIcon = computed(
 const selectedAttachmentItem = computed(() => selectedItemInContext.value);
 const selectedItemUploads = computed(
   () => (selectedAttachmentItem.value ? attachmentsByItemId.value[selectedAttachmentItem.value.itemId] : []) ?? [],
+);
+const selectedItemHistory = computed(
+  () =>
+    (selectedItemInContext.value
+      ? historyByItemId.value[selectedItemInContext.value.itemId] ?? []
+      : []) as VaultHistoryRecordView[],
+);
+const selectedItemHistoryError = computed(() =>
+  selectedItemInContext.value ? historyErrorByItemId.value[selectedItemInContext.value.itemId] ?? '' : '',
+);
+const selectedItemHistoryLoading = computed(
+  () =>
+    Boolean(selectedItemInContext.value) &&
+    historyLoadingItemId.value === selectedItemInContext.value?.itemId,
 );
 
 const isCreateLogin = computed(() => route.path === '/vault/new/login');
@@ -1725,6 +1944,11 @@ watch(
     iconObjectDataUrlByKey.value = {};
     iconDomainsSyncedByItem.value = loadPersistedIconDomainSyncSignatures(sessionStore.state.username);
     attachmentsByItemId.value = {};
+    historyByItemId.value = {};
+    historyErrorByItemId.value = {};
+    historyRevealByItemId.value = {};
+    historyLoadingItemId.value = null;
+    historySyncInFlightByItemId.clear();
     iconsStateHydratedAtLeastOnce = false;
     lastIconsStateHydratedAt = 0;
     lastAttachmentStateSyncAt = 0;
@@ -1784,6 +2008,24 @@ watch(
       return;
     }
     scheduleAttachmentStateSync();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [selectedItemInContext.value?.itemId ?? null, isTrashContext.value] as const,
+  ([itemId, trash], previous) => {
+    const previousItemId = previous?.[0] ?? null;
+    if (previousItemId && previousItemId !== itemId) {
+      historyRevealByItemId.value = {
+        ...historyRevealByItemId.value,
+        [previousItemId]: {},
+      };
+    }
+    if (!itemId || trash) {
+      return;
+    }
+    requestSelectedItemHistoryRefresh();
   },
   { immediate: true },
 );
@@ -3258,6 +3500,7 @@ onMounted(() => {
 
   window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('online', onRealtimeNetworkOnline);
+  window.addEventListener(VAULT_HISTORY_REALTIME_EVENT, handleVaultHistoryRealtimeUpdate);
   document.addEventListener('visibilitychange', handleVisibilityChange);
   refreshManualSiteIcons();
   requestManualSiteIconRefresh();
@@ -3283,6 +3526,7 @@ onBeforeUnmount(() => {
   compactDesktopQuery = null;
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('online', onRealtimeNetworkOnline);
+  window.removeEventListener(VAULT_HISTORY_REALTIME_EVENT, handleVaultHistoryRealtimeUpdate);
   document.removeEventListener('visibilitychange', handleVisibilityChange);
   if (iconHydrationDebounceTimer) {
     clearTimeout(iconHydrationDebounceTimer);
@@ -3301,6 +3545,7 @@ onBeforeUnmount(() => {
     foregroundRefreshTimer = null;
   }
   attachmentStateSyncInFlight = null;
+  historySyncInFlightByItemId.clear();
   iconObjectFetchInFlightByKey.clear();
   for (const objectUrl of attachmentObjectUrls) {
     URL.revokeObjectURL(objectUrl);
@@ -4361,6 +4606,81 @@ onBeforeUnmount(() => {
             <dd>{{ folderName(folderFor(selectedItemInContext.itemId)) }}</dd>
           </div>
         </KeyValueList>
+
+        <section v-if="!isTrashContext" class="detail-module">
+          <div class="custom-fields-section__header">
+            <h3>History</h3>
+            <SecondaryButton
+              type="button"
+              class="module-action-button"
+              :disabled="selectedItemHistoryLoading"
+              @click="requestSelectedItemHistoryRefresh({ force: true })"
+            >
+              <span>{{ selectedItemHistoryLoading ? 'Refreshing...' : 'Refresh' }}</span>
+            </SecondaryButton>
+          </div>
+
+          <InlineAlert v-if="selectedItemHistoryError" tone="danger">
+            {{ selectedItemHistoryError }}
+          </InlineAlert>
+
+          <p v-else-if="selectedItemHistoryLoading && selectedItemHistory.length === 0" class="module-empty-hint">
+            Loading history...
+          </p>
+
+          <div v-else-if="selectedItemHistory.length > 0" class="attachment-list">
+            <article
+              v-for="record in selectedItemHistory"
+              :key="record.historyId"
+              class="attachment-row"
+            >
+              <div class="attachment-row__main">
+                <p class="attachment-row__name">{{ historyChangeTypeLabel(record.changeType) }}</p>
+                <p class="attachment-row__status">{{ new Date(record.createdAt).toLocaleString() }}</p>
+                <p class="attachment-row__meta">
+                  {{ record.sourceDeviceName || record.sourceDeviceId || 'Unknown device' }}
+                </p>
+
+                <div v-if="record.diffEntries.length > 0" class="key-value-list">
+                  <div
+                    v-for="entry in record.diffEntries"
+                    :key="`${record.historyId}:${entry.fieldPath}`"
+                    class="key-value-row"
+                  >
+                    <dt>{{ historyDiffLabel(entry.fieldPath) }}</dt>
+                    <dd>
+                      <div>
+                        Before:
+                        {{ historyDiffDisplayValue(selectedItemInContext.itemId, record.historyId, entry, 'before') }}
+                      </div>
+                      <div>
+                        After:
+                        {{ historyDiffDisplayValue(selectedItemInContext.itemId, record.historyId, entry, 'after') }}
+                      </div>
+                      <SecondaryButton
+                        v-if="entry.classification === 'sensitive'"
+                        type="button"
+                        class="module-action-button"
+                        @click="toggleHistoryDiffReveal(selectedItemInContext.itemId, record.historyId, entry.fieldPath)"
+                      >
+                        <span>
+                          {{
+                            isHistoryDiffRevealed(selectedItemInContext.itemId, record.historyId, entry.fieldPath)
+                              ? 'Hide values'
+                              : 'Reveal values'
+                          }}
+                        </span>
+                      </SecondaryButton>
+                    </dd>
+                  </div>
+                </div>
+                <p v-else class="module-empty-hint">No field diffs recorded.</p>
+              </div>
+            </article>
+          </div>
+
+          <p v-else class="module-empty-hint">No history entries yet.</p>
+        </section>
 
         <section
           v-if="!isTrashContext && detailCustomFields(selectedItemInContext).length === 0"

@@ -104,6 +104,9 @@ import {
   DeviceListOutputSchema,
   DeviceRevokeOutputSchema,
   VaultItemCreateInputSchema,
+  VaultItemExtensionUpdateInputSchema,
+  VaultItemHistoryListOutputSchema,
+  VaultItemHistoryRecordSchema,
   VaultItemListOutputSchema,
   VaultItemRecordSchema,
   VaultItemRestoreOutputSchema,
@@ -295,6 +298,10 @@ const SYNC_SNAPSHOT_PAGE_SIZE_MAX = 100;
 const SYNC_SNAPSHOT_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
 const VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS = 30;
+const VAULT_ITEM_HISTORY_RETENTION_DAYS = 365;
+const VAULT_ITEM_HISTORY_PRUNE_LIMIT = 200;
+const VAULT_ITEM_HISTORY_PAGE_SIZE_DEFAULT = 30;
+const VAULT_ITEM_HISTORY_PAGE_SIZE_MAX = 100;
 const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
 const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
 const ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES = MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES;
@@ -1847,6 +1854,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (topic.startsWith('vault.item.')) {
       return realtimeConfig.flags.realtime_delta_vault_v1;
     }
+    if (topic.startsWith('vault.history.')) {
+      return realtimeConfig.flags.realtime_delta_history_v1;
+    }
     if (topic.startsWith('icons.')) {
       return realtimeConfig.flags.realtime_delta_icons_v1;
     }
@@ -1865,6 +1875,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
     const record = payload as Record<string, unknown>;
     if (topic.startsWith('vault.item.')) {
+      return typeof record.itemId === 'string' ? record.itemId : null;
+    }
+    if (topic.startsWith('vault.history.')) {
       return typeof record.itemId === 'string' ? record.itemId : null;
     }
     if (topic.startsWith('icons.manual.')) {
@@ -1985,6 +1998,48 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     } catch {
       // Keep mutation path resilient. Replay fallback will recover state.
     }
+  }
+
+  async function recordVaultItemHistory(input: {
+    ownerUserId: string;
+    itemId: string;
+    itemRevision: number;
+    changeType: 'create' | 'update' | 'delete' | 'restore';
+    encryptedDiffPayload?: string | null;
+    sourceDeviceId: string | null;
+    createdAt: string;
+  }): Promise<void> {
+    const historyRecord = await options.storage.vaultItemHistory.create({
+      historyId: options.idGenerator.nextId('item_history'),
+      ownerUserId: input.ownerUserId,
+      itemId: input.itemId,
+      itemRevision: input.itemRevision,
+      changeType: input.changeType,
+      encryptedDiffPayload: input.encryptedDiffPayload ?? null,
+      sourceDeviceId: input.sourceDeviceId ?? null,
+      createdAt: input.createdAt,
+    });
+    const cutoffIso = new Date(
+      Date.parse(input.createdAt) - VAULT_ITEM_HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    await options.storage.vaultItemHistory.pruneByOwnerOlderThan({
+      ownerUserId: input.ownerUserId,
+      cutoffIso,
+      limit: VAULT_ITEM_HISTORY_PRUNE_LIMIT,
+    });
+    await publishRealtimeEvent({
+      userId: input.ownerUserId,
+      topic: 'vault.history.upserted',
+      sourceDeviceId: input.sourceDeviceId,
+      occurredAt: input.createdAt,
+      payload: {
+        historyId: historyRecord.historyId,
+        itemId: historyRecord.itemId,
+        itemRevision: historyRecord.itemRevision,
+        changeType: historyRecord.changeType,
+        createdAt: historyRecord.createdAt,
+      },
+    });
   }
 
   async function invalidateRealtimeConnections(input: {
@@ -7867,6 +7922,63 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
   });
 
+  app.get('/api/vault/items/:itemId/history', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    const rawLimit = Number(c.req.query('limit'));
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(VAULT_ITEM_HISTORY_PAGE_SIZE_MAX, Math.trunc(rawLimit)))
+      : VAULT_ITEM_HISTORY_PAGE_SIZE_DEFAULT;
+    const cursor = c.req.query('cursor');
+    const page = await options.storage.vaultItemHistory.listByItem({
+      ownerUserId: sessionContext.user.userId,
+      itemId: c.req.param('itemId'),
+      limit,
+      cursor: typeof cursor === 'string' && cursor.length > 0 ? cursor : null,
+    });
+    const uniqueDeviceIds = Array.from(
+      new Set(
+        page.records
+          .map((record) => record.sourceDeviceId)
+          .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ),
+    );
+    const deviceNameById = new Map<string, string>();
+    await Promise.all(
+      uniqueDeviceIds.map(async (deviceId) => {
+        const device = await options.storage.devices.findById(deviceId);
+        if (device && device.userId === sessionContext.user.userId) {
+          deviceNameById.set(deviceId, device.deviceName);
+        }
+      }),
+    );
+    return jsonResponse(
+      200,
+      VaultItemHistoryListOutputSchema.parse({
+        records: page.records.map((record) =>
+          VaultItemHistoryRecordSchema.parse({
+            historyId: record.historyId,
+            itemId: record.itemId,
+            itemRevision: record.itemRevision,
+            changeType: record.changeType,
+            encryptedDiffPayload: record.encryptedDiffPayload,
+            sourceDeviceId: record.sourceDeviceId,
+            sourceDeviceName:
+              record.sourceDeviceId && deviceNameById.has(record.sourceDeviceId)
+                ? deviceNameById.get(record.sourceDeviceId)
+                : null,
+            createdAt: record.createdAt,
+          }),
+        ),
+        nextCursor: page.nextCursor,
+      }),
+    );
+  });
+
   app.post('/api/vault/items', async (c) => {
     const sessionContext = await requireAuthenticatedSession(c.req.raw);
     if (!sessionContext) {
@@ -7901,6 +8013,15 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       encryptedPayload: input.encryptedPayload,
       createdAt: nowIso,
       updatedAt: nowIso,
+    });
+    await recordVaultItemHistory({
+      ownerUserId: sessionContext.user.userId,
+      itemId: item.itemId,
+      itemRevision: item.revision,
+      changeType: 'create',
+      encryptedDiffPayload: null,
+      sourceDeviceId: sessionContext.device.deviceId,
+      createdAt: nowIso,
     });
     await publishRealtimeEvent({
       userId: sessionContext.user.userId,
@@ -7964,6 +8085,15 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         expectedRevision: input.expectedRevision,
         updatedAt: isoNow(options.clock),
       });
+      await recordVaultItemHistory({
+        ownerUserId: sessionContext.user.userId,
+        itemId: item.itemId,
+        itemRevision: item.revision,
+        changeType: 'update',
+        encryptedDiffPayload: input.encryptedDiffPayload ?? null,
+        sourceDeviceId: sessionContext.device.deviceId,
+        createdAt: item.updatedAt,
+      });
       await publishRealtimeEvent({
         userId: sessionContext.user.userId,
         topic: 'vault.item.upserted',
@@ -8007,6 +8137,226 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     }
   });
 
+  app.put('/api/extension/vault/items/:itemId', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_ITEM_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultItemExtensionUpdateInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      if (hasTooBigIssue(parsedInput.error, 'encryptedPayload')) {
+        return jsonResponse(413, { ok: false, code: 'payload_too_large' });
+      }
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const input = parsedInput.data;
+
+    try {
+      const item = await options.storage.vaultItems.update({
+        itemId: c.req.param('itemId'),
+        ownerUserId: sessionContext.user.userId,
+        itemType: input.itemType,
+        encryptedPayload: input.encryptedPayload,
+        expectedRevision: input.expectedRevision,
+        updatedAt: isoNow(options.clock),
+      });
+      await recordVaultItemHistory({
+        ownerUserId: sessionContext.user.userId,
+        itemId: item.itemId,
+        itemRevision: item.revision,
+        changeType: 'update',
+        encryptedDiffPayload: input.encryptedDiffPayload ?? null,
+        sourceDeviceId: sessionContext.device.deviceId,
+        createdAt: item.updatedAt,
+      });
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.item.upserted',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: item.updatedAt,
+        payload: {
+          itemId: item.itemId,
+          itemType: item.itemType,
+          revision: item.revision,
+          updatedAt: item.updatedAt,
+          encryptedPayload: item.encryptedPayload,
+        },
+      });
+
+      return jsonResponse(
+        200,
+        VaultItemRecordSchema.parse({
+          itemId: item.itemId,
+          itemType: item.itemType,
+          revision: item.revision,
+          encryptedPayload: item.encryptedPayload,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === 'item_not_found') {
+        const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+          sessionContext.user.userId,
+        );
+        if (tombstones.some((tombstone) => tombstone.itemId === c.req.param('itemId'))) {
+          return jsonResponse(409, { ok: false, code: 'item_deleted_conflict' });
+        }
+        return jsonResponse(404, { ok: false, code: 'not_found' });
+      }
+      if (error instanceof Error && error.message === 'revision_conflict') {
+        return jsonResponse(409, { ok: false, code: 'revision_conflict' });
+      }
+
+      return jsonResponse(500, { ok: false, code: 'vault_item_update_failed' });
+    }
+  });
+
+  app.delete('/api/extension/vault/items/:itemId', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const deletedAtIso = isoNow(options.clock);
+    const deleted = await options.storage.vaultItems.delete(
+      c.req.param('itemId'),
+      sessionContext.user.userId,
+      deletedAtIso,
+    );
+    if (!deleted) {
+      const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+        sessionContext.user.userId,
+      );
+      if (tombstones.some((tombstone) => tombstone.itemId === c.req.param('itemId'))) {
+        return emptyResponse(204);
+      }
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+
+    const tombstones = await options.storage.vaultItems.listTombstonesByOwnerUserId(
+      sessionContext.user.userId,
+    );
+    const deletedTombstone = tombstones.find((entry) => entry.itemId === c.req.param('itemId'));
+    if (deletedTombstone) {
+      await recordVaultItemHistory({
+        ownerUserId: sessionContext.user.userId,
+        itemId: deletedTombstone.itemId,
+        itemRevision: deletedTombstone.revision,
+        changeType: 'delete',
+        encryptedDiffPayload: null,
+        sourceDeviceId: sessionContext.device.deviceId,
+        createdAt: deletedTombstone.deletedAt,
+      });
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.item.tombstoned',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: deletedTombstone.deletedAt,
+        payload: {
+          itemId: deletedTombstone.itemId,
+          itemType: deletedTombstone.itemType,
+          revision: deletedTombstone.revision,
+          deletedAt: deletedTombstone.deletedAt,
+        },
+      });
+    }
+
+    return emptyResponse(204);
+  });
+
+  app.post('/api/extension/vault/items/:itemId/restore', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const restoredAtIso = isoNow(options.clock);
+    let restoreResult: Awaited<ReturnType<typeof options.storage.vaultItems.restore>>;
+    try {
+      restoreResult = await options.storage.vaultItems.restore({
+        itemId: c.req.param('itemId'),
+        ownerUserId: sessionContext.user.userId,
+        restoredAtIso,
+        restoreRetentionDays: VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS,
+      });
+    } catch {
+      return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
+    }
+
+    if (restoreResult.status === 'not_found') {
+      return jsonResponse(404, { ok: false, code: 'not_found' });
+    }
+    if (restoreResult.status === 'restore_window_expired') {
+      return jsonResponse(409, { ok: false, code: 'restore_window_expired' });
+    }
+    if (!restoreResult.item) {
+      return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
+    }
+    await recordVaultItemHistory({
+      ownerUserId: sessionContext.user.userId,
+      itemId: restoreResult.item.itemId,
+      itemRevision: restoreResult.item.revision,
+      changeType: 'restore',
+      encryptedDiffPayload: null,
+      sourceDeviceId: sessionContext.device.deviceId,
+      createdAt: restoreResult.item.updatedAt,
+    });
+    await publishRealtimeEvent({
+      userId: sessionContext.user.userId,
+      topic: 'vault.item.upserted',
+      sourceDeviceId: sessionContext.device.deviceId,
+      occurredAt: restoreResult.item.updatedAt,
+      payload: {
+        itemId: restoreResult.item.itemId,
+        itemType: restoreResult.item.itemType,
+        revision: restoreResult.item.revision,
+        updatedAt: restoreResult.item.updatedAt,
+        encryptedPayload: restoreResult.item.encryptedPayload,
+      },
+    });
+
+    return jsonResponse(
+      200,
+      VaultItemRestoreOutputSchema.parse({
+        ok: true,
+        result: toCanonicalResult(restoreResult.status),
+        item: VaultItemRecordSchema.parse({
+          itemId: restoreResult.item.itemId,
+          itemType: restoreResult.item.itemType,
+          revision: restoreResult.item.revision,
+          encryptedPayload: restoreResult.item.encryptedPayload,
+          createdAt: restoreResult.item.createdAt,
+          updatedAt: restoreResult.item.updatedAt,
+        }),
+      }),
+    );
+  });
+
   app.delete('/api/vault/items/:itemId', async (c) => {
     const sessionContext = await requireAuthenticatedSession(c.req.raw);
     if (!sessionContext) {
@@ -8037,6 +8387,15 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     );
     const deletedTombstone = tombstones.find((entry) => entry.itemId === c.req.param('itemId'));
     if (deletedTombstone) {
+      await recordVaultItemHistory({
+        ownerUserId: sessionContext.user.userId,
+        itemId: deletedTombstone.itemId,
+        itemRevision: deletedTombstone.revision,
+        changeType: 'delete',
+        encryptedDiffPayload: null,
+        sourceDeviceId: sessionContext.device.deviceId,
+        createdAt: deletedTombstone.deletedAt,
+      });
       await publishRealtimeEvent({
         userId: sessionContext.user.userId,
         topic: 'vault.item.tombstoned',
@@ -8085,6 +8444,15 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (!restoreResult.item) {
       return jsonResponse(500, { ok: false, code: 'vault_item_restore_failed' });
     }
+    await recordVaultItemHistory({
+      ownerUserId: sessionContext.user.userId,
+      itemId: restoreResult.item.itemId,
+      itemRevision: restoreResult.item.revision,
+      changeType: 'restore',
+      encryptedDiffPayload: null,
+      sourceDeviceId: sessionContext.device.deviceId,
+      createdAt: restoreResult.item.updatedAt,
+    });
     await publishRealtimeEvent({
       userId: sessionContext.user.userId,
       topic: 'vault.item.upserted',

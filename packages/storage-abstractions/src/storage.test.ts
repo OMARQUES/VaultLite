@@ -179,6 +179,71 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(replay.item?.itemId).toBe('item_1');
   });
 
+  test('stores and paginates item history records and prunes by retention cutoff', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.vaultItemHistory.create({
+      historyId: 'hist_1',
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      itemRevision: 2,
+      changeType: 'update',
+      encryptedDiffPayload: 'diff_encrypted_1',
+      sourceDeviceId: 'device_1',
+      createdAt: '2026-03-15T00:10:00.000Z',
+    });
+    await storage.vaultItemHistory.create({
+      historyId: 'hist_2',
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      itemRevision: 3,
+      changeType: 'update',
+      encryptedDiffPayload: 'diff_encrypted_2',
+      sourceDeviceId: 'device_1',
+      createdAt: '2026-03-16T00:10:00.000Z',
+    });
+    await storage.vaultItemHistory.create({
+      historyId: 'hist_3',
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      itemRevision: 4,
+      changeType: 'delete',
+      encryptedDiffPayload: null,
+      sourceDeviceId: 'device_1',
+      createdAt: '2026-03-17T00:10:00.000Z',
+    });
+
+    const firstPage = await storage.vaultItemHistory.listByItem({
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      limit: 2,
+    });
+    expect(firstPage.records.map((record) => record.historyId)).toEqual(['hist_3', 'hist_2']);
+    expect(firstPage.nextCursor).toBe('hist_2');
+
+    const secondPage = await storage.vaultItemHistory.listByItem({
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      limit: 2,
+      cursor: firstPage.nextCursor,
+    });
+    expect(secondPage.records.map((record) => record.historyId)).toEqual(['hist_1']);
+    expect(secondPage.nextCursor).toBeNull();
+
+    const pruned = await storage.vaultItemHistory.pruneByOwnerOlderThan({
+      ownerUserId: 'user_1',
+      cutoffIso: '2026-03-16T12:00:00.000Z',
+      limit: 10,
+    });
+    expect(pruned).toBe(2);
+
+    const remaining = await storage.vaultItemHistory.listByItem({
+      ownerUserId: 'user_1',
+      itemId: 'item_1',
+      limit: 10,
+    });
+    expect(remaining.records.map((record) => record.historyId)).toEqual(['hist_3']);
+  });
+
   test('supports pending attachment records, idempotency lookup, and uploaded transition', async () => {
     const storage = createInMemoryVaultLiteStorage();
     await storage.attachmentBlobs.put({

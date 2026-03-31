@@ -181,6 +181,9 @@ function isSuggestedLoginForCurrentPage(item) {
 
 export function resolveRowQuickAction(input) {
   const item = input?.item ?? null;
+  if (item?.isDeleted === true) {
+    return null;
+  }
   const hasNavigableUrl = Boolean(toNavigableUrl(item?.firstUrl ?? ''));
   if (!hasNavigableUrl) {
     return null;
@@ -228,7 +231,11 @@ export function parsePersistedPopupUiState(rawState) {
   const suggestedOnlyRaw = source.suggestedOnly;
   const sortModeRaw = source.sortMode;
   const validTypeFilter =
-    typeFilterRaw === 'login' || typeFilterRaw === 'card' || typeFilterRaw === 'document' || typeFilterRaw === 'secure_note'
+    typeFilterRaw === 'login' ||
+    typeFilterRaw === 'card' ||
+    typeFilterRaw === 'document' ||
+    typeFilterRaw === 'secure_note' ||
+    typeFilterRaw === 'trash'
       ? typeFilterRaw
       : 'all';
 

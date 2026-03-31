@@ -257,6 +257,75 @@ export function createExtensionApiClient(serverOrigin) {
         headers: buildHeaders({ bearerToken: input?.bearerToken }),
       });
     },
+    async updateVaultItem(input) {
+      const itemId =
+        typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+      if (!itemId) {
+        const error = new Error('invalid_input');
+        error.code = 'invalid_input';
+        throw error;
+      }
+      return requestJson(`${base}/api/extension/vault/items/${encodeURIComponent(itemId)}`, {
+        method: 'PUT',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemType: input?.itemType,
+          encryptedPayload: input?.encryptedPayload,
+          expectedRevision: input?.expectedRevision,
+          encryptedDiffPayload:
+            typeof input?.encryptedDiffPayload === 'string' && input.encryptedDiffPayload.length > 0
+              ? input.encryptedDiffPayload
+              : undefined,
+        }),
+      });
+    },
+    async deleteVaultItem(input) {
+      const itemId =
+        typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+      if (!itemId) {
+        const error = new Error('invalid_input');
+        error.code = 'invalid_input';
+        throw error;
+      }
+      return requestJson(`${base}/api/extension/vault/items/${encodeURIComponent(itemId)}`, {
+        method: 'DELETE',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async restoreVaultItem(input) {
+      const itemId =
+        typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+      if (!itemId) {
+        const error = new Error('invalid_input');
+        error.code = 'invalid_input';
+        throw error;
+      }
+      return requestJson(`${base}/api/extension/vault/items/${encodeURIComponent(itemId)}/restore`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
+    async listVaultItemHistory(input = {}) {
+      const itemId =
+        typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+      if (!itemId) {
+        const error = new Error('invalid_input');
+        error.code = 'invalid_input';
+        throw error;
+      }
+      const query = new URLSearchParams();
+      if (Number.isFinite(input?.limit)) {
+        query.set('limit', String(Math.max(1, Math.trunc(input.limit))));
+      }
+      if (typeof input?.cursor === 'string' && input.cursor.length > 0) {
+        query.set('cursor', input.cursor);
+      }
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return requestJson(`${base}/api/vault/items/${encodeURIComponent(itemId)}/history${suffix}`, {
+        method: 'GET',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+      });
+    },
     async createLinkRequest(input) {
       return requestJson(`${base}/api/auth/extension/link/request`, {
         method: 'POST',

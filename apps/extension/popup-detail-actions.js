@@ -44,6 +44,49 @@ export function buildDetailViewModel(item, options = {}) {
       ? options.passwordValue
       : MASKED_PASSWORD;
 
+  if (item?.isDeleted === true) {
+    const deletedAt =
+      typeof item?.deletedAt === 'string' && item.deletedAt.length > 0 ? item.deletedAt : 'Unknown';
+    const restoreExpiresAt =
+      typeof item?.restoreExpiresAt === 'string' && item.restoreExpiresAt.length > 0
+        ? item.restoreExpiresAt
+        : 'Unknown';
+    const restoreDaysRemaining = Number.isFinite(Number(item?.restoreDaysRemaining))
+      ? Math.max(0, Math.trunc(Number(item.restoreDaysRemaining)))
+      : null;
+    const restoreHint =
+      restoreDaysRemaining === null
+        ? restoreExpiresAt
+        : restoreDaysRemaining === 1
+          ? '1 day left'
+          : `${restoreDaysRemaining} days left`;
+    return {
+      typeLabel: 'TRASH',
+      title,
+      primaryAction: {
+        id: 'restore_item',
+        label: 'Restore',
+      },
+      rows: [
+        {
+          label: 'Deleted at',
+          value: deletedAt,
+          actions: [],
+        },
+        {
+          label: 'Restore window',
+          value: restoreHint,
+          actions: [],
+        },
+        {
+          label: 'Type',
+          value: resolveItemTypeLabel(itemType),
+          actions: [],
+        },
+      ],
+    };
+  }
+
   if (itemType === 'login') {
     return {
       typeLabel: 'LOGIN',
@@ -63,7 +106,7 @@ export function buildDetailViewModel(item, options = {}) {
           label: 'Password',
           value: passwordValue,
           password: true,
-          defaultAction: 'toggle_password_visibility',
+          defaultAction: 'copy_password',
           actions: [
             {
               id: 'toggle_password_visibility',
@@ -75,7 +118,7 @@ export function buildDetailViewModel(item, options = {}) {
         {
           label: 'URL',
           value: urlValue,
-          defaultAction: navigableUrl ? 'open_url' : 'copy_url',
+          defaultAction: 'copy_url',
           actions: [
             { id: 'copy_url', label: 'Copy URL' },
             ...(navigableUrl ? [{ id: 'open_url', label: 'Open URL' }] : []),

@@ -2,7 +2,8 @@ export type ForegroundRefreshDomain =
   | 'session'
   | 'icons_manual'
   | 'icons_state'
-  | 'attachments_state';
+  | 'attachments_state'
+  | `vault_history:${string}`;
 
 interface ForegroundRefreshOptions {
   force?: boolean;

@@ -59,6 +59,7 @@ const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
 const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
 const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
+const STORAGE_SESSION_TOMBSTONE_CACHE_KEY = 'vaultlite.session_tombstone_cache.v1';
 const STORAGE_ICON_DOMAIN_REGISTRATION_KEY = 'vaultlite.icon_domain_registration.v1';
 const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
@@ -91,6 +92,7 @@ const PASSWORD_GENERATOR_HISTORY_MAX_ENTRIES = 200;
 const PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY = 'vaultlite.password_generator_history.cache.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.password_generator_history.synced_at.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
+const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
 const REALTIME_CONNECT_INITIAL_JITTER_MAX_MS = 750;
 const REALTIME_RECONNECT_BASE_DELAY_MS = 500;
@@ -109,6 +111,7 @@ const REALTIME_ICONS_RESYNC_COOLDOWN_MS = 10_000;
 const REALTIME_CURSOR_PERSIST_DEBOUNCE_MS = 2_000;
 const ICON_DOMAIN_SYNC_BACKOFF_BASE_MS = 3_000;
 const ICON_DOMAIN_SYNC_BACKOFF_MAX_MS = 60_000;
+const VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS = 30;
 
 const state = {
   phase: 'anonymous',
@@ -134,9 +137,18 @@ let passwordGeneratorHistoryCache = [];
 let passwordGeneratorHistoryCacheLoaded = false;
 let passwordGeneratorHistoryCacheLastSyncedAt = 0;
 let passwordGeneratorHistorySyncInFlight = null;
+const itemUpdateInFlightByItemId = new Map();
+const itemDeleteInFlightByItemId = new Map();
+const itemRestoreInFlightByItemId = new Map();
+const vaultItemHistoryCacheByItemId = new Map();
 let credentialsCache = {
   loadedAt: 0,
   credentials: [],
+};
+let tombstoneCache = {
+  cacheKey: null,
+  loadedAt: 0,
+  tombstones: [],
 };
 let sessionListProjectionCache = {
   cacheKey: null,
@@ -1129,6 +1141,10 @@ function refreshFromRealtimeDomains(domains) {
       schedulePopupRealtimeNotification(['password_history']);
     });
   }
+  if (domains.includes('vault_history')) {
+    vaultItemHistoryCacheByItemId.clear();
+    schedulePopupRealtimeNotification(['vault_history']);
+  }
 }
 
 function handleRealtimeServerEvent(eventEnvelope) {
@@ -1176,6 +1192,19 @@ function handleRealtimeServerEvent(eventEnvelope) {
     }).then(() => {
       schedulePopupRealtimeNotification(['password_history']);
     });
+    return;
+  }
+  if (topic.startsWith('vault.history.')) {
+    const itemId =
+      typeof eventEnvelope?.payload?.itemId === 'string' && eventEnvelope.payload.itemId.trim().length > 0
+        ? eventEnvelope.payload.itemId.trim()
+        : null;
+    if (itemId) {
+      vaultItemHistoryCacheByItemId.delete(itemId);
+    } else {
+      vaultItemHistoryCacheByItemId.clear();
+    }
+    schedulePopupRealtimeNotification(['vault_history']);
     return;
   }
   if (topic.startsWith('vault.attachment.')) {
@@ -2077,6 +2106,7 @@ function clearSessionListProjectionCacheInMemory() {
 
 async function clearPersistedSessionListProjectionCacheBestEffort() {
   clearSessionListProjectionCacheInMemory();
+  clearSessionTombstoneCacheInMemory();
   const trustedIdentity = trustedState
     ? {
         username: trustedState.username,
@@ -2101,7 +2131,7 @@ async function clearPersistedSessionListProjectionCacheBestEffort() {
     return;
   }
   try {
-    await sessionStorage.remove(STORAGE_SESSION_LIST_CACHE_KEY);
+    await sessionStorage.remove([STORAGE_SESSION_LIST_CACHE_KEY, STORAGE_SESSION_TOMBSTONE_CACHE_KEY]);
   } catch (error) {
     recordProjectionCacheDiagnostic(classifyProjectionCacheErrorCode(error, 'session_persist_failed'));
   }
@@ -2245,6 +2275,7 @@ async function loadPersistedState() {
         STORAGE_UNLOCK_CONTEXT_KEY,
         STORAGE_RUNTIME_STATE_KEY,
         STORAGE_SESSION_LIST_CACHE_KEY,
+        STORAGE_SESSION_TOMBSTONE_CACHE_KEY,
         STORAGE_ICON_DOMAIN_REGISTRATION_KEY,
       ]);
     } catch {
@@ -2261,6 +2292,7 @@ async function loadPersistedState() {
   const unlockContextEntry = sessionState?.[STORAGE_UNLOCK_CONTEXT_KEY] ?? null;
   const runtimeStateEntry = sessionState?.[STORAGE_RUNTIME_STATE_KEY] ?? null;
   const sessionListProjectionEntry = sessionState?.[STORAGE_SESSION_LIST_CACHE_KEY] ?? null;
+  const sessionTombstoneEntry = sessionState?.[STORAGE_SESSION_TOMBSTONE_CACHE_KEY] ?? null;
   const iconDomainRegistrationEntry = sessionState?.[STORAGE_ICON_DOMAIN_REGISTRATION_KEY] ?? null;
 
   state.serverOrigin = config?.serverOrigin ?? null;
@@ -2323,6 +2355,43 @@ async function loadPersistedState() {
     };
   } else {
     clearSessionListProjectionCacheInMemory();
+  }
+  if (
+    sessionTombstoneEntry &&
+    typeof sessionTombstoneEntry === 'object' &&
+    typeof sessionTombstoneEntry.cacheKey === 'string' &&
+    Array.isArray(sessionTombstoneEntry.tombstones)
+  ) {
+    tombstoneCache = {
+      cacheKey: sessionTombstoneEntry.cacheKey,
+      loadedAt: Number.isFinite(Number(sessionTombstoneEntry.loadedAt))
+        ? Math.trunc(Number(sessionTombstoneEntry.loadedAt))
+        : 0,
+      tombstones: sessionTombstoneEntry.tombstones
+        .filter((entry) => entry && typeof entry.itemId === 'string' && entry.itemId.length > 0)
+        .map((entry) => ({
+          itemId: entry.itemId,
+          itemType: typeof entry.itemType === 'string' ? entry.itemType : 'login',
+          revision: Number.isFinite(Number(entry.revision)) ? Math.trunc(Number(entry.revision)) : 0,
+          title:
+            typeof entry.title === 'string' && entry.title.trim().length > 0
+              ? entry.title
+              : buildDeletedTitleByType(entry.itemType),
+          subtitle: typeof entry.subtitle === 'string' ? entry.subtitle : 'Deleted item',
+          searchText: typeof entry.searchText === 'string' ? entry.searchText : '',
+          firstUrl: '',
+          urls: [],
+          urlHostSummary: 'trash',
+          deletedAt: typeof entry.deletedAt === 'string' ? entry.deletedAt : '',
+          restoreExpiresAt: typeof entry.restoreExpiresAt === 'string' ? entry.restoreExpiresAt : null,
+          restoreDaysRemaining: Number.isFinite(Number(entry.restoreDaysRemaining))
+            ? Math.max(0, Math.trunc(Number(entry.restoreDaysRemaining)))
+            : computeTombstoneDaysRemaining(entry.restoreExpiresAt),
+          isDeleted: true,
+        })),
+    };
+  } else {
+    clearSessionTombstoneCacheInMemory();
   }
 
   iconDomainRegistrationByItemId.clear();
@@ -3369,7 +3438,7 @@ async function getPageContextInternal() {
 }
 
 const SUPPORTED_ITEM_TYPES = new Set(['login', 'card', 'document', 'secure_note']);
-const VALID_TYPE_FILTERS = new Set(['all', 'login', 'card', 'document', 'secure_note']);
+const VALID_TYPE_FILTERS = new Set(['all', 'login', 'card', 'document', 'secure_note', 'trash']);
 
 function normalizeVaultEntry(entry, decryptedPayload) {
   const itemType = entry.item.itemType;
@@ -3487,6 +3556,7 @@ async function performCredentialCacheWarmup(options = {}) {
     }
 
     const allEntries = [];
+    const allTombstones = [];
     let snapshotToken;
     let cursor;
     while (true) {
@@ -3515,7 +3585,12 @@ async function performCredentialCacheWarmup(options = {}) {
       const filtered = page.entries.filter(
         (entry) => entry.entryType === 'item' && SUPPORTED_ITEM_TYPES.has(entry.item.itemType),
       );
+      const tombstones = page.entries
+        .filter((entry) => entry.entryType === 'tombstone')
+        .map((entry) => entry.tombstone)
+        .filter((entry) => entry && typeof entry.itemId === 'string' && entry.itemId.length > 0);
       allEntries.push(...filtered);
+      allTombstones.push(...tombstones);
       cursor = page.nextCursor;
       if (!cursor) {
         break;
@@ -3587,6 +3662,57 @@ async function performCredentialCacheWarmup(options = {}) {
       loadedAt: Date.now(),
       credentials: decrypted,
     };
+    {
+      const knownTitleByItemId = new Map();
+      for (const credential of credentialsCache.credentials) {
+        if (credential && typeof credential.itemId === 'string' && credential.itemId.length > 0) {
+          knownTitleByItemId.set(credential.itemId, credential.title ?? '');
+        }
+      }
+      if (Array.isArray(sessionListProjectionCache.items)) {
+        for (const entry of sessionListProjectionCache.items) {
+          if (entry && typeof entry.itemId === 'string' && entry.itemId.length > 0) {
+            knownTitleByItemId.set(entry.itemId, entry.title ?? knownTitleByItemId.get(entry.itemId) ?? '');
+          }
+        }
+      }
+      if (Array.isArray(tombstoneCache.tombstones)) {
+        for (const entry of tombstoneCache.tombstones) {
+          if (!entry || typeof entry.itemId !== 'string' || entry.itemId.length === 0) {
+            continue;
+          }
+          const cachedTitle = typeof entry.title === 'string' ? entry.title.trim() : '';
+          if (!cachedTitle) {
+            continue;
+          }
+          const knownTitle = knownTitleByItemId.get(entry.itemId);
+          if (typeof knownTitle !== 'string' || knownTitle.trim().length === 0) {
+            knownTitleByItemId.set(entry.itemId, cachedTitle);
+          }
+        }
+      }
+      const latestTombstoneByItemId = new Map();
+      for (const tombstone of allTombstones) {
+        if (!tombstone || typeof tombstone.itemId !== 'string' || tombstone.itemId.length === 0) {
+          continue;
+        }
+        const previous = latestTombstoneByItemId.get(tombstone.itemId) ?? null;
+        if (!previous) {
+          latestTombstoneByItemId.set(tombstone.itemId, tombstone);
+          continue;
+        }
+        const previousRevision = Number.isFinite(Number(previous.revision)) ? Number(previous.revision) : 0;
+        const nextRevision = Number.isFinite(Number(tombstone.revision)) ? Number(tombstone.revision) : 0;
+        if (nextRevision >= previousRevision) {
+          latestTombstoneByItemId.set(tombstone.itemId, tombstone);
+        }
+      }
+      const projectedTombstones = Array.from(latestTombstoneByItemId.values())
+        .map((entry) => projectTombstoneForListCache(entry, knownTitleByItemId))
+        .filter((entry) => entry !== null);
+      hydrateSessionTombstoneCacheFromTombstones(projectedTombstones);
+      void persistSessionTombstoneCacheBestEffort();
+    }
     lastCredentialCacheSource = 'network';
     projectionCacheDiagnostics.networkSyncCount += 1;
     projectionCacheDiagnostics.lastNetworkSyncFinishedAt = nowIso();
@@ -3725,10 +3851,12 @@ function projectCredentialForPopup(credential, pageUrl) {
   return {
     itemId: credential.itemId,
     itemType: credential.itemType,
+    revision: Number.isFinite(credential.revision) ? Math.trunc(credential.revision) : 0,
     title: credential.title,
     subtitle: buildItemSubtitle(credential),
     searchText: buildItemSearchText(credential),
     firstUrl,
+    payload: toStoredVaultPayload(credential.itemType, credential),
     faviconCandidates: manualIconDataUrl ? [manualIconDataUrl] : [],
     urlHostSummary,
     matchFlags: {
@@ -5205,6 +5333,9 @@ function filterProjectedCredentials(input) {
   const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
   const normalizedQuery = typeof input.query === 'string' ? input.query : '';
   const suggestedOnly = toBoolean(input.suggestedOnly);
+  if (normalizedTypeFilter === 'trash') {
+    return [];
+  }
   return input.items.filter((item) => {
     if (normalizedTypeFilter !== 'all' && item.itemType !== normalizedTypeFilter) {
       return false;
@@ -5216,8 +5347,56 @@ function filterProjectedCredentials(input) {
   });
 }
 
+function filterProjectedTombstones(input) {
+  const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
+  if (normalizedTypeFilter !== 'trash') {
+    return [];
+  }
+  const normalizedQuery = typeof input.query === 'string' ? input.query : '';
+  return input.items.filter((item) => {
+    if (!item || item.isDeleted !== true) {
+      return false;
+    }
+    return matchesQuery(item, normalizedQuery);
+  });
+}
+
 function projectCredentialsForPage(pageUrl) {
   return credentialsCache.credentials.map((credential) => projectCredentialForPopup(credential, pageUrl));
+}
+
+function projectTombstonesForList() {
+  const tombstones = Array.isArray(tombstoneCache.tombstones) ? tombstoneCache.tombstones : [];
+  return tombstones.map((entry) => {
+    const rawFirstUrl = typeof entry?.firstUrl === 'string' ? entry.firstUrl : '';
+    const normalizedDomain = normalizeIconDomainFromUrl(rawFirstUrl);
+    const cachedEntry = normalizedDomain ? iconCacheEntryForDomain(normalizedDomain) : null;
+    const manualIconDataUrl =
+      normalizedDomain && typeof manualIconMap[normalizedDomain] === 'string' ? manualIconMap[normalizedDomain] : null;
+    const persistedCandidates = Array.isArray(entry?.faviconCandidates)
+      ? entry.faviconCandidates.filter((candidate) => typeof candidate === 'string' && candidate.length > 0)
+      : [];
+    const restoreExpiresAt =
+      typeof entry?.restoreExpiresAt === 'string'
+        ? entry.restoreExpiresAt
+        : computeTombstoneRestoreExpiryIso(entry?.deletedAt ?? '');
+    const restoreDaysRemaining = computeTombstoneDaysRemaining(restoreExpiresAt);
+    return {
+      ...entry,
+      isDeleted: true,
+      restoreExpiresAt,
+      restoreDaysRemaining,
+      faviconCandidates: mergeUniqueIconCandidates([
+        ...(cachedEntry?.dataUrl ? [cachedEntry.dataUrl] : []),
+        ...(manualIconDataUrl ? [manualIconDataUrl] : []),
+        ...persistedCandidates,
+      ]),
+      subtitle:
+        typeof entry?.deletedAt === 'string' && entry.deletedAt.length > 0
+          ? `Deleted ${formatTombstoneTimestamp(entry.deletedAt)}${Number.isFinite(restoreDaysRemaining) ? ` • ${restoreDaysRemaining === 1 ? '1 day left' : `${restoreDaysRemaining} days left`}` : ''}`
+          : entry?.subtitle ?? 'Deleted item',
+    };
+  });
 }
 
 function projectCredentialIndexForPage(entry, pageUrl) {
@@ -5240,6 +5419,7 @@ function projectCredentialIndexForPage(entry, pageUrl) {
   return {
     itemId: entry?.itemId ?? '',
     itemType: entry?.itemType ?? 'login',
+    revision: Number.isFinite(entry?.revision) ? Math.trunc(entry.revision) : 0,
     title: entry?.title ?? 'Untitled item',
     subtitle: entry?.subtitle ?? '—',
     searchText: entry?.searchText ?? entry?.title ?? '',
@@ -5262,6 +5442,7 @@ function projectCredentialsFromSessionCacheForPage(pageUrl) {
 
 async function listCredentialsInternal(input = {}) {
   const listStartedAt = Date.now();
+  const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
   if (credentialsCache.credentials.length === 0) {
     const projectionLoaded = await loadSessionListProjectionCacheBestEffort();
     if (projectionLoaded) {
@@ -5269,6 +5450,12 @@ async function listCredentialsInternal(input = {}) {
     } else {
       await loadCredentialCacheFromLocalBestEffort();
     }
+  }
+  if (
+    normalizedTypeFilter === 'trash' &&
+    (!Array.isArray(tombstoneCache.tombstones) || tombstoneCache.tombstones.length === 0)
+  ) {
+    await loadSessionTombstoneCacheBestEffort();
   }
   const cacheResult = await refreshCredentialCache({
     awaitCompletion: false,
@@ -5291,18 +5478,34 @@ async function listCredentialsInternal(input = {}) {
     credentialsCache.credentials.length > 0
       ? projectCredentialsForPage(activePageUrl)
       : projectCredentialsFromSessionCacheForPage(activePageUrl);
+  const projectedTombstones = projectTombstonesForList();
   let projections = filterProjectedCredentials({
     items: projectedItems,
     query: input.query,
-    typeFilter: input.typeFilter,
+    typeFilter: normalizedTypeFilter,
     suggestedOnly: input.suggestedOnly,
   })
     .sort(sortProjectedCredentials);
+  if (normalizedTypeFilter === 'trash') {
+    projections = filterProjectedTombstones({
+      items: projectedTombstones,
+      query: input.query,
+      typeFilter: normalizedTypeFilter,
+    }).sort((left, right) => {
+      const leftDeletedAt = Date.parse(String(left?.deletedAt ?? ''));
+      const rightDeletedAt = Date.parse(String(right?.deletedAt ?? ''));
+      const safeLeft = Number.isFinite(leftDeletedAt) ? leftDeletedAt : 0;
+      const safeRight = Number.isFinite(rightDeletedAt) ? rightDeletedAt : 0;
+      if (safeRight !== safeLeft) {
+        return safeRight - safeLeft;
+      }
+      return String(left?.itemId ?? '').localeCompare(String(right?.itemId ?? ''));
+    });
+  }
 
   void ensureProjectedIconsHydrated(projections);
   projections = applyCachedIconsToProjection(projections);
 
-  const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
   const normalizedQuery = typeof input.query === 'string' ? input.query.trim() : '';
   const suggestedFilter = toBoolean(input.suggestedOnly);
   const shouldRetryEmptyCache =
@@ -5320,13 +5523,17 @@ async function listCredentialsInternal(input = {}) {
     void refreshCredentialCache({ force: true, awaitCompletion: false });
   }
 
-  const exactMatchCount = projections.filter((entry) => entry.matchFlags.exactOrigin).length;
+  const exactMatchCount = projections.filter((entry) => entry?.matchFlags?.exactOrigin === true).length;
   const listSource =
-    credentialsCache.credentials.length > 0
-      ? lastCredentialCacheSource || 'memory'
-      : sessionListProjectionCache.items.length > 0
-        ? 'projection'
-        : 'empty';
+    normalizedTypeFilter === 'trash'
+      ? projectedTombstones.length > 0
+        ? 'tombstone_cache'
+        : 'empty'
+      : credentialsCache.credentials.length > 0
+        ? lastCredentialCacheSource || 'memory'
+        : sessionListProjectionCache.items.length > 0
+          ? 'projection'
+          : 'empty';
   projectionCacheDiagnostics.lastListSource = listSource;
   projectionCacheDiagnostics.lastFirstItemRenderMs =
     projections.length > 0 ? Date.now() - listStartedAt : null;
@@ -5460,6 +5667,833 @@ function resolveItemFieldValue(item, field) {
   }
 
   return null;
+}
+
+function cloneCustomFields(fields) {
+  if (!Array.isArray(fields)) {
+    return [];
+  }
+  return fields.map((field) => ({
+    label: typeof field?.label === 'string' ? field.label : '',
+    value: typeof field?.value === 'string' ? field.value : '',
+  }));
+}
+
+function toStoredVaultPayload(itemType, rawPayload) {
+  const normalized = normalizeVaultItemPayload(itemType, rawPayload ?? {});
+  if (itemType === 'login') {
+    return {
+      title: typeof normalized.title === 'string' ? normalized.title : '',
+      username: typeof normalized.username === 'string' ? normalized.username : '',
+      password: typeof normalized.password === 'string' ? normalized.password : '',
+      urls: Array.isArray(normalized.urls) ? [...normalized.urls] : [],
+      notes: typeof normalized.notes === 'string' ? normalized.notes : '',
+      customFields: cloneCustomFields(normalized.customFields),
+    };
+  }
+  if (itemType === 'card') {
+    return {
+      title: typeof normalized.title === 'string' ? normalized.title : '',
+      cardholderName: typeof normalized.cardholderName === 'string' ? normalized.cardholderName : '',
+      brand: typeof normalized.brand === 'string' ? normalized.brand : '',
+      number: typeof normalized.number === 'string' ? normalized.number : '',
+      expiryMonth: Number.isFinite(normalized.expiryMonth) ? normalized.expiryMonth : null,
+      expiryYear: Number.isFinite(normalized.expiryYear) ? normalized.expiryYear : null,
+      securityCode: typeof normalized.securityCode === 'string' ? normalized.securityCode : '',
+      notes: typeof normalized.notes === 'string' ? normalized.notes : '',
+      customFields: cloneCustomFields(normalized.customFields),
+    };
+  }
+  if (itemType === 'document') {
+    return {
+      title: typeof normalized.title === 'string' ? normalized.title : '',
+      content: typeof normalized.content === 'string' ? normalized.content : '',
+      customFields: cloneCustomFields(normalized.customFields),
+    };
+  }
+  return {
+    title: typeof normalized.title === 'string' ? normalized.title : '',
+    content: typeof normalized.content === 'string' ? normalized.content : '',
+    customFields: cloneCustomFields(normalized.customFields),
+  };
+}
+
+function buildDeletedTitleByType(itemType) {
+  if (itemType === 'login') {
+    return 'Deleted login';
+  }
+  if (itemType === 'card') {
+    return 'Deleted card';
+  }
+  if (itemType === 'document') {
+    return 'Deleted document';
+  }
+  if (itemType === 'secure_note') {
+    return 'Deleted secure note';
+  }
+  return 'Deleted item';
+}
+
+function buildTypeLabelForTombstone(itemType) {
+  if (itemType === 'login') {
+    return 'Login';
+  }
+  if (itemType === 'card') {
+    return 'Card';
+  }
+  if (itemType === 'document') {
+    return 'Document';
+  }
+  if (itemType === 'secure_note') {
+    return 'Secure note';
+  }
+  return 'Item';
+}
+
+function computeTombstoneRestoreExpiryIso(deletedAt) {
+  const deletedAtMs = typeof deletedAt === 'string' ? Date.parse(deletedAt) : NaN;
+  if (!Number.isFinite(deletedAtMs)) {
+    return null;
+  }
+  return new Date(
+    deletedAtMs + VAULT_TOMBSTONE_RESTORE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+function computeTombstoneDaysRemaining(restoreExpiresAt) {
+  const expiresAtMs = typeof restoreExpiresAt === 'string' ? Date.parse(restoreExpiresAt) : NaN;
+  if (!Number.isFinite(expiresAtMs)) {
+    return null;
+  }
+  const remainingMs = expiresAtMs - Date.now();
+  if (remainingMs <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+}
+
+function formatTombstoneTimestamp(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return 'unknown time';
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  try {
+    return new Date(parsed).toLocaleString();
+  } catch {
+    return value;
+  }
+}
+
+function projectTombstoneForListCache(tombstone, titleByItemId = new Map()) {
+  const itemId = typeof tombstone?.itemId === 'string' ? tombstone.itemId : '';
+  if (!itemId) {
+    return null;
+  }
+  const urls =
+    Array.isArray(tombstone?.urls) && tombstone.urls.length > 0
+      ? tombstone.urls.filter((entry) => typeof entry === 'string' && entry.length > 0)
+      : [];
+  const firstUrl =
+    typeof tombstone?.firstUrl === 'string' && tombstone.firstUrl.trim().length > 0
+      ? tombstone.firstUrl.trim()
+      : urls.length > 0
+        ? urls[0]
+        : '';
+  const urlHostSummary =
+    typeof tombstone?.urlHostSummary === 'string' && tombstone.urlHostSummary.trim().length > 0
+      ? tombstone.urlHostSummary.trim()
+      : firstUrl
+        ? normalizeIconDomainFromUrl(firstUrl) ?? 'trash'
+        : 'trash';
+  const normalizedDomain = normalizeIconDomainFromUrl(firstUrl);
+  const cachedEntry = normalizedDomain ? iconCacheEntryForDomain(normalizedDomain) : null;
+  const manualIconDataUrl =
+    normalizedDomain && typeof manualIconMap[normalizedDomain] === 'string' ? manualIconMap[normalizedDomain] : null;
+  const persistedCandidates = Array.isArray(tombstone?.faviconCandidates)
+    ? tombstone.faviconCandidates.filter((candidate) => typeof candidate === 'string' && candidate.length > 0)
+    : [];
+  const itemType = typeof tombstone?.itemType === 'string' ? tombstone.itemType : 'login';
+  const deletedAt = typeof tombstone?.deletedAt === 'string' ? tombstone.deletedAt : '';
+  const restoreExpiresAt = computeTombstoneRestoreExpiryIso(deletedAt);
+  const daysRemaining = computeTombstoneDaysRemaining(restoreExpiresAt);
+  const knownTitle = titleByItemId.get(itemId);
+  const tombstoneTitle =
+    typeof tombstone?.title === 'string' && tombstone.title.trim().length > 0 ? tombstone.title.trim() : '';
+  const title =
+    typeof knownTitle === 'string' && knownTitle.trim().length > 0
+      ? knownTitle.trim()
+      : tombstoneTitle
+        ? tombstoneTitle
+        : buildDeletedTitleByType(itemType);
+  const subtitleParts = [buildTypeLabelForTombstone(itemType)];
+  if (deletedAt) {
+    subtitleParts.push(`Deleted ${formatTombstoneTimestamp(deletedAt)}`);
+  }
+  if (Number.isFinite(daysRemaining)) {
+    subtitleParts.push(daysRemaining === 1 ? '1 day left' : `${daysRemaining} days left`);
+  }
+  return {
+    itemId,
+    itemType,
+    revision: Number.isFinite(Number(tombstone?.revision)) ? Math.trunc(Number(tombstone.revision)) : 0,
+    title,
+    subtitle: subtitleParts.join(' • ') || 'Deleted item',
+    searchText: `${title} ${itemType} ${deletedAt}`.trim(),
+    firstUrl,
+    urls,
+    urlHostSummary,
+    faviconCandidates: mergeUniqueIconCandidates([
+      ...(cachedEntry?.dataUrl ? [cachedEntry.dataUrl] : []),
+      ...(manualIconDataUrl ? [manualIconDataUrl] : []),
+      ...persistedCandidates,
+    ]),
+    deletedAt,
+    restoreExpiresAt,
+    restoreDaysRemaining: Number.isFinite(daysRemaining) ? daysRemaining : null,
+    isDeleted: true,
+  };
+}
+
+function tombstoneCacheKeyFromIdentity(identity) {
+  return extensionProjectionCacheKey(identity);
+}
+
+function clearSessionTombstoneCacheInMemory() {
+  tombstoneCache = {
+    cacheKey: null,
+    loadedAt: 0,
+    tombstones: [],
+  };
+}
+
+function hydrateSessionTombstoneCacheFromTombstones(tombstones) {
+  const identity = extensionCacheIdentity();
+  if (!identity || !Array.isArray(tombstones)) {
+    return false;
+  }
+  const cacheKey = tombstoneCacheKeyFromIdentity(identity);
+  if (!cacheKey) {
+    return false;
+  }
+  tombstoneCache = {
+    cacheKey,
+    loadedAt: Date.now(),
+    tombstones: tombstones
+      .filter((entry) => entry && typeof entry.itemId === 'string' && entry.itemId.length > 0)
+      .map((entry) => ({
+        ...entry,
+        isDeleted: true,
+      })),
+  };
+  return true;
+}
+
+function upsertTombstoneCacheEntry(entry) {
+  if (!entry || typeof entry.itemId !== 'string' || entry.itemId.length === 0) {
+    return;
+  }
+  const next = Array.isArray(tombstoneCache.tombstones) ? [...tombstoneCache.tombstones] : [];
+  const index = next.findIndex((candidate) => candidate?.itemId === entry.itemId);
+  if (index >= 0) {
+    next[index] = {
+      ...entry,
+      isDeleted: true,
+    };
+  } else {
+    next.unshift({
+      ...entry,
+      isDeleted: true,
+    });
+  }
+  tombstoneCache = {
+    cacheKey: tombstoneCache.cacheKey,
+    loadedAt: Date.now(),
+    tombstones: next,
+  };
+}
+
+function removeTombstoneCacheEntry(itemId) {
+  if (typeof itemId !== 'string' || itemId.length === 0 || !Array.isArray(tombstoneCache.tombstones)) {
+    return;
+  }
+  const next = tombstoneCache.tombstones.filter((entry) => entry?.itemId !== itemId);
+  tombstoneCache = {
+    cacheKey: tombstoneCache.cacheKey,
+    loadedAt: Date.now(),
+    tombstones: next,
+  };
+}
+
+function ensureTombstoneCacheKey() {
+  if (typeof tombstoneCache.cacheKey === 'string' && tombstoneCache.cacheKey.length > 0) {
+    return tombstoneCache.cacheKey;
+  }
+  const identity = extensionCacheIdentity();
+  const cacheKey = identity ? tombstoneCacheKeyFromIdentity(identity) : null;
+  if (cacheKey) {
+    tombstoneCache = {
+      cacheKey,
+      loadedAt: tombstoneCache.loadedAt,
+      tombstones: Array.isArray(tombstoneCache.tombstones) ? tombstoneCache.tombstones : [],
+    };
+  }
+  return cacheKey;
+}
+
+async function persistSessionTombstoneCacheBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  const payload =
+    tombstoneCache &&
+    typeof tombstoneCache.cacheKey === 'string' &&
+    tombstoneCache.cacheKey.length > 0 &&
+    Array.isArray(tombstoneCache.tombstones)
+      ? {
+          cacheKey: tombstoneCache.cacheKey,
+          loadedAt: Number.isFinite(tombstoneCache.loadedAt) ? Math.trunc(tombstoneCache.loadedAt) : Date.now(),
+          tombstones: tombstoneCache.tombstones.map((entry) => ({
+            itemId: entry.itemId,
+            itemType: entry.itemType,
+            revision: Number.isFinite(Number(entry.revision)) ? Math.trunc(Number(entry.revision)) : 0,
+            title: typeof entry.title === 'string' ? entry.title : '',
+            subtitle: typeof entry.subtitle === 'string' ? entry.subtitle : '',
+            searchText: typeof entry.searchText === 'string' ? entry.searchText : '',
+            firstUrl: typeof entry.firstUrl === 'string' ? entry.firstUrl : '',
+            urls: Array.isArray(entry.urls) ? entry.urls.filter((url) => typeof url === 'string') : [],
+            urlHostSummary: typeof entry.urlHostSummary === 'string' ? entry.urlHostSummary : 'trash',
+            faviconCandidates: Array.isArray(entry.faviconCandidates)
+              ? entry.faviconCandidates.filter((candidate) => typeof candidate === 'string')
+              : [],
+            deletedAt: typeof entry.deletedAt === 'string' ? entry.deletedAt : '',
+            restoreExpiresAt: typeof entry.restoreExpiresAt === 'string' ? entry.restoreExpiresAt : null,
+            restoreDaysRemaining: Number.isFinite(Number(entry.restoreDaysRemaining))
+              ? Math.max(0, Math.trunc(Number(entry.restoreDaysRemaining)))
+              : null,
+            isDeleted: true,
+          })),
+        }
+      : null;
+  try {
+    if (!payload || payload.tombstones.length === 0) {
+      await sessionStorage.remove(STORAGE_SESSION_TOMBSTONE_CACHE_KEY);
+      return;
+    }
+    await sessionStorage.set({
+      [STORAGE_SESSION_TOMBSTONE_CACHE_KEY]: payload,
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+async function loadSessionTombstoneCacheBestEffort() {
+  const identity = extensionCacheIdentity();
+  const sessionStorage = sessionStorageArea();
+  if (!identity || !sessionStorage) {
+    return false;
+  }
+  const expectedCacheKey = tombstoneCacheKeyFromIdentity(identity);
+  if (!expectedCacheKey) {
+    return false;
+  }
+  if (
+    tombstoneCache.cacheKey === expectedCacheKey &&
+    Array.isArray(tombstoneCache.tombstones) &&
+    tombstoneCache.tombstones.length > 0
+  ) {
+    return true;
+  }
+  try {
+    const stored = await sessionStorage.get(STORAGE_SESSION_TOMBSTONE_CACHE_KEY);
+    const raw = stored?.[STORAGE_SESSION_TOMBSTONE_CACHE_KEY] ?? null;
+    if (!raw || typeof raw !== 'object' || raw.cacheKey !== expectedCacheKey || !Array.isArray(raw.tombstones)) {
+      return false;
+    }
+    const normalized = raw.tombstones
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const itemId = typeof entry.itemId === 'string' ? entry.itemId : '';
+        if (!itemId) {
+          return null;
+        }
+        return {
+          itemId,
+          itemType: typeof entry.itemType === 'string' ? entry.itemType : 'login',
+          revision: Number.isFinite(Number(entry.revision)) ? Math.trunc(Number(entry.revision)) : 0,
+          title: typeof entry.title === 'string' ? entry.title : buildDeletedTitleByType(entry.itemType),
+          subtitle: typeof entry.subtitle === 'string' ? entry.subtitle : 'Deleted item',
+          searchText: typeof entry.searchText === 'string' ? entry.searchText : '',
+          firstUrl: typeof entry.firstUrl === 'string' ? entry.firstUrl : '',
+          urls: Array.isArray(entry.urls) ? entry.urls.filter((url) => typeof url === 'string') : [],
+          urlHostSummary: typeof entry.urlHostSummary === 'string' ? entry.urlHostSummary : 'trash',
+          faviconCandidates: Array.isArray(entry.faviconCandidates)
+            ? entry.faviconCandidates.filter((candidate) => typeof candidate === 'string')
+            : [],
+          deletedAt: typeof entry.deletedAt === 'string' ? entry.deletedAt : '',
+          restoreExpiresAt: typeof entry.restoreExpiresAt === 'string' ? entry.restoreExpiresAt : null,
+          restoreDaysRemaining: Number.isFinite(Number(entry.restoreDaysRemaining))
+            ? Math.max(0, Math.trunc(Number(entry.restoreDaysRemaining)))
+            : computeTombstoneDaysRemaining(entry.restoreExpiresAt),
+          isDeleted: true,
+        };
+      })
+      .filter((entry) => entry !== null);
+    if (normalized.length === 0) {
+      return false;
+    }
+    tombstoneCache = {
+      cacheKey: expectedCacheKey,
+      loadedAt: Number.isFinite(Number(raw.loadedAt)) ? Math.trunc(Number(raw.loadedAt)) : Date.now(),
+      tombstones: normalized,
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stringifyDiffValue(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isSensitiveHistoryField(itemType, fieldPath) {
+  if (fieldPath === 'customFields' || fieldPath === 'notes') {
+    return true;
+  }
+  if (itemType === 'login') {
+    return fieldPath === 'password';
+  }
+  if (itemType === 'card') {
+    return fieldPath === 'number' || fieldPath === 'securityCode';
+  }
+  if (itemType === 'document' || itemType === 'secure_note') {
+    return fieldPath === 'content';
+  }
+  return false;
+}
+
+function computeVaultItemDiffEntries(itemType, previousPayload, nextPayload) {
+  const fieldsByType = {
+    login: ['title', 'username', 'password', 'urls', 'notes', 'customFields'],
+    card: [
+      'title',
+      'cardholderName',
+      'brand',
+      'number',
+      'expiryMonth',
+      'expiryYear',
+      'securityCode',
+      'notes',
+      'customFields',
+    ],
+    document: ['title', 'content', 'customFields'],
+    secure_note: ['title', 'content', 'customFields'],
+  };
+  const fields = fieldsByType[itemType] ?? ['title'];
+  const entries = [];
+  for (const fieldPath of fields) {
+    const beforeRaw = previousPayload?.[fieldPath];
+    const afterRaw = nextPayload?.[fieldPath];
+    const before = stringifyDiffValue(beforeRaw);
+    const after = stringifyDiffValue(afterRaw);
+    if (before === after) {
+      continue;
+    }
+    entries.push({
+      fieldPath,
+      before,
+      after,
+      classification: isSensitiveHistoryField(itemType, fieldPath) ? 'sensitive' : 'non_sensitive',
+    });
+  }
+  return entries;
+}
+
+function normalizeHistoryDiffEntries(rawEntries) {
+  if (!Array.isArray(rawEntries)) {
+    return [];
+  }
+  return rawEntries
+    .map((entry) => ({
+      fieldPath: typeof entry?.fieldPath === 'string' ? entry.fieldPath : '',
+      before: typeof entry?.before === 'string' ? entry.before : '',
+      after: typeof entry?.after === 'string' ? entry.after : '',
+      classification: entry?.classification === 'non_sensitive' ? 'non_sensitive' : 'sensitive',
+    }))
+    .filter((entry) => entry.fieldPath.length > 0);
+}
+
+async function updateVaultItemInternal(input) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const itemId =
+    typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Item id is required.');
+  }
+  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
+  if (!targetCredential) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+  const itemType =
+    typeof input?.itemType === 'string' && SUPPORTED_ITEM_TYPES.has(input.itemType)
+      ? input.itemType
+      : targetCredential.itemType;
+  if (!SUPPORTED_ITEM_TYPES.has(itemType)) {
+    return fail('invalid_input', 'Unsupported item type.');
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const payload = toStoredVaultPayload(itemType, input?.payload ?? {});
+  const previousPayload = toStoredVaultPayload(itemType, targetCredential);
+  if (JSON.stringify(previousPayload) === JSON.stringify(payload)) {
+    return ok({
+      item: targetCredential,
+      result: 'success_no_op',
+    });
+  }
+  const expectedRevision =
+    Number.isFinite(input?.expectedRevision) && input.expectedRevision > 0
+      ? Math.trunc(input.expectedRevision)
+      : targetCredential.revision;
+  const inFlightKey = `${itemId}:${expectedRevision}`;
+  if (itemUpdateInFlightByItemId.has(inFlightKey)) {
+    return itemUpdateInFlightByItemId.get(inFlightKey);
+  }
+  const updatePromise = (async () => {
+    try {
+      const encryptedPayload = await encryptVaultItemPayload({
+        accountKey: unlockedContext.accountKey,
+        itemType,
+        payload,
+      });
+      const diffEntries = computeVaultItemDiffEntries(itemType, previousPayload, payload);
+      const encryptedDiffPayload =
+        diffEntries.length > 0
+          ? await encryptVaultItemPayload({
+            accountKey: unlockedContext.accountKey,
+            itemType: 'secure_note',
+            payload: {
+              version: 'vault-item-history-diff.v1',
+              itemType,
+              entries: diffEntries,
+            },
+          })
+          : undefined;
+      const updated = await apiClient.updateVaultItem({
+        bearerToken: sessionToken,
+        itemId,
+        itemType,
+        encryptedPayload,
+        expectedRevision,
+        encryptedDiffPayload,
+      });
+      const normalized = normalizeVaultItemPayload(itemType, payload);
+      const updatedCredential = {
+        itemId,
+        itemType,
+        revision: Number.isFinite(updated?.revision) ? Math.trunc(updated.revision) : expectedRevision + 1,
+        ...normalized,
+      };
+      credentialsCache = {
+        loadedAt: Date.now(),
+        credentials: credentialsCache.credentials.map((entry) =>
+          entry.itemId === itemId ? updatedCredential : entry
+        ),
+      };
+      vaultItemHistoryCacheByItemId.delete(itemId);
+      hydrateSessionListProjectionCacheFromCredentials();
+      void Promise.all([
+        persistCredentialCacheToLocalBestEffort(null),
+        persistSessionListProjectionCacheBestEffort(),
+      ]);
+      void syncIconStateDomainRegistrations().catch(() => undefined);
+      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state']);
+      return ok({
+        item: updatedCredential,
+        result: 'success_changed',
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      const code = String(error?.code ?? '');
+      if (code === 'revision_conflict') {
+        void refreshCredentialCache({ force: true, awaitCompletion: false });
+        return fail('revision_conflict', 'Item changed on another device. Refresh and try again.');
+      }
+      if (code === 'item_deleted_conflict') {
+        void refreshCredentialCache({ force: true, awaitCompletion: false });
+        return fail('item_deleted_conflict', 'Item was deleted on another device.');
+      }
+      return fail('vault_item_update_failed', 'Could not update item right now.');
+    } finally {
+      itemUpdateInFlightByItemId.delete(inFlightKey);
+    }
+  })();
+  itemUpdateInFlightByItemId.set(inFlightKey, updatePromise);
+  return updatePromise;
+}
+
+async function deleteVaultItemInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const itemId =
+    typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Item id is required.');
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
+  if (itemDeleteInFlightByItemId.has(itemId)) {
+    return itemDeleteInFlightByItemId.get(itemId);
+  }
+  const deletePromise = (async () => {
+    try {
+      await apiClient.deleteVaultItem({
+        bearerToken: sessionToken,
+        itemId,
+      });
+      credentialsCache = {
+        loadedAt: Date.now(),
+        credentials: credentialsCache.credentials.filter((entry) => entry.itemId !== itemId),
+      };
+      const deletedAtIso = nowIso();
+      const tombstoneEntry = projectTombstoneForListCache(
+        {
+          itemId,
+          itemType: targetCredential?.itemType ?? 'login',
+          revision:
+            Number.isFinite(Number(targetCredential?.revision)) && Number(targetCredential.revision) > 0
+              ? Number(targetCredential.revision) + 1
+              : 1,
+          deletedAt: deletedAtIso,
+          firstUrl:
+            typeof targetCredential?.firstUrl === 'string' && targetCredential.firstUrl.length > 0
+              ? targetCredential.firstUrl
+              : '',
+          urls: Array.isArray(targetCredential?.urls) ? targetCredential.urls : [],
+          urlHostSummary:
+            typeof targetCredential?.urlHostSummary === 'string' && targetCredential.urlHostSummary.length > 0
+              ? targetCredential.urlHostSummary
+              : 'trash',
+          faviconCandidates: (() => {
+            const firstUrlCandidate =
+              typeof targetCredential?.firstUrl === 'string' && targetCredential.firstUrl.length > 0
+                ? targetCredential.firstUrl
+                : Array.isArray(targetCredential?.urls) && targetCredential.urls.length > 0
+                  ? targetCredential.urls[0]
+                  : '';
+            const domain = normalizeIconDomainFromUrl(firstUrlCandidate);
+            if (!domain) {
+              return [];
+            }
+            const cached = iconCacheEntryForDomain(domain);
+            const manual = typeof manualIconMap[domain] === 'string' ? manualIconMap[domain] : null;
+            return mergeUniqueIconCandidates([
+              ...(cached?.dataUrl ? [cached.dataUrl] : []),
+              ...(manual ? [manual] : []),
+            ]);
+          })(),
+        },
+        new Map([[itemId, targetCredential?.title ?? '']]),
+      );
+      if (tombstoneEntry) {
+        ensureTombstoneCacheKey();
+        upsertTombstoneCacheEntry(tombstoneEntry);
+        void persistSessionTombstoneCacheBestEffort();
+      }
+      vaultItemHistoryCacheByItemId.delete(itemId);
+      hydrateSessionListProjectionCacheFromCredentials();
+      void Promise.all([
+        persistCredentialCacheToLocalBestEffort(null),
+        persistSessionListProjectionCacheBestEffort(),
+      ]);
+      void syncIconStateDomainRegistrations().catch(() => undefined);
+      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state']);
+      return ok({
+        itemId,
+        result: 'deleted',
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      const status = Number(error?.status);
+      if (status === 404) {
+        credentialsCache = {
+          loadedAt: Date.now(),
+          credentials: credentialsCache.credentials.filter((entry) => entry.itemId !== itemId),
+        };
+        removeTombstoneCacheEntry(itemId);
+        void persistSessionTombstoneCacheBestEffort();
+        hydrateSessionListProjectionCacheFromCredentials();
+        void Promise.all([
+          persistCredentialCacheToLocalBestEffort(null),
+          persistSessionListProjectionCacheBestEffort(),
+        ]);
+        return fail('not_found', 'Item was already removed.');
+      }
+      return fail('vault_item_delete_failed', 'Could not delete item right now.');
+    } finally {
+      itemDeleteInFlightByItemId.delete(itemId);
+    }
+  })();
+  itemDeleteInFlightByItemId.set(itemId, deletePromise);
+  return deletePromise;
+}
+
+async function restoreVaultItemInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const itemId =
+    typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Item id is required.');
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  if (itemRestoreInFlightByItemId.has(itemId)) {
+    return itemRestoreInFlightByItemId.get(itemId);
+  }
+  const restorePromise = (async () => {
+    try {
+      const response = await apiClient.restoreVaultItem({
+        bearerToken: sessionToken,
+        itemId,
+      });
+      removeTombstoneCacheEntry(itemId);
+      void persistSessionTombstoneCacheBestEffort();
+      vaultItemHistoryCacheByItemId.delete(itemId);
+      await refreshCredentialCache({
+        force: true,
+        awaitCompletion: true,
+      });
+      schedulePopupRealtimeNotification(['vault', 'vault_history', 'icons_state']);
+      return ok({
+        itemId,
+        result: typeof response?.result === 'string' ? response.result : 'success_changed',
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      const status = Number(error?.status);
+      if (status === 404) {
+        removeTombstoneCacheEntry(itemId);
+        void persistSessionTombstoneCacheBestEffort();
+        return fail('not_found', 'Deleted item not found.');
+      }
+      const code = typeof error?.code === 'string' ? error.code : '';
+      if (status === 409 || code === 'restore_window_expired') {
+        return fail('restore_window_expired', 'Restore window expired for this item.');
+      }
+      return fail('vault_item_restore_failed', 'Could not restore item right now.');
+    } finally {
+      itemRestoreInFlightByItemId.delete(itemId);
+    }
+  })();
+  itemRestoreInFlightByItemId.set(itemId, restorePromise);
+  return restorePromise;
+}
+
+async function listVaultItemHistoryInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const itemId =
+    typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Item id is required.');
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const force = input?.force === true;
+  if (!force && vaultItemHistoryCacheByItemId.has(itemId)) {
+    return ok(vaultItemHistoryCacheByItemId.get(itemId));
+  }
+  try {
+    const response = await apiClient.listVaultItemHistory({
+      bearerToken: sessionToken,
+      itemId,
+      limit: Number.isFinite(input?.limit) ? Math.max(1, Math.trunc(input.limit)) : VAULT_ITEM_HISTORY_PAGE_SIZE,
+      cursor: typeof input?.cursor === 'string' ? input.cursor : undefined,
+    });
+    const records = [];
+    for (const record of Array.isArray(response?.records) ? response.records : []) {
+      let diffEntries = [];
+      if (typeof record?.encryptedDiffPayload === 'string' && record.encryptedDiffPayload.length > 0) {
+        try {
+          const decrypted = await decryptVaultItemPayload({
+            accountKey: unlockedContext.accountKey,
+            encryptedPayload: record.encryptedDiffPayload,
+          });
+          diffEntries = normalizeHistoryDiffEntries(decrypted?.entries);
+        } catch {
+          diffEntries = [];
+        }
+      }
+      records.push({
+        historyId: typeof record?.historyId === 'string' ? record.historyId : '',
+        itemId,
+        itemRevision: Number.isFinite(record?.itemRevision) ? Math.trunc(record.itemRevision) : 0,
+        changeType: typeof record?.changeType === 'string' ? record.changeType : 'update',
+        sourceDeviceId: typeof record?.sourceDeviceId === 'string' ? record.sourceDeviceId : null,
+        sourceDeviceName: typeof record?.sourceDeviceName === 'string' ? record.sourceDeviceName : null,
+        createdAt: typeof record?.createdAt === 'string' ? record.createdAt : nowIso(),
+        diffEntries,
+      });
+    }
+    const payload = {
+      records,
+      nextCursor: typeof response?.nextCursor === 'string' ? response.nextCursor : null,
+    };
+    if (!input?.cursor) {
+      vaultItemHistoryCacheByItemId.set(itemId, payload);
+    }
+    return ok(payload);
+  } catch (error) {
+    if (isUnauthorizedApiError(error)) {
+      await clearExtensionSessionToken();
+    }
+    if (!force && vaultItemHistoryCacheByItemId.has(itemId)) {
+      return ok(vaultItemHistoryCacheByItemId.get(itemId));
+    }
+    return fail('vault_item_history_unavailable', 'Item history is unavailable right now.');
+  }
 }
 
 async function applyTrustedPairingResult(pairingResult) {
@@ -6167,6 +7201,34 @@ async function handleCommand(command, senderContext, sender) {
         return capabilityError;
       }
       return upsertPasswordGeneratorHistoryEntryInternal(command);
+    }
+    case 'vaultlite.update_item': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return updateVaultItemInternal(command);
+    }
+    case 'vaultlite.delete_item': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return deleteVaultItemInternal(command);
+    }
+    case 'vaultlite.restore_item': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return restoreVaultItemInternal(command);
+    }
+    case 'vaultlite.list_item_history': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return listVaultItemHistoryInternal(command);
     }
     case 'vaultlite.open_full_page_auth': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');

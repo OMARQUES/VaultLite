@@ -59,6 +59,8 @@ import type {
   UserAccountRecord,
   UserAccountRepository,
   VaultItemRecord,
+  VaultItemHistoryRecord,
+  VaultItemHistoryRepository,
   VaultItemTombstoneRecord,
   VaultItemRepository,
   VaultLiteStorage,
@@ -676,6 +678,26 @@ CREATE INDEX IF NOT EXISTS idx_automatic_icon_registry_next_eligible
 
 CREATE INDEX IF NOT EXISTS idx_automatic_icon_registry_status
   ON automatic_icon_registry (status, updated_at);`,
+  },
+  {
+    id: '0019_vault_item_history',
+    filename: '0019_vault_item_history.sql',
+    sql: `CREATE TABLE IF NOT EXISTS vault_item_history (
+  history_id TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  item_revision INTEGER NOT NULL,
+  change_type TEXT NOT NULL,
+  encrypted_diff_payload TEXT NULL,
+  source_device_id TEXT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_item_history_owner_item_created
+  ON vault_item_history (owner_user_id, item_id, created_at DESC, history_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vault_item_history_owner_created
+  ON vault_item_history (owner_user_id, created_at DESC, history_id DESC);`,
   },
 ];
 
@@ -3911,6 +3933,174 @@ class CloudflareAttachmentBlobRepository implements AttachmentBlobRepository {
   }
 }
 
+function parseVaultItemHistoryCursor(cursor: string | null | undefined): {
+  createdAt: string;
+  historyId: string;
+} | null {
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    return null;
+  }
+  const separator = cursor.indexOf('|');
+  if (separator <= 0) {
+    return null;
+  }
+  const createdAt = cursor.slice(0, separator).trim();
+  const historyId = cursor.slice(separator + 1).trim();
+  if (!createdAt || !historyId) {
+    return null;
+  }
+  return {
+    createdAt,
+    historyId,
+  };
+}
+
+function buildVaultItemHistoryCursor(record: Pick<VaultItemHistoryRecord, 'createdAt' | 'historyId'>): string {
+  return `${record.createdAt}|${record.historyId}`;
+}
+
+class CloudflareVaultItemHistoryRepository implements VaultItemHistoryRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async create(record: VaultItemHistoryRecord): Promise<VaultItemHistoryRecord> {
+    const normalized: VaultItemHistoryRecord = {
+      ...record,
+      encryptedDiffPayload: record.encryptedDiffPayload ?? null,
+      sourceDeviceId: record.sourceDeviceId ?? null,
+    };
+    await executeOne(
+      this.db,
+      `INSERT INTO vault_item_history (
+         history_id,
+         owner_user_id,
+         item_id,
+         item_revision,
+         change_type,
+         encrypted_diff_payload,
+         source_device_id,
+         created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        normalized.historyId,
+        normalized.ownerUserId,
+        normalized.itemId,
+        normalized.itemRevision,
+        normalized.changeType,
+        normalized.encryptedDiffPayload,
+        normalized.sourceDeviceId,
+        normalized.createdAt,
+      ],
+    );
+    return normalized;
+  }
+
+  async listByItem(input: {
+    ownerUserId: string;
+    itemId: string;
+    limit: number;
+    cursor?: string | null;
+  }): Promise<{ records: VaultItemHistoryRecord[]; nextCursor: string | null }> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(200, Math.trunc(input.limit))) : 50;
+    const parsedCursor = parseVaultItemHistoryCursor(input.cursor);
+    const rows = parsedCursor
+      ? await selectMany<VaultItemHistoryRecord>(
+        this.db,
+        `SELECT history_id AS historyId,
+                owner_user_id AS ownerUserId,
+                item_id AS itemId,
+                item_revision AS itemRevision,
+                change_type AS changeType,
+                encrypted_diff_payload AS encryptedDiffPayload,
+                source_device_id AS sourceDeviceId,
+                created_at AS createdAt
+         FROM vault_item_history
+         WHERE owner_user_id = ?
+           AND item_id = ?
+           AND (
+             created_at < ?
+             OR (created_at = ? AND history_id < ?)
+           )
+         ORDER BY created_at DESC, history_id DESC
+         LIMIT ?`,
+        [
+          input.ownerUserId,
+          input.itemId,
+          parsedCursor.createdAt,
+          parsedCursor.createdAt,
+          parsedCursor.historyId,
+          safeLimit + 1,
+        ],
+      )
+      : await selectMany<VaultItemHistoryRecord>(
+        this.db,
+        `SELECT history_id AS historyId,
+                owner_user_id AS ownerUserId,
+                item_id AS itemId,
+                item_revision AS itemRevision,
+                change_type AS changeType,
+                encrypted_diff_payload AS encryptedDiffPayload,
+                source_device_id AS sourceDeviceId,
+                created_at AS createdAt
+         FROM vault_item_history
+         WHERE owner_user_id = ?
+           AND item_id = ?
+         ORDER BY created_at DESC, history_id DESC
+         LIMIT ?`,
+        [input.ownerUserId, input.itemId, safeLimit + 1],
+      );
+    const hasMore = rows.length > safeLimit;
+    const records = hasMore ? rows.slice(0, safeLimit) : rows;
+    const nextCursor = hasMore ? buildVaultItemHistoryCursor(records[records.length - 1]) : null;
+    return {
+      records,
+      nextCursor,
+    };
+  }
+
+  async pruneByOwnerOlderThan(input: {
+    ownerUserId: string;
+    cutoffIso: string;
+    limit: number;
+  }): Promise<number> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(2_000, Math.trunc(input.limit))) : 200;
+    const rows = await selectMany<{ historyId: string }>(
+      this.db,
+      `SELECT history_id AS historyId
+       FROM vault_item_history
+       WHERE owner_user_id = ?
+         AND created_at < ?
+       ORDER BY created_at ASC, history_id ASC
+       LIMIT ?`,
+      [input.ownerUserId, input.cutoffIso, safeLimit],
+    );
+    if (rows.length === 0) {
+      return 0;
+    }
+    if (typeof this.db.batch === 'function') {
+      await this.db.batch(
+        rows.map((row) =>
+          this.db.prepare(
+            `DELETE FROM vault_item_history
+             WHERE history_id = ?`,
+          ).bind(row.historyId)
+        ),
+      );
+      return rows.length;
+    }
+    let deleted = 0;
+    for (const row of rows) {
+      const changed = await executeOneWithChanges(
+        this.db,
+        `DELETE FROM vault_item_history
+         WHERE history_id = ?`,
+        [row.historyId],
+      );
+      deleted += changed;
+    }
+    return deleted;
+  }
+}
+
 class CloudflareVaultItemRepository implements VaultItemRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -4271,6 +4461,7 @@ export function createCloudflareVaultLiteStorage(input: {
   const realtimeOutbox = new CloudflareRealtimeOutboxRepository(input.db);
   const realtimeOneTimeTokens = new CloudflareRealtimeOneTimeTokenRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
+  const vaultItemHistory = new CloudflareVaultItemHistoryRepository(input.db);
 
   return {
     deploymentState,
@@ -4300,6 +4491,7 @@ export function createCloudflareVaultLiteStorage(input: {
     auditEvents: new CloudflareAuditEventRepository(input.db),
     attachmentBlobs: new CloudflareAttachmentBlobRepository(input.db, input.bucket),
     vaultItems,
+    vaultItemHistory,
     async completeOnboardingAtomic(record: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult> {
       const invite = await invites.findUsableByTokenHash(record.inviteTokenHash, record.nowIso);
       if (!invite) {

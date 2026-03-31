@@ -1,5 +1,6 @@
 export const FILTER_OPTIONS = [
   { value: 'all', label: 'All Items', icon: 'all' },
+  { value: 'trash', label: 'Trash', icon: 'trash' },
   { value: 'login', label: 'Logins', icon: 'logins' },
   { value: 'card', label: 'Cards', icon: 'cards' },
   { value: 'document', label: 'Docs', icon: 'docs' },
@@ -19,6 +20,9 @@ function iconSvg(name) {
   }
   if (name === 'notes') {
     return '<svg viewBox="0 0 24 24"><path d="M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path><path d="M9 8h6"></path><path d="M9 12h6"></path><path d="M9 16h4"></path></svg>';
+  }
+  if (name === 'trash') {
+    return '<svg viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M6 6l1 14h10l1-14"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg>';
   }
   if (name === 'suggested') {
     return '<svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.5L21 9.4l-4.5 4.4 1 6.2L12 17.1 6.5 20l1-6.2L3 9.4l6.3-.9Z"></path></svg>';

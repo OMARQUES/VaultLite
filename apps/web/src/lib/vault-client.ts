@@ -7,6 +7,7 @@ import type {
   AttachmentUploadInitOutput,
   AttachmentUploadListOutput,
   AttachmentUploadRecord,
+  VaultItemHistoryListOutput,
   SyncSnapshotOutput,
   VaultItemCreateInput,
   VaultItemListOutput,
@@ -123,6 +124,7 @@ export interface VaultLiteVaultClient {
   getAttachmentEnvelope(uploadId: string): Promise<AttachmentUploadEnvelopeOutput>;
   listAttachmentUploads(itemId: string): Promise<AttachmentUploadListOutput>;
   listAttachmentState(input?: { cursor?: string; pageSize?: number }): Promise<AttachmentStateOutput>;
+  listItemHistory(itemId: string, input?: { limit?: number; cursor?: string }): Promise<VaultItemHistoryListOutput>;
 }
 
 export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
@@ -225,6 +227,10 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
           itemType: input.itemType,
           encryptedPayload: input.encryptedPayload,
           expectedRevision: input.expectedRevision,
+          encryptedDiffPayload:
+            typeof input.encryptedDiffPayload === 'string' && input.encryptedDiffPayload.length > 0
+              ? input.encryptedDiffPayload
+              : undefined,
         }),
       }, { emitUnauthorizedEvent: true });
     },
@@ -287,6 +293,20 @@ export function createVaultLiteVaultClient(baseUrl = ''): VaultLiteVaultClient {
       }
       return requestJson<AttachmentStateOutput>(
         `${baseUrl}/api/attachments/state${query.size > 0 ? `?${query.toString()}` : ''}`,
+        undefined,
+        { emitUnauthorizedEvent: true },
+      );
+    },
+    listItemHistory(itemId, input) {
+      const query = new URLSearchParams();
+      if (typeof input?.limit === 'number' && Number.isFinite(input.limit)) {
+        query.set('limit', String(Math.max(1, Math.trunc(input.limit))));
+      }
+      if (typeof input?.cursor === 'string' && input.cursor.length > 0) {
+        query.set('cursor', input.cursor);
+      }
+      return requestJson<VaultItemHistoryListOutput>(
+        `${baseUrl}/api/vault/items/${encodeURIComponent(itemId)}/history${query.size > 0 ? `?${query.toString()}` : ''}`,
         undefined,
         { emitUnauthorizedEvent: true },
       );

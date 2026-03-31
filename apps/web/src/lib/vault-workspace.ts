@@ -1,4 +1,5 @@
 import { computed, reactive, readonly, ref } from 'vue';
+import type { VaultItemHistoryDiffEntry } from '@vaultlite/contracts';
 
 import { decryptVaultItemPayload, encryptVaultItemPayload } from './browser-crypto';
 import { toHumanErrorMessage } from './human-error';
@@ -120,6 +121,81 @@ const SYNC_ERROR_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 60_000] as const;
 const SNAPSHOT_DECRYPT_CHUNK_SIZE = 20;
 const SNAPSHOT_DECRYPT_MAX_CONCURRENCY = 4;
 const ENABLE_DECRYPT_CHUNKING_V1 = true;
+
+function stringifyDiffValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (value == null) {
+    return '';
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isSensitiveHistoryField(itemType: VaultItemType, fieldPath: string): boolean {
+  if (fieldPath === 'customFields' || fieldPath === 'notes') {
+    return true;
+  }
+  if (itemType === 'login') {
+    return fieldPath === 'password' || fieldPath === 'urls' || fieldPath === 'username';
+  }
+  if (itemType === 'card') {
+    return fieldPath === 'number' || fieldPath === 'securityCode' || fieldPath === 'expiryMonth' || fieldPath === 'expiryYear';
+  }
+  if (itemType === 'document' || itemType === 'secure_note') {
+    return fieldPath === 'content';
+  }
+  return true;
+}
+
+function computeDiffEntries(
+  itemType: VaultItemType,
+  nextPayload: unknown,
+  previousPayload: unknown,
+): VaultItemHistoryDiffEntry[] {
+  const fieldsByType: Record<VaultItemType, string[]> = {
+    login: ['title', 'username', 'password', 'urls', 'notes', 'customFields'],
+    card: [
+      'title',
+      'cardholderName',
+      'brand',
+      'number',
+      'expiryMonth',
+      'expiryYear',
+      'securityCode',
+      'notes',
+      'customFields',
+    ],
+    document: ['title', 'content', 'customFields'],
+    secure_note: ['title', 'content', 'customFields'],
+  };
+  const fields = fieldsByType[itemType] ?? ['title'];
+  const previous = normalizePayloadByType(itemType, previousPayload);
+  const next = normalizePayloadByType(itemType, nextPayload);
+
+  return fields
+    .map((fieldPath) => {
+      const before = stringifyDiffValue((previous as unknown as Record<string, unknown>)[fieldPath]);
+      const after = stringifyDiffValue((next as unknown as Record<string, unknown>)[fieldPath]);
+      if (before === after) {
+        return null;
+      }
+      return {
+        fieldPath,
+        before,
+        after,
+        classification: isSensitiveHistoryField(itemType, fieldPath) ? 'sensitive' : 'non_sensitive',
+      } satisfies VaultItemHistoryDiffEntry;
+    })
+    .filter((entry): entry is VaultItemHistoryDiffEntry => Boolean(entry));
+}
 
 function normalizeCustomFields(fields: unknown): VaultCustomField[] {
   if (!Array.isArray(fields)) {
@@ -805,17 +881,33 @@ export function createVaultWorkspace(input: {
 
       try {
         const { accountKey } = input.sessionStore.getUnlockedVaultContext();
+        const previousItem = state.items.find((candidate) => candidate.itemId === item.itemId) ?? null;
+        const previousPayload = previousItem ? previousItem.payload : item.payload;
         const payload = normalizePayloadByType(item.itemType, item.payload);
         const encryptedPayload = await encryptVaultItemPayload({
           accountKey,
           itemType: item.itemType,
           payload,
         });
+        const diffEntries = computeDiffEntries(item.itemType, payload, previousPayload);
+        const encryptedDiffPayload =
+          diffEntries.length > 0
+            ? await encryptVaultItemPayload({
+              accountKey,
+              itemType: 'secure_note',
+              payload: {
+                version: 'vault-item-history-diff.v1',
+                itemType: item.itemType,
+                entries: diffEntries,
+              },
+            })
+            : undefined;
         const updated = await input.vaultClient.updateItem({
           itemId: item.itemId,
           itemType: item.itemType,
           encryptedPayload,
           expectedRevision: item.revision,
+          encryptedDiffPayload,
         });
         const decrypted = await decryptRecord(accountKey, updated);
         state.items = state.items.map((current) =>
