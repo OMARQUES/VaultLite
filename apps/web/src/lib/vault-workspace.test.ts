@@ -139,6 +139,62 @@ describe('createVaultWorkspace', () => {
     ]);
   });
 
+  test('notifies when a remote snapshot is applied', async () => {
+    const dependencies = createDependencies();
+    dependencies.vaultClient.pullSyncSnapshot.mockResolvedValue({
+      status: 'ok',
+      etag: '"digest_1"',
+      payload: {
+        snapshotToken: 'snapshot_token_1',
+        snapshotAsOf: '2026-03-15T12:00:00.000Z',
+        snapshotDigest: 'digest_1',
+        pageSize: 25,
+        nextCursor: null,
+        entries: [
+          {
+            entryType: 'item',
+            item: {
+              itemId: 'item_1',
+              itemType: 'login',
+              revision: 1,
+              encryptedPayload: 'encrypted_payload_v1',
+              createdAt: '2026-03-15T12:00:00.000Z',
+              updatedAt: '2026-03-15T12:00:00.000Z',
+            },
+          },
+        ],
+      },
+    });
+    const onSnapshotApplied = vi.fn();
+
+    const workspace = createVaultWorkspace({
+      ...dependencies,
+      onSnapshotApplied,
+    } as never);
+
+    await workspace.load();
+
+    expect(onSnapshotApplied).toHaveBeenCalledWith('load');
+  });
+
+  test('does not notify when the server snapshot is not modified', async () => {
+    const dependencies = createDependencies();
+    dependencies.vaultClient.pullSyncSnapshot.mockResolvedValue({
+      status: 'not_modified',
+      etag: '"digest_1"',
+    });
+    const onSnapshotApplied = vi.fn();
+
+    const workspace = createVaultWorkspace({
+      ...dependencies,
+      onSnapshotApplied,
+    } as never);
+
+    await workspace.load();
+
+    expect(onSnapshotApplied).not.toHaveBeenCalled();
+  });
+
   test('creates and updates login items using encrypted payloads and revision checks', async () => {
     const dependencies = createDependencies();
     const workspace = createVaultWorkspace(dependencies as never);

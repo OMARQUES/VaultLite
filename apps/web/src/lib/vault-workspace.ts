@@ -338,6 +338,7 @@ function yieldCooperative(): Promise<void> {
 export function createVaultWorkspace(input: {
   sessionStore: SessionStore;
   vaultClient: VaultLiteVaultClient;
+  onSnapshotApplied?: (reason: string) => void;
 }): VaultWorkspace {
   const searchQuery = ref('');
   const state = reactive<VaultWorkspaceState>({
@@ -742,6 +743,11 @@ export function createVaultWorkspace(input: {
             state.tombstones = nextSnapshot.tombstones;
             rebuildIndex();
             lastSnapshotEtag = nextEtag;
+            try {
+              input.onSnapshotApplied?.(reason);
+            } catch {
+              // Best effort hook for outer cache reconciliation only.
+            }
             didApply = true;
             return true;
           }

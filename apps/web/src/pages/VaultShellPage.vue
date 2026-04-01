@@ -124,6 +124,9 @@ const vaultClient = createVaultLiteVaultClient();
 const workspace = createVaultWorkspace({
   sessionStore,
   vaultClient,
+  onSnapshotApplied: () => {
+    requestAuxiliaryCacheReconciliation({ force: true });
+  },
 });
 
 const searchInputRef = ref<InstanceType<typeof SearchField> | null>(null);
@@ -207,8 +210,8 @@ const realtimeHealthy = ref(false);
 let realtimeClient: WebRealtimeClient | null = null;
 let realtimePollingPaused = false;
 let realtimeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
-let folderRealtimeRevalidationInFlight: Promise<void> | null = null;
-let lastFolderRealtimeRevalidationAt = 0;
+let folderRevalidationInFlight: Promise<void> | null = null;
+let lastFolderRevalidationAt = 0;
 let iconHydrationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let iconHydrationScheduledForce = false;
 let iconHydrationScheduledHosts: string[] = [];
@@ -883,6 +886,18 @@ function requestSelectedItemHistoryRefresh(options: { force?: boolean } = {}) {
     .catch(() => undefined);
 }
 
+function requestAuxiliaryCacheReconciliation(options: { force?: boolean } = {}) {
+  void requestFolderRevalidation({
+    force: options.force === true,
+  });
+  requestManualSiteIconRefresh({
+    force: options.force === true,
+  });
+  requestIconsStateHydration(iconHydrationHosts.value, {
+    force: options.force === true,
+  });
+}
+
 function handleVaultHistoryRealtimeUpdate() {
   requestSelectedItemHistoryRefresh({ force: true });
 }
@@ -892,8 +907,7 @@ function scheduleForegroundRefreshFallback() {
     clearTimeout(foregroundRefreshTimer);
   }
   foregroundRefreshTimer = setTimeout(() => {
-    requestManualSiteIconRefresh();
-    requestIconsStateHydration(iconHydrationHosts.value);
+    requestAuxiliaryCacheReconciliation();
     requestAttachmentStateSync();
     scheduleForegroundRefreshFallback();
   }, withIntervalJitter(FOREGROUND_REFRESH_FALLBACK_INTERVAL_MS));
@@ -901,6 +915,9 @@ function scheduleForegroundRefreshFallback() {
 
 function handleVisibilityChange() {
   realtimeClient?.setVisibilityState(document.visibilityState);
+  if (document.visibilityState === 'visible') {
+    requestAuxiliaryCacheReconciliation();
+  }
 }
 
 function clearRealtimeWatchdog() {
@@ -921,32 +938,33 @@ function startRealtimeWatchdog() {
   }, REALTIME_WATCHDOG_MS);
 }
 
-function revalidateFoldersAfterRealtimeRecovery() {
+function requestFolderRevalidation(options: { force?: boolean } = {}) {
   if (sessionStore.state.phase !== 'ready') {
     return Promise.resolve();
   }
   const now = Date.now();
-  if (folderRealtimeRevalidationInFlight) {
-    return folderRealtimeRevalidationInFlight;
+  if (folderRevalidationInFlight) {
+    return folderRevalidationInFlight;
   }
   if (
-    lastFolderRealtimeRevalidationAt > 0 &&
-    now - lastFolderRealtimeRevalidationAt < FOLDERS_REALTIME_REVALIDATION_COOLDOWN_MS
+    !options.force &&
+    lastFolderRevalidationAt > 0 &&
+    now - lastFolderRevalidationAt < FOLDERS_REALTIME_REVALIDATION_COOLDOWN_MS
   ) {
     return Promise.resolve();
   }
-  lastFolderRealtimeRevalidationAt = now;
-  folderRealtimeRevalidationInFlight = hydrateVaultFoldersFromServer(sessionStore.state.username, authClient, {
-    force: true,
+  lastFolderRevalidationAt = now;
+  folderRevalidationInFlight = hydrateVaultFoldersFromServer(sessionStore.state.username, authClient, {
+    force: options.force === true,
   })
     .then(() => {
       refreshUiState();
     })
     .catch(() => undefined)
     .finally(() => {
-      folderRealtimeRevalidationInFlight = null;
+      folderRevalidationInFlight = null;
     });
-  return folderRealtimeRevalidationInFlight;
+  return folderRevalidationInFlight;
 }
 
 function applyRealtimeHealth(healthy: boolean) {
@@ -955,7 +973,7 @@ function applyRealtimeHealth(healthy: boolean) {
     realtimePollingPaused = true;
     workspace.stopSync();
     startRealtimeWatchdog();
-    void revalidateFoldersAfterRealtimeRecovery();
+    requestAuxiliaryCacheReconciliation({ force: true });
     return;
   }
   if (!healthy && realtimePollingPaused) {
@@ -970,6 +988,7 @@ function onRealtimeNetworkOnline() {
     return;
   }
   realtimeClient?.start();
+  requestAuxiliaryCacheReconciliation({ force: true });
 }
 
 async function handleRealtimeDomainResync(
@@ -1026,6 +1045,7 @@ async function initializeRealtimeClient() {
     sessionStore,
     onVaultDelta: () => {
       void workspace.triggerSync('realtime_vault_delta').catch(() => undefined);
+      requestAuxiliaryCacheReconciliation({ force: true });
     },
     onDomainResync: (domains) => {
       void handleRealtimeDomainResync(domains);
@@ -1038,7 +1058,7 @@ async function initializeRealtimeClient() {
   if (typeof document !== 'undefined') {
     realtimeClient.setVisibilityState(document.visibilityState);
   }
-  requestIconsStateHydration(iconHydrationHosts.value, { force: true });
+  requestAuxiliaryCacheReconciliation({ force: true });
   if (sessionStore.state.phase === 'ready') {
     realtimeClient.start();
   }
@@ -2254,13 +2274,15 @@ async function createFolderFromEditor() {
 }
 
 async function assignItemFolder(itemId: string, folderId: string | null) {
+  if (!folderId) {
+    commitUiState((draft) => {
+      delete draft.folderAssignments[itemId];
+    });
+    return;
+  }
   await assignVaultFolderOnServer(sessionStore.state.username, authClient, itemId, folderId);
   commitUiState((draft) => {
-    if (folderId) {
-      draft.folderAssignments[itemId] = folderId;
-    } else {
-      delete draft.folderAssignments[itemId];
-    }
+    draft.folderAssignments[itemId] = folderId;
   });
 }
 
@@ -3644,7 +3666,7 @@ onMounted(() => {
       refreshUiState();
     })
     .catch(() => undefined);
-  requestManualSiteIconRefresh();
+  requestAuxiliaryCacheReconciliation();
   requestAttachmentStateSync({ force: true });
   scheduleForegroundRefreshFallback();
   void loadVault();

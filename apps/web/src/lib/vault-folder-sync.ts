@@ -13,6 +13,8 @@ const LEGACY_SYNTHETIC_FOLDERS = [
 interface FolderSyncState {
   etag: string | null;
   inFlight: Promise<boolean> | null;
+  pendingRevalidate: boolean;
+  pendingForce: boolean;
 }
 
 const folderSyncStateByUser = new Map<string, FolderSyncState>();
@@ -37,6 +39,8 @@ function syncStateFor(username: string | null | undefined): FolderSyncState | nu
   const created: FolderSyncState = {
     etag: null,
     inFlight: null,
+    pendingRevalidate: false,
+    pendingForce: false,
   };
   folderSyncStateByUser.set(normalized, created);
   return created;
@@ -194,35 +198,51 @@ export async function hydrateVaultFoldersFromServer(
     return false;
   }
   if (syncState.inFlight) {
+    syncState.pendingRevalidate = true;
+    syncState.pendingForce = syncState.pendingForce || options.force === true;
     return syncState.inFlight;
   }
 
   syncState.inFlight = (async () => {
-    let response = await authClient.listVaultFoldersState({
-      etag: options.force ? undefined : syncState.etag ?? undefined,
-    });
-    if (response.status === 'not_modified') {
-      if (response.etag) {
-        syncState.etag = response.etag;
-      }
-      return false;
-    }
+    let changed = false;
+    let nextForce = options.force === true;
 
-    syncState.etag = response.etag ?? null;
-    let payload = response.payload;
-    const merged = await mergeLocalMirrorIntoServer(username, authClient, payload);
-    if (merged) {
-      response = await authClient.listVaultFoldersState();
-      if (response.status === 'ok') {
+    while (true) {
+      syncState.pendingRevalidate = false;
+      syncState.pendingForce = false;
+
+      let response = await authClient.listVaultFoldersState({
+        etag: nextForce ? undefined : syncState.etag ?? undefined,
+      });
+      if (response.status === 'not_modified') {
+        if (response.etag) {
+          syncState.etag = response.etag;
+        }
+      } else {
         syncState.etag = response.etag ?? null;
-        payload = response.payload;
-      }
-    }
+        let payload = response.payload;
+        const merged = await mergeLocalMirrorIntoServer(username, authClient, payload);
+        if (merged) {
+          response = await authClient.listVaultFoldersState();
+          if (response.status === 'ok') {
+            syncState.etag = response.etag ?? null;
+            payload = response.payload;
+          }
+        }
 
-    applyRemoteFolderSnapshot(username, payload);
-    return true;
+        applyRemoteFolderSnapshot(username, payload);
+        changed = true;
+      }
+
+      if (!syncState.pendingRevalidate) {
+        return changed;
+      }
+      nextForce = syncState.pendingForce;
+    }
   })().finally(() => {
     syncState.inFlight = null;
+    syncState.pendingRevalidate = false;
+    syncState.pendingForce = false;
   });
 
   return syncState.inFlight;

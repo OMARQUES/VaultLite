@@ -376,6 +376,14 @@ describe('VaultShellPage', () => {
   });
 
   test('shows active filter summary to disambiguate scope, type and folder context', async () => {
+    window.localStorage.setItem(
+      'vaultlite:vault-ui:alice',
+      JSON.stringify({
+        favorites: [],
+        folderAssignments: {},
+        folders: [{ id: 'personal', name: 'Personal' }],
+      }),
+    );
     const { wrapper } = await mountVaultAt('/vault?scope=all&type=login&folder=personal&q=hub', [
       {
         itemId: 'item_1',
