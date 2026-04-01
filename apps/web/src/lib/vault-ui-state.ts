@@ -9,12 +9,6 @@ export interface VaultUiState {
   folders: VaultFolder[];
 }
 
-const DEFAULT_FOLDERS: VaultFolder[] = [
-  { id: 'work', name: 'Work' },
-  { id: 'personal', name: 'Personal' },
-  { id: 'family', name: 'Family' },
-];
-
 const STORAGE_KEY_PREFIX = 'vaultlite:vault-ui:';
 const UPDATE_EVENT = 'vaultlite:vault-ui-updated';
 
@@ -26,7 +20,7 @@ function defaultState(): VaultUiState {
   return {
     favorites: [],
     folderAssignments: {},
-    folders: DEFAULT_FOLDERS.map((folder) => ({ ...folder })),
+    folders: [],
   };
 }
 
@@ -48,8 +42,6 @@ function normalize(input: Partial<VaultUiState> | null | undefined): VaultUiStat
         }))
     : [];
 
-  const mergedFolders = folders.length > 0 ? folders : DEFAULT_FOLDERS;
-
   return {
     favorites: Array.isArray(state.favorites) ? [...new Set(state.favorites)] : [],
     folderAssignments:
@@ -61,7 +53,7 @@ function normalize(input: Partial<VaultUiState> | null | undefined): VaultUiStat
             ]),
           )
         : {},
-    folders: [...mergedFolders],
+    folders: [...folders],
   };
 }
 

@@ -244,6 +244,189 @@ describe('createInMemoryVaultLiteStorage', () => {
     expect(remaining.records.map((record) => record.historyId)).toEqual(['hist_3']);
   });
 
+  test('stores shared form metadata, updates by confidence, and prunes by origin', async () => {
+    const storage = createInMemoryVaultLiteStorage();
+    await storage.vaultFormMetadata.upsert({
+      metadataId: 'meta_1',
+      ownerUserId: 'user_1',
+      itemId: null,
+      origin: 'https://accounts.example.com',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      frameScope: 'top',
+      fieldRole: 'username',
+      selectorCss: '#email',
+      selectorFallbacks: ['input[name="email"]'],
+      autocompleteToken: 'username',
+      inputType: 'email',
+      fieldName: 'email',
+      fieldId: 'email',
+      labelTextNormalized: 'email',
+      placeholderNormalized: null,
+      confidence: 'heuristic',
+      selectorStatus: 'active',
+      sourceDeviceId: 'device_1',
+      createdAt: '2026-04-01T00:00:00.000Z',
+      updatedAt: '2026-04-01T00:00:00.000Z',
+      lastConfirmedAt: null,
+    });
+
+    const weaker = await storage.vaultFormMetadata.upsert({
+      metadataId: 'meta_2',
+      ownerUserId: 'user_2',
+      itemId: null,
+      origin: 'https://accounts.example.com',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      frameScope: 'top',
+      fieldRole: 'username',
+      selectorCss: '#email-weaker',
+      selectorFallbacks: [],
+      autocompleteToken: 'username',
+      inputType: 'email',
+      fieldName: 'email',
+      fieldId: 'email',
+      labelTextNormalized: 'email',
+      placeholderNormalized: null,
+      confidence: 'heuristic',
+      selectorStatus: 'active',
+      sourceDeviceId: 'device_2',
+      createdAt: '2026-04-01T00:01:00.000Z',
+      updatedAt: '2026-04-01T00:01:00.000Z',
+      lastConfirmedAt: null,
+    });
+    expect(weaker.selectorCss).toBe('#email-weaker');
+
+    const stronger = await storage.vaultFormMetadata.upsert({
+      metadataId: 'meta_3',
+      ownerUserId: 'user_2',
+      itemId: null,
+      origin: 'https://accounts.example.com',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      frameScope: 'top',
+      fieldRole: 'username',
+      selectorCss: '#email-confirmed',
+      selectorFallbacks: ['input[name="identifier"]'],
+      autocompleteToken: 'username',
+      inputType: 'email',
+      fieldName: 'identifier',
+      fieldId: 'identifier',
+      labelTextNormalized: 'email',
+      placeholderNormalized: null,
+      confidence: 'submitted_confirmed',
+      selectorStatus: 'active',
+      sourceDeviceId: 'device_2',
+      createdAt: '2026-04-01T00:02:00.000Z',
+      updatedAt: '2026-04-01T00:02:00.000Z',
+      lastConfirmedAt: '2026-04-01T00:02:00.000Z',
+    });
+    expect(stronger.selectorCss).toBe('#email-confirmed');
+    expect(stronger.metadataId).toBe('meta_3');
+
+    await storage.vaultFormMetadata.markSelectorsSuspect({
+      origin: 'https://accounts.example.com',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      fieldRole: 'username',
+      itemId: null,
+      updatedAt: '2026-04-01T00:03:00.000Z',
+    });
+
+    const byOrigin = await storage.vaultFormMetadata.listByOrigin({
+      origin: 'https://accounts.example.com',
+      limit: 100,
+    });
+    expect(byOrigin.records).toHaveLength(1);
+    expect(byOrigin.records[0]).toEqual(
+      expect.objectContaining({
+        metadataId: 'meta_3',
+        selectorStatus: 'suspect',
+        confidence: 'submitted_confirmed',
+      }),
+    );
+
+    const byItem = await storage.vaultFormMetadata.listByItem({
+      itemId: 'item_login_1',
+      origin: 'https://accounts.example.com',
+      limit: 20,
+    });
+    expect(byItem.records).toEqual([]);
+
+    await storage.vaultFormMetadata.upsert({
+      metadataId: 'meta_4',
+      ownerUserId: 'user_1',
+      itemId: 'item_login_1',
+      origin: 'https://accounts.example.com',
+      formFingerprint: 'form_fp_2',
+      fieldFingerprint: 'field_fp_2',
+      frameScope: 'top',
+      fieldRole: 'password_current',
+      selectorCss: '#password',
+      selectorFallbacks: [],
+      autocompleteToken: 'current-password',
+      inputType: 'password',
+      fieldName: 'password',
+      fieldId: 'password',
+      labelTextNormalized: 'senha',
+      placeholderNormalized: null,
+      confidence: 'filled',
+      selectorStatus: 'active',
+      sourceDeviceId: 'device_1',
+      createdAt: '2026-04-01T00:04:00.000Z',
+      updatedAt: '2026-04-01T00:04:00.000Z',
+      lastConfirmedAt: null,
+    });
+
+    const linked = await storage.vaultFormMetadata.listByItem({
+      itemId: 'item_login_1',
+      origin: 'https://accounts.example.com',
+      limit: 20,
+    });
+    expect(linked.records).toHaveLength(1);
+    expect(linked.records[0]?.fieldRole).toBe('password_current');
+
+    for (let index = 0; index < 55; index += 1) {
+      await storage.vaultFormMetadata.upsert({
+        metadataId: `overflow_${index}`,
+        ownerUserId: 'user_overflow',
+        itemId: null,
+        origin: 'https://overflow.example.com',
+        formFingerprint: `form_overflow_${index}`,
+        fieldFingerprint: `field_overflow_${index}`,
+        frameScope: 'top',
+        fieldRole: 'unknown',
+        selectorCss: `#field-${index}`,
+        selectorFallbacks: [],
+        autocompleteToken: null,
+        inputType: 'text',
+        fieldName: `field_${index}`,
+        fieldId: `field_${index}`,
+        labelTextNormalized: null,
+        placeholderNormalized: null,
+        confidence: index < 3 ? 'submitted_confirmed' : 'heuristic',
+        selectorStatus: index < 5 ? 'retired' : 'active',
+        sourceDeviceId: null,
+        createdAt: `2026-04-01T00:${String(index).padStart(2, '0')}:00.000Z`,
+        updatedAt: `2026-04-01T00:${String(index).padStart(2, '0')}:00.000Z`,
+        lastConfirmedAt: index < 3 ? `2026-04-01T00:${String(index).padStart(2, '0')}:00.000Z` : null,
+      });
+    }
+
+    const pruned = await storage.vaultFormMetadata.pruneExcessByOrigin({
+      origin: 'https://overflow.example.com',
+      maxRecords: 50,
+    });
+    expect(pruned).toBe(5);
+
+    const afterPrune = await storage.vaultFormMetadata.listByOrigin({
+      origin: 'https://overflow.example.com',
+      limit: 100,
+    });
+    expect(afterPrune.records).toHaveLength(50);
+    expect(afterPrune.records.some((record) => record.selectorStatus === 'retired')).toBe(false);
+  });
+
   test('supports pending attachment records, idempotency lookup, and uploaded transition', async () => {
     const storage = createInMemoryVaultLiteStorage();
     await storage.attachmentBlobs.put({

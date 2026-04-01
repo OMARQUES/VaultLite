@@ -92,5 +92,21 @@ describe('cloudflare storage domain query chunking', () => {
       expect(entry.values.length).toBeLessThanOrEqual(91);
     }
   });
-});
 
+  test('chunks shared form metadata origin lookups to stay under D1 variable limits', async () => {
+    const { db, binds } = createMockDbWithVariableLimit(100);
+    const storage = createCloudflareVaultLiteStorage({
+      db,
+      bucket: createNoopBucket(),
+    });
+    const origins = Array.from({ length: 260 }, (_, index) => `https://portal-${index}.example.com`);
+
+    await expect(storage.vaultFormMetadata.listByOrigins({ origins, limitPerOrigin: 20 })).resolves.toEqual([]);
+
+    const metadataQueries = binds.filter(({ query }) => query.includes('FROM vault_form_metadata'));
+    expect(metadataQueries.length).toBe(3);
+    for (const entry of metadataQueries) {
+      expect(entry.values.length).toBeLessThanOrEqual(90);
+    }
+  });
+});

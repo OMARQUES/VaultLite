@@ -1302,8 +1302,8 @@ h2 {
 }
 
 .vault-detail-pane {
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
   padding: 18px 22px;
   background: var(--vl-surface-2);
@@ -1701,6 +1701,13 @@ h2 {
   box-shadow: none;
 }
 
+.detail-card--detail-view {
+  flex: 1 1 auto;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
 .detail-card--editor {
   max-width: 840px;
   font-size: 12px;
@@ -1724,6 +1731,32 @@ h2 {
 
 .detail-card--editor .field textarea {
   min-height: 88px;
+}
+
+.editor-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.editor-folder-create-btn {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--vl-primary) 80%, transparent);
+  background: var(--vl-primary);
+  color: #fff;
+}
+
+.editor-folder-create-btn:hover:not(:disabled),
+.editor-folder-create-btn:focus-visible {
+  background: color-mix(in srgb, var(--vl-primary) 88%, #ffffff 12%);
+  border-color: color-mix(in srgb, var(--vl-primary) 88%, #ffffff 12%);
+  color: #fff;
 }
 
 .editor-section {
@@ -2282,6 +2315,58 @@ h2 {
   color: var(--vl-text-soft);
   font-size: 12px;
   line-height: 17px;
+}
+
+.detail-history-module {
+  margin-top: auto;
+  gap: 10px;
+}
+
+.detail-history-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-history-summary-toggle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.detail-history-summary-toggle .material-symbols-rounded {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--vl-text-soft);
+}
+
+.detail-history-summary-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--vl-text);
+  font-weight: 600;
+}
+
+.detail-history-summary-body {
+  display: grid;
+  gap: 4px;
+  margin-left: 20px;
+  border-left: 1px solid color-mix(in srgb, var(--vl-border) 90%, transparent);
+  padding-left: 10px;
+}
+
+.detail-history-summary-body p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--vl-text-soft);
 }
 
 .editor-action-bar {
@@ -3984,6 +4069,47 @@ h2 {
 
 .dialog-modal.dialog-modal--backup {
   width: min(100%, 720px);
+}
+
+.dialog-modal.folder-dialog-modal {
+  width: min(100%, 560px);
+  gap: 18px;
+  padding: 24px 28px;
+}
+
+.folder-dialog-modal .dialog-modal__header h2 {
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.folder-dialog-modal .field {
+  gap: 10px;
+}
+
+.folder-dialog-modal .field__label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--vl-text-soft);
+}
+
+.folder-dialog-modal .field input {
+  min-height: 54px;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.folder-dialog-modal .dialog-modal__actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.folder-dialog-modal .button--primary,
+.folder-dialog-modal .button--secondary {
+  width: 100%;
+  min-height: 48px;
+  justify-content: center;
 }
 
 .dialog-modal__header h2 {

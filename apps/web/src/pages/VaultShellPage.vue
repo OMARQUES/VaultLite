@@ -65,6 +65,7 @@ type VaultTypeFilter = 'all' | 'login' | 'document' | 'card' | 'secure_note';
 type AttachmentUploadState = 'pending' | 'uploaded' | 'attached' | 'deleted' | 'orphaned';
 const PASSWORD_HISTORY_REALTIME_EVENT = 'vaultlite.password_history.updated';
 const VAULT_HISTORY_REALTIME_EVENT = 'vaultlite.vault_history.updated';
+const FOLDERS_REALTIME_REVALIDATION_COOLDOWN_MS = 15_000;
 
 interface AttachmentUploadView {
   uploadId: string;
@@ -159,6 +160,7 @@ const historyByItemId = ref<Record<string, VaultHistoryRecordView[]>>({});
 const historyErrorByItemId = ref<Record<string, string>>({});
 const historyLoadingItemId = ref<string | null>(null);
 const historyRevealByItemId = ref<Record<string, Record<string, boolean>>>({});
+const historySummaryExpandedByItemId = ref<Record<string, boolean>>({});
 const faviconSourceIndexByItemAndHost = ref<Record<string, number>>({});
 const manualSiteIconsByHost = ref<ManualSiteIconMap>({});
 const canonicalSiteIconsByHost = ref<
@@ -205,6 +207,8 @@ const realtimeHealthy = ref(false);
 let realtimeClient: WebRealtimeClient | null = null;
 let realtimePollingPaused = false;
 let realtimeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let folderRealtimeRevalidationInFlight: Promise<void> | null = null;
+let lastFolderRealtimeRevalidationAt = 0;
 let iconHydrationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let iconHydrationScheduledForce = false;
 let iconHydrationScheduledHosts: string[] = [];
@@ -714,6 +718,18 @@ function historyChangeTypeLabel(changeType: string): string {
   return 'Updated';
 }
 
+function formatHistoryTimestamp(timestamp: string): string {
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) {
+    return timestamp;
+  }
+  return new Date(parsed).toLocaleString();
+}
+
+function historySourceLabel(record: VaultHistoryRecordView): string {
+  return record.sourceDeviceName || record.sourceDeviceId || 'Unknown device';
+}
+
 function historyRevealKey(historyId: string, fieldPath: string): string {
   return `${historyId}:${fieldPath}`;
 }
@@ -730,6 +746,20 @@ function toggleHistoryDiffReveal(itemId: string, historyId: string, fieldPath: s
   historyRevealByItemId.value = {
     ...historyRevealByItemId.value,
     [itemId]: itemReveal,
+  };
+}
+
+function isHistorySummaryExpanded(itemId: string): boolean {
+  return historySummaryExpandedByItemId.value[itemId] === true;
+}
+
+function toggleHistorySummary(itemId: string) {
+  if (!itemId) {
+    return;
+  }
+  historySummaryExpandedByItemId.value = {
+    ...historySummaryExpandedByItemId.value,
+    [itemId]: !isHistorySummaryExpanded(itemId),
   };
 }
 
@@ -891,12 +921,41 @@ function startRealtimeWatchdog() {
   }, REALTIME_WATCHDOG_MS);
 }
 
+function revalidateFoldersAfterRealtimeRecovery() {
+  if (sessionStore.state.phase !== 'ready') {
+    return Promise.resolve();
+  }
+  const now = Date.now();
+  if (folderRealtimeRevalidationInFlight) {
+    return folderRealtimeRevalidationInFlight;
+  }
+  if (
+    lastFolderRealtimeRevalidationAt > 0 &&
+    now - lastFolderRealtimeRevalidationAt < FOLDERS_REALTIME_REVALIDATION_COOLDOWN_MS
+  ) {
+    return Promise.resolve();
+  }
+  lastFolderRealtimeRevalidationAt = now;
+  folderRealtimeRevalidationInFlight = hydrateVaultFoldersFromServer(sessionStore.state.username, authClient, {
+    force: true,
+  })
+    .then(() => {
+      refreshUiState();
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      folderRealtimeRevalidationInFlight = null;
+    });
+  return folderRealtimeRevalidationInFlight;
+}
+
 function applyRealtimeHealth(healthy: boolean) {
   realtimeHealthy.value = healthy;
   if (healthy && !realtimePollingPaused) {
     realtimePollingPaused = true;
     workspace.stopSync();
     startRealtimeWatchdog();
+    void revalidateFoldersAfterRealtimeRecovery();
     return;
   }
   if (!healthy && realtimePollingPaused) {
@@ -1124,6 +1183,7 @@ const selectedItemHistory = computed(
       ? historyByItemId.value[selectedItemInContext.value.itemId] ?? []
       : []) as VaultHistoryRecordView[],
 );
+const selectedItemLatestHistory = computed<VaultHistoryRecordView | null>(() => selectedItemHistory.value[0] ?? null);
 const selectedItemHistoryError = computed(() =>
   selectedItemInContext.value ? historyErrorByItemId.value[selectedItemInContext.value.itemId] ?? '' : '',
 );
@@ -4028,7 +4088,7 @@ onBeforeUnmount(() => {
                   </select>
                 </label>
                   <IconButton
-                    class="button--primary"
+                    class="editor-folder-create-btn"
                     type="button"
                     label="Create folder from editor"
                     title="Create folder"
@@ -4067,7 +4127,7 @@ onBeforeUnmount(() => {
                   </select>
                 </label>
                   <IconButton
-                    class="button--primary"
+                    class="editor-folder-create-btn"
                     type="button"
                     label="Create folder from editor"
                     title="Create folder"
@@ -4151,7 +4211,7 @@ onBeforeUnmount(() => {
                   </select>
                 </label>
                   <IconButton
-                    class="button--primary"
+                    class="editor-folder-create-btn"
                     type="button"
                     label="Create folder from editor"
                     title="Create folder"
@@ -4190,7 +4250,7 @@ onBeforeUnmount(() => {
                   </select>
                 </label>
                   <IconButton
-                    class="button--primary"
+                    class="editor-folder-create-btn"
                     type="button"
                     label="Create folder from editor"
                     title="Create folder"
@@ -4425,7 +4485,7 @@ onBeforeUnmount(() => {
         </section>
       </article>
 
-      <article v-else-if="selectedItemInContext" class="detail-card">
+      <article v-else-if="selectedItemInContext" class="detail-card detail-card--detail-view">
         <div class="detail-card__header detail-card__header--split">
           <div class="detail-card__identity">
             <span class="detail-card__avatar-shell" :class="{ 'is-editable': canEditDetailIcon }">
@@ -4732,81 +4792,6 @@ onBeforeUnmount(() => {
           </div>
         </KeyValueList>
 
-        <section v-if="!isTrashContext" class="detail-module">
-          <div class="custom-fields-section__header">
-            <h3>History</h3>
-            <SecondaryButton
-              type="button"
-              class="module-action-button"
-              :disabled="selectedItemHistoryLoading"
-              @click="requestSelectedItemHistoryRefresh({ force: true })"
-            >
-              <span>{{ selectedItemHistoryLoading ? 'Refreshing...' : 'Refresh' }}</span>
-            </SecondaryButton>
-          </div>
-
-          <InlineAlert v-if="selectedItemHistoryError" tone="danger">
-            {{ selectedItemHistoryError }}
-          </InlineAlert>
-
-          <p v-else-if="selectedItemHistoryLoading && selectedItemHistory.length === 0" class="module-empty-hint">
-            Loading history...
-          </p>
-
-          <div v-else-if="selectedItemHistory.length > 0" class="attachment-list">
-            <article
-              v-for="record in selectedItemHistory"
-              :key="record.historyId"
-              class="attachment-row"
-            >
-              <div class="attachment-row__main">
-                <p class="attachment-row__name">{{ historyChangeTypeLabel(record.changeType) }}</p>
-                <p class="attachment-row__status">{{ new Date(record.createdAt).toLocaleString() }}</p>
-                <p class="attachment-row__meta">
-                  {{ record.sourceDeviceName || record.sourceDeviceId || 'Unknown device' }}
-                </p>
-
-                <div v-if="record.diffEntries.length > 0" class="key-value-list">
-                  <div
-                    v-for="entry in record.diffEntries"
-                    :key="`${record.historyId}:${entry.fieldPath}`"
-                    class="key-value-row"
-                  >
-                    <dt>{{ historyDiffLabel(entry.fieldPath) }}</dt>
-                    <dd>
-                      <div>
-                        Before:
-                        {{ historyDiffDisplayValue(selectedItemInContext.itemId, record.historyId, entry, 'before') }}
-                      </div>
-                      <div>
-                        After:
-                        {{ historyDiffDisplayValue(selectedItemInContext.itemId, record.historyId, entry, 'after') }}
-                      </div>
-                      <SecondaryButton
-                        v-if="entry.classification === 'sensitive'"
-                        type="button"
-                        class="module-action-button"
-                        @click="toggleHistoryDiffReveal(selectedItemInContext.itemId, record.historyId, entry.fieldPath)"
-                      >
-                        <span>
-                          {{
-                            isHistoryDiffRevealed(selectedItemInContext.itemId, record.historyId, entry.fieldPath)
-                              ? 'Hide values'
-                              : 'Reveal values'
-                          }}
-                        </span>
-                      </SecondaryButton>
-                    </dd>
-                  </div>
-                </div>
-                <p v-else class="module-empty-hint">No field diffs recorded.</p>
-              </div>
-            </article>
-          </div>
-
-          <p v-else class="module-empty-hint">No history entries yet.</p>
-        </section>
-
         <section
           v-if="!isTrashContext && detailCustomFields(selectedItemInContext).length === 0"
           class="detail-module"
@@ -4884,6 +4869,53 @@ onBeforeUnmount(() => {
             </article>
           </div>
           <p v-else class="module-empty-hint">No attachments yet.</p>
+        </section>
+
+        <section v-if="!isTrashContext" class="detail-module detail-history-module">
+          <div class="detail-history-summary">
+            <button
+              type="button"
+              class="detail-history-summary-toggle"
+              :aria-expanded="selectedItemInContext ? isHistorySummaryExpanded(selectedItemInContext.itemId) : false"
+              @click="selectedItemInContext && toggleHistorySummary(selectedItemInContext.itemId)"
+            >
+              <span class="material-symbols-rounded" aria-hidden="true">
+                {{
+                  selectedItemInContext && isHistorySummaryExpanded(selectedItemInContext.itemId)
+                    ? 'expand_more'
+                    : 'chevron_right'
+                }}
+              </span>
+              <p class="detail-history-summary-title">
+                {{
+                  selectedItemHistoryLoading && selectedItemHistory.length === 0
+                    ? 'Loading history...'
+                    : selectedItemLatestHistory
+                      ? `Last edited ${formatHistoryTimestamp(selectedItemLatestHistory.createdAt)}`
+                      : 'No history entries yet.'
+                }}
+              </p>
+            </button>
+
+            <div
+              v-if="
+                selectedItemInContext &&
+                selectedItemLatestHistory &&
+                isHistorySummaryExpanded(selectedItemInContext.itemId)
+              "
+              class="detail-history-summary-body"
+            >
+              <p>
+                {{ historyChangeTypeLabel(selectedItemLatestHistory.changeType) }}
+                {{ formatHistoryTimestamp(selectedItemLatestHistory.createdAt) }}
+              </p>
+              <p>{{ historySourceLabel(selectedItemLatestHistory) }}</p>
+            </div>
+          </div>
+
+          <InlineAlert v-if="selectedItemHistoryError" tone="danger">
+            {{ selectedItemHistoryError }}
+          </InlineAlert>
         </section>
 
         <section v-if="isTrashContext" class="detail-trash-actions">
@@ -5120,14 +5152,14 @@ onBeforeUnmount(() => {
       </template>
     </DialogModal>
 
-    <DialogModal :open="editorFolderDialogOpen" title="New folder">
+    <DialogModal :open="editorFolderDialogOpen" title="New folder" modal-class="folder-dialog-modal">
       <TextField ref="editorFolderNameFieldRef" v-model="editorFolderName" label="Folder name" autocomplete="off" />
       <p v-if="editorFolderError" class="module-empty-hint">{{ editorFolderError }}</p>
       <template #actions>
-        <SecondaryButton type="button" @click="closeEditorFolderDialog">Cancel</SecondaryButton>
         <PrimaryButton type="button" :disabled="!editorFolderName.trim() || editorFolderBusy" @click="createFolderFromEditor">
           {{ editorFolderBusy ? 'Creating...' : 'Create folder' }}
         </PrimaryButton>
+        <SecondaryButton type="button" @click="closeEditorFolderDialog">Cancel</SecondaryButton>
       </template>
     </DialogModal>
 

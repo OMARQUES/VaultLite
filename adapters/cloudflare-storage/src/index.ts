@@ -63,6 +63,10 @@ import type {
   VaultItemHistoryRepository,
   VaultFolderRecord,
   VaultFolderAssignmentRecord,
+  VaultFormFieldRole,
+  VaultFormMetadataConfidence,
+  VaultFormMetadataRecord,
+  VaultFormMetadataRepository,
   VaultFolderRepository,
   VaultItemTombstoneRecord,
   VaultItemRepository,
@@ -728,6 +732,45 @@ CREATE TABLE IF NOT EXISTS vault_folder_assignments (
 CREATE INDEX IF NOT EXISTS idx_vault_folder_assignments_owner_folder
   ON vault_folder_assignments (owner_user_id, folder_id, updated_at DESC, item_id);`,
   },
+  {
+    id: '0021_vault_form_metadata',
+    filename: '0021_vault_form_metadata.sql',
+    sql: `CREATE TABLE IF NOT EXISTS vault_form_metadata (
+  metadata_id TEXT PRIMARY KEY,
+  owner_user_id TEXT NULL,
+  item_id TEXT NULL,
+  item_scope_key TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  form_fingerprint TEXT NOT NULL,
+  field_fingerprint TEXT NOT NULL,
+  frame_scope TEXT NOT NULL,
+  field_role TEXT NOT NULL,
+  selector_css TEXT NOT NULL,
+  selector_fallbacks_json TEXT NOT NULL,
+  autocomplete_token TEXT NULL,
+  input_type TEXT NULL,
+  field_name TEXT NULL,
+  field_id TEXT NULL,
+  label_text_normalized TEXT NULL,
+  placeholder_normalized TEXT NULL,
+  confidence TEXT NOT NULL,
+  selector_status TEXT NOT NULL,
+  source_device_id TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_confirmed_at TEXT NULL,
+  UNIQUE (origin, form_fingerprint, field_fingerprint, field_role, item_scope_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_form_metadata_origin
+  ON vault_form_metadata (origin, updated_at DESC, metadata_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vault_form_metadata_item_origin
+  ON vault_form_metadata (item_id, origin, updated_at DESC, metadata_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vault_form_metadata_origin_confidence
+  ON vault_form_metadata (origin, confidence, updated_at DESC, metadata_id DESC);`,
+  },
 ];
 
 export function getInfrastructureMigrationDirectory(): URL | string {
@@ -865,6 +908,136 @@ async function selectMany<T>(
 ): Promise<T[]> {
   const result = await db.prepare(query).bind(...values).all<T>();
   return result.results;
+}
+
+const VAULT_FORM_METADATA_CONFIDENCE_RANK: Record<VaultFormMetadataConfidence, number> = {
+  heuristic: 0,
+  filled: 1,
+  submitted_confirmed: 2,
+  user_corrected: 3,
+};
+
+type VaultFormMetadataRow = {
+  metadataId: string;
+  ownerUserId: string | null;
+  itemId: string | null;
+  origin: string;
+  formFingerprint: string;
+  fieldFingerprint: string;
+  frameScope: 'top' | 'same_origin_iframe';
+  fieldRole: VaultFormFieldRole;
+  selectorCss: string;
+  selectorFallbacksJson: string;
+  autocompleteToken: string | null;
+  inputType: string | null;
+  fieldName: string | null;
+  fieldId: string | null;
+  labelTextNormalized: string | null;
+  placeholderNormalized: string | null;
+  confidence: VaultFormMetadataConfidence;
+  selectorStatus: 'active' | 'suspect' | 'retired';
+  sourceDeviceId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastConfirmedAt: string | null;
+};
+
+function normalizeVaultFormMetadataRecord(record: VaultFormMetadataRecord): VaultFormMetadataRecord {
+  return {
+    ...record,
+    ownerUserId: record.ownerUserId ?? null,
+    itemId: record.itemId ?? null,
+    selectorFallbacks: [...record.selectorFallbacks],
+    autocompleteToken: record.autocompleteToken ?? null,
+    inputType: record.inputType ?? null,
+    fieldName: record.fieldName ?? null,
+    fieldId: record.fieldId ?? null,
+    labelTextNormalized: record.labelTextNormalized ?? null,
+    placeholderNormalized: record.placeholderNormalized ?? null,
+    sourceDeviceId: record.sourceDeviceId ?? null,
+    lastConfirmedAt: record.lastConfirmedAt ?? null,
+  };
+}
+
+function buildVaultFormMetadataItemScopeKey(itemId: string | null): string {
+  return itemId ?? '';
+}
+
+function parseVaultFormMetadataRecord(row: VaultFormMetadataRow): VaultFormMetadataRecord {
+  let selectorFallbacks: string[] = [];
+  try {
+    const parsed = JSON.parse(row.selectorFallbacksJson);
+    if (Array.isArray(parsed)) {
+      selectorFallbacks = parsed.filter((entry): entry is string => typeof entry === 'string');
+    }
+  } catch {
+    selectorFallbacks = [];
+  }
+  return normalizeVaultFormMetadataRecord({
+    metadataId: row.metadataId,
+    ownerUserId: row.ownerUserId,
+    itemId: row.itemId,
+    origin: row.origin,
+    formFingerprint: row.formFingerprint,
+    fieldFingerprint: row.fieldFingerprint,
+    frameScope: row.frameScope,
+    fieldRole: row.fieldRole,
+    selectorCss: row.selectorCss,
+    selectorFallbacks,
+    autocompleteToken: row.autocompleteToken,
+    inputType: row.inputType,
+    fieldName: row.fieldName,
+    fieldId: row.fieldId,
+    labelTextNormalized: row.labelTextNormalized,
+    placeholderNormalized: row.placeholderNormalized,
+    confidence: row.confidence,
+    selectorStatus: row.selectorStatus,
+    sourceDeviceId: row.sourceDeviceId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    lastConfirmedAt: row.lastConfirmedAt,
+  });
+}
+
+function compareVaultFormMetadataPriority(
+  left: VaultFormMetadataRecord,
+  right: VaultFormMetadataRecord,
+): number {
+  const confidenceDelta =
+    VAULT_FORM_METADATA_CONFIDENCE_RANK[left.confidence] -
+    VAULT_FORM_METADATA_CONFIDENCE_RANK[right.confidence];
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+  const confirmedDelta = (left.lastConfirmedAt ?? '').localeCompare(right.lastConfirmedAt ?? '');
+  if (confirmedDelta !== 0) {
+    return confirmedDelta;
+  }
+  const updatedDelta = left.updatedAt.localeCompare(right.updatedAt);
+  if (updatedDelta !== 0) {
+    return updatedDelta;
+  }
+  return left.metadataId.localeCompare(right.metadataId);
+}
+
+function sortVaultFormMetadataRecords(records: VaultFormMetadataRecord[]): VaultFormMetadataRecord[] {
+  return [...records].sort((left, right) => {
+    const priorityDelta = compareVaultFormMetadataPriority(right, left);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return right.metadataId.localeCompare(left.metadataId);
+  });
+}
+
+function buildVaultFormMetadataPruneWeight(record: VaultFormMetadataRecord): number {
+  if (record.selectorStatus === 'retired') {
+    return 0;
+  }
+  if (record.selectorStatus === 'suspect') {
+    return 1;
+  }
+  return 2 + VAULT_FORM_METADATA_CONFIDENCE_RANK[record.confidence];
 }
 
 class CloudflareInviteRepository implements InviteRepository {
@@ -4130,6 +4303,424 @@ class CloudflareVaultItemHistoryRepository implements VaultItemHistoryRepository
   }
 }
 
+class CloudflareVaultFormMetadataRepository implements VaultFormMetadataRepository {
+  constructor(private readonly db: D1DatabaseLike) {}
+
+  async upsert(record: VaultFormMetadataRecord): Promise<VaultFormMetadataRecord> {
+    const normalized = normalizeVaultFormMetadataRecord(record);
+    const itemScopeKey = buildVaultFormMetadataItemScopeKey(normalized.itemId);
+    const existingRow = await selectOne<VaultFormMetadataRow>(
+      this.db,
+      `SELECT metadata_id AS metadataId,
+              owner_user_id AS ownerUserId,
+              item_id AS itemId,
+              origin,
+              form_fingerprint AS formFingerprint,
+              field_fingerprint AS fieldFingerprint,
+              frame_scope AS frameScope,
+              field_role AS fieldRole,
+              selector_css AS selectorCss,
+              selector_fallbacks_json AS selectorFallbacksJson,
+              autocomplete_token AS autocompleteToken,
+              input_type AS inputType,
+              field_name AS fieldName,
+              field_id AS fieldId,
+              label_text_normalized AS labelTextNormalized,
+              placeholder_normalized AS placeholderNormalized,
+              confidence,
+              selector_status AS selectorStatus,
+              source_device_id AS sourceDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt,
+              last_confirmed_at AS lastConfirmedAt
+       FROM vault_form_metadata
+       WHERE origin = ?
+         AND form_fingerprint = ?
+         AND field_fingerprint = ?
+         AND field_role = ?
+         AND item_scope_key = ?`,
+      [
+        normalized.origin,
+        normalized.formFingerprint,
+        normalized.fieldFingerprint,
+        normalized.fieldRole,
+        itemScopeKey,
+      ],
+    );
+    const existing = existingRow ? parseVaultFormMetadataRecord(existingRow) : null;
+    if (existing && compareVaultFormMetadataPriority(normalized, existing) < 0) {
+      return existing;
+    }
+
+    if (!existing) {
+      await executeOne(
+        this.db,
+        `INSERT INTO vault_form_metadata (
+           metadata_id,
+           owner_user_id,
+           item_id,
+           item_scope_key,
+           origin,
+           form_fingerprint,
+           field_fingerprint,
+           frame_scope,
+           field_role,
+           selector_css,
+           selector_fallbacks_json,
+           autocomplete_token,
+           input_type,
+           field_name,
+           field_id,
+           label_text_normalized,
+           placeholder_normalized,
+           confidence,
+           selector_status,
+           source_device_id,
+           created_at,
+           updated_at,
+           last_confirmed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          normalized.metadataId,
+          normalized.ownerUserId,
+          normalized.itemId,
+          itemScopeKey,
+          normalized.origin,
+          normalized.formFingerprint,
+          normalized.fieldFingerprint,
+          normalized.frameScope,
+          normalized.fieldRole,
+          normalized.selectorCss,
+          JSON.stringify(normalized.selectorFallbacks),
+          normalized.autocompleteToken,
+          normalized.inputType,
+          normalized.fieldName,
+          normalized.fieldId,
+          normalized.labelTextNormalized,
+          normalized.placeholderNormalized,
+          normalized.confidence,
+          normalized.selectorStatus,
+          normalized.sourceDeviceId,
+          normalized.createdAt,
+          normalized.updatedAt,
+          normalized.lastConfirmedAt,
+        ],
+      );
+      return normalized;
+    }
+
+    await executeOne(
+      this.db,
+      `UPDATE vault_form_metadata
+       SET metadata_id = ?,
+           owner_user_id = ?,
+           item_id = ?,
+           item_scope_key = ?,
+           frame_scope = ?,
+           selector_css = ?,
+           selector_fallbacks_json = ?,
+           autocomplete_token = ?,
+           input_type = ?,
+           field_name = ?,
+           field_id = ?,
+           label_text_normalized = ?,
+           placeholder_normalized = ?,
+           confidence = ?,
+           selector_status = ?,
+           source_device_id = ?,
+           created_at = ?,
+           updated_at = ?,
+           last_confirmed_at = ?
+       WHERE origin = ?
+         AND form_fingerprint = ?
+         AND field_fingerprint = ?
+         AND field_role = ?
+         AND item_scope_key = ?`,
+      [
+        normalized.metadataId,
+        normalized.ownerUserId,
+        normalized.itemId,
+        itemScopeKey,
+        normalized.frameScope,
+        normalized.selectorCss,
+        JSON.stringify(normalized.selectorFallbacks),
+        normalized.autocompleteToken,
+        normalized.inputType,
+        normalized.fieldName,
+        normalized.fieldId,
+        normalized.labelTextNormalized,
+        normalized.placeholderNormalized,
+        normalized.confidence,
+        normalized.selectorStatus,
+        normalized.sourceDeviceId,
+        normalized.createdAt,
+        normalized.updatedAt,
+        normalized.lastConfirmedAt,
+        normalized.origin,
+        normalized.formFingerprint,
+        normalized.fieldFingerprint,
+        normalized.fieldRole,
+        itemScopeKey,
+      ],
+    );
+    return normalized;
+  }
+
+  async listByOrigin(input: { origin: string; limit: number }): Promise<{ records: VaultFormMetadataRecord[] }> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(500, Math.trunc(input.limit))) : 100;
+    const rows = await selectMany<VaultFormMetadataRow>(
+      this.db,
+      `SELECT metadata_id AS metadataId,
+              owner_user_id AS ownerUserId,
+              item_id AS itemId,
+              origin,
+              form_fingerprint AS formFingerprint,
+              field_fingerprint AS fieldFingerprint,
+              frame_scope AS frameScope,
+              field_role AS fieldRole,
+              selector_css AS selectorCss,
+              selector_fallbacks_json AS selectorFallbacksJson,
+              autocomplete_token AS autocompleteToken,
+              input_type AS inputType,
+              field_name AS fieldName,
+              field_id AS fieldId,
+              label_text_normalized AS labelTextNormalized,
+              placeholder_normalized AS placeholderNormalized,
+              confidence,
+              selector_status AS selectorStatus,
+              source_device_id AS sourceDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt,
+              last_confirmed_at AS lastConfirmedAt
+       FROM vault_form_metadata
+       WHERE origin = ?
+       ORDER BY updated_at DESC, metadata_id DESC
+       LIMIT ?`,
+      [input.origin, safeLimit],
+    );
+    return { records: sortVaultFormMetadataRecords(rows.map(parseVaultFormMetadataRecord)).slice(0, safeLimit) };
+  }
+
+  async listByOrigins(input: {
+    origins: string[];
+    limitPerOrigin: number;
+  }): Promise<VaultFormMetadataRecord[]> {
+    if (input.origins.length === 0) {
+      return [];
+    }
+    const safeLimit = Number.isFinite(input.limitPerOrigin)
+      ? Math.max(1, Math.min(200, Math.trunc(input.limitPerOrigin)))
+      : 50;
+    const dedupedOrigins = Array.from(new Set(input.origins));
+    const rows: VaultFormMetadataRecord[] = [];
+    for (let index = 0; index < dedupedOrigins.length; index += D1_SAFE_IN_CLAUSE_CHUNK) {
+      const chunk = dedupedOrigins.slice(index, index + D1_SAFE_IN_CLAUSE_CHUNK);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const chunkRows = await selectMany<VaultFormMetadataRow>(
+        this.db,
+        `SELECT metadata_id AS metadataId,
+                owner_user_id AS ownerUserId,
+                item_id AS itemId,
+                origin,
+                form_fingerprint AS formFingerprint,
+                field_fingerprint AS fieldFingerprint,
+                frame_scope AS frameScope,
+                field_role AS fieldRole,
+                selector_css AS selectorCss,
+                selector_fallbacks_json AS selectorFallbacksJson,
+                autocomplete_token AS autocompleteToken,
+                input_type AS inputType,
+                field_name AS fieldName,
+                field_id AS fieldId,
+                label_text_normalized AS labelTextNormalized,
+                placeholder_normalized AS placeholderNormalized,
+                confidence,
+                selector_status AS selectorStatus,
+                source_device_id AS sourceDeviceId,
+                created_at AS createdAt,
+                updated_at AS updatedAt,
+                last_confirmed_at AS lastConfirmedAt
+         FROM vault_form_metadata
+         WHERE origin IN (${placeholders})
+         ORDER BY updated_at DESC, metadata_id DESC`,
+        chunk,
+      );
+      rows.push(...chunkRows.map(parseVaultFormMetadataRecord));
+    }
+    const grouped = new Map<string, VaultFormMetadataRecord[]>();
+    for (const record of rows) {
+      const current = grouped.get(record.origin) ?? [];
+      current.push(record);
+      grouped.set(record.origin, current);
+    }
+    return dedupedOrigins.flatMap((origin) =>
+      sortVaultFormMetadataRecords(grouped.get(origin) ?? []).slice(0, safeLimit),
+    );
+  }
+
+  async listByItem(input: {
+    itemId: string;
+    origin: string;
+    limit: number;
+  }): Promise<{ records: VaultFormMetadataRecord[] }> {
+    const safeLimit = Number.isFinite(input.limit) ? Math.max(1, Math.min(200, Math.trunc(input.limit))) : 50;
+    const rows = await selectMany<VaultFormMetadataRow>(
+      this.db,
+      `SELECT metadata_id AS metadataId,
+              owner_user_id AS ownerUserId,
+              item_id AS itemId,
+              origin,
+              form_fingerprint AS formFingerprint,
+              field_fingerprint AS fieldFingerprint,
+              frame_scope AS frameScope,
+              field_role AS fieldRole,
+              selector_css AS selectorCss,
+              selector_fallbacks_json AS selectorFallbacksJson,
+              autocomplete_token AS autocompleteToken,
+              input_type AS inputType,
+              field_name AS fieldName,
+              field_id AS fieldId,
+              label_text_normalized AS labelTextNormalized,
+              placeholder_normalized AS placeholderNormalized,
+              confidence,
+              selector_status AS selectorStatus,
+              source_device_id AS sourceDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt,
+              last_confirmed_at AS lastConfirmedAt
+       FROM vault_form_metadata
+       WHERE item_id = ?
+         AND origin = ?
+       ORDER BY updated_at DESC, metadata_id DESC
+       LIMIT ?`,
+      [input.itemId, input.origin, safeLimit],
+    );
+    return { records: sortVaultFormMetadataRecords(rows.map(parseVaultFormMetadataRecord)).slice(0, safeLimit) };
+  }
+
+  async markSelectorsSuspect(input: {
+    origin: string;
+    formFingerprint: string;
+    fieldFingerprint: string;
+    fieldRole: VaultFormFieldRole;
+    itemId: string | null;
+    updatedAt: string;
+  }): Promise<number> {
+    return executeOneWithChanges(
+      this.db,
+      `UPDATE vault_form_metadata
+       SET selector_status = 'suspect',
+           updated_at = ?
+       WHERE origin = ?
+         AND form_fingerprint = ?
+         AND field_fingerprint = ?
+         AND field_role = ?
+         AND item_scope_key = ?
+         AND selector_status != 'retired'`,
+      [
+        input.updatedAt,
+        input.origin,
+        input.formFingerprint,
+        input.fieldFingerprint,
+        input.fieldRole,
+        buildVaultFormMetadataItemScopeKey(input.itemId),
+      ],
+    );
+  }
+
+  async pruneExcessByOrigin(input: { origin: string; maxRecords: number }): Promise<number> {
+    const safeMax = Number.isFinite(input.maxRecords) ? Math.max(1, Math.trunc(input.maxRecords)) : 50;
+    const rows = await selectMany<VaultFormMetadataRow>(
+      this.db,
+      `SELECT metadata_id AS metadataId,
+              owner_user_id AS ownerUserId,
+              item_id AS itemId,
+              origin,
+              form_fingerprint AS formFingerprint,
+              field_fingerprint AS fieldFingerprint,
+              frame_scope AS frameScope,
+              field_role AS fieldRole,
+              selector_css AS selectorCss,
+              selector_fallbacks_json AS selectorFallbacksJson,
+              autocomplete_token AS autocompleteToken,
+              input_type AS inputType,
+              field_name AS fieldName,
+              field_id AS fieldId,
+              label_text_normalized AS labelTextNormalized,
+              placeholder_normalized AS placeholderNormalized,
+              confidence,
+              selector_status AS selectorStatus,
+              source_device_id AS sourceDeviceId,
+              created_at AS createdAt,
+              updated_at AS updatedAt,
+              last_confirmed_at AS lastConfirmedAt
+       FROM vault_form_metadata
+       WHERE origin = ?`,
+      [input.origin],
+    );
+    const records = rows.map(parseVaultFormMetadataRecord);
+    if (records.length <= safeMax) {
+      return 0;
+    }
+    const removable = [...records].sort((left, right) => {
+      const weightDelta = buildVaultFormMetadataPruneWeight(left) - buildVaultFormMetadataPruneWeight(right);
+      if (weightDelta !== 0) {
+        return weightDelta;
+      }
+      const updatedDelta = left.updatedAt.localeCompare(right.updatedAt);
+      if (updatedDelta !== 0) {
+        return updatedDelta;
+      }
+      return left.metadataId.localeCompare(right.metadataId);
+    });
+    const protectedIds = new Set<string>();
+    const newestActiveByRole = new Map<VaultFormFieldRole, VaultFormMetadataRecord>();
+    for (const record of records.filter((candidate) => candidate.selectorStatus === 'active')) {
+      const existing = newestActiveByRole.get(record.fieldRole);
+      if (!existing || compareVaultFormMetadataPriority(record, existing) > 0) {
+        newestActiveByRole.set(record.fieldRole, record);
+      }
+    }
+    for (const record of newestActiveByRole.values()) {
+      protectedIds.add(record.metadataId);
+    }
+    const toDelete: string[] = [];
+    for (const record of removable) {
+      if (records.length - toDelete.length <= safeMax) {
+        break;
+      }
+      if (protectedIds.has(record.metadataId)) {
+        continue;
+      }
+      toDelete.push(record.metadataId);
+    }
+    if (toDelete.length === 0) {
+      return 0;
+    }
+    if (typeof this.db.batch === 'function') {
+      await this.db.batch(
+        toDelete.map((metadataId) =>
+          this.db.prepare(
+            `DELETE FROM vault_form_metadata
+             WHERE metadata_id = ?`,
+          ).bind(metadataId),
+        ),
+      );
+      return toDelete.length;
+    }
+    let deleted = 0;
+    for (const metadataId of toDelete) {
+      deleted += await executeOneWithChanges(
+        this.db,
+        `DELETE FROM vault_form_metadata
+         WHERE metadata_id = ?`,
+        [metadataId],
+      );
+    }
+    return deleted;
+  }
+}
+
 class CloudflareVaultItemRepository implements VaultItemRepository {
   constructor(private readonly db: D1DatabaseLike) {}
 
@@ -4580,6 +5171,7 @@ export function createCloudflareVaultLiteStorage(input: {
   const realtimeOneTimeTokens = new CloudflareRealtimeOneTimeTokenRepository(input.db);
   const vaultItems = new CloudflareVaultItemRepository(input.db);
   const vaultItemHistory = new CloudflareVaultItemHistoryRepository(input.db);
+  const vaultFormMetadata = new CloudflareVaultFormMetadataRepository(input.db);
   const folders = new CloudflareVaultFolderRepository(input.db);
 
   return {
@@ -4611,6 +5203,7 @@ export function createCloudflareVaultLiteStorage(input: {
     attachmentBlobs: new CloudflareAttachmentBlobRepository(input.db, input.bucket),
     vaultItems,
     vaultItemHistory,
+    vaultFormMetadata,
     folders,
     async completeOnboardingAtomic(record: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult> {
       const invite = await invites.findUsableByTokenHash(record.inviteTokenHash, record.nowIso);

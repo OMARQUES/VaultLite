@@ -355,6 +355,49 @@ export interface VaultFolderAssignmentRecord {
   updatedAt: string;
 }
 
+export type VaultFormFieldRole =
+  | 'username'
+  | 'email'
+  | 'password_current'
+  | 'password_new'
+  | 'password_confirmation'
+  | 'otp'
+  | 'unknown';
+
+export type VaultFormMetadataConfidence =
+  | 'heuristic'
+  | 'filled'
+  | 'submitted_confirmed'
+  | 'user_corrected';
+
+export type VaultFormMetadataSelectorStatus = 'active' | 'suspect' | 'retired';
+export type VaultFormFrameScope = 'top' | 'same_origin_iframe';
+
+export interface VaultFormMetadataRecord {
+  metadataId: string;
+  ownerUserId: string | null;
+  itemId: string | null;
+  origin: string;
+  formFingerprint: string;
+  fieldFingerprint: string;
+  frameScope: VaultFormFrameScope;
+  fieldRole: VaultFormFieldRole;
+  selectorCss: string;
+  selectorFallbacks: string[];
+  autocompleteToken: string | null;
+  inputType: string | null;
+  fieldName: string | null;
+  fieldId: string | null;
+  labelTextNormalized: string | null;
+  placeholderNormalized: string | null;
+  confidence: VaultFormMetadataConfidence;
+  selectorStatus: VaultFormMetadataSelectorStatus;
+  sourceDeviceId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastConfirmedAt: string | null;
+}
+
 export type VaultItemHistoryChangeType = 'create' | 'update' | 'delete' | 'restore';
 
 export interface VaultItemHistoryRecord {
@@ -852,6 +895,35 @@ export interface VaultFolderRepository {
   }): Promise<void>;
 }
 
+export interface VaultFormMetadataRepository {
+  upsert(record: VaultFormMetadataRecord): Promise<VaultFormMetadataRecord>;
+  listByOrigin(input: {
+    origin: string;
+    limit: number;
+  }): Promise<{ records: VaultFormMetadataRecord[] }>;
+  listByOrigins(input: {
+    origins: string[];
+    limitPerOrigin: number;
+  }): Promise<VaultFormMetadataRecord[]>;
+  listByItem(input: {
+    itemId: string;
+    origin: string;
+    limit: number;
+  }): Promise<{ records: VaultFormMetadataRecord[] }>;
+  markSelectorsSuspect(input: {
+    origin: string;
+    formFingerprint: string;
+    fieldFingerprint: string;
+    fieldRole: VaultFormFieldRole;
+    itemId: string | null;
+    updatedAt: string;
+  }): Promise<number>;
+  pruneExcessByOrigin(input: {
+    origin: string;
+    maxRecords: number;
+  }): Promise<number>;
+}
+
 export interface CompleteOnboardingAtomicInput {
   nowIso: string;
   inviteTokenHash: string;
@@ -920,6 +992,7 @@ export interface VaultLiteStorage {
   attachmentBlobs: AttachmentBlobRepository;
   vaultItems: VaultItemRepository;
   vaultItemHistory: VaultItemHistoryRepository;
+  vaultFormMetadata: VaultFormMetadataRepository;
   folders: VaultFolderRepository;
   completeOnboardingAtomic(input: CompleteOnboardingAtomicInput): Promise<CompleteOnboardingAtomicResult>;
   revokeDeviceAndSessionsAtomic(input: RevokeDeviceAndSessionsAtomicInput): Promise<void>;
@@ -962,6 +1035,7 @@ export function createInMemoryVaultLiteStorage(input: {
   const attachmentBlobs = new Map<string, AttachmentBlobRecord>();
   const vaultItems = new Map<string, VaultItemRecord>();
   const vaultItemHistory = new Map<string, VaultItemHistoryRecord>();
+  const vaultFormMetadata = new Map<string, VaultFormMetadataRecord>();
   const vaultItemTombstones = new Map<string, VaultItemTombstoneRecord>();
   const folders = new Map<string, VaultFolderRecord>();
   const folderAssignments = new Map<string, VaultFolderAssignmentRecord>();
@@ -978,6 +1052,78 @@ export function createInMemoryVaultLiteStorage(input: {
     checkpointLastDownloadAt: null,
     checkpointLastDownloadRequestId: null,
   };
+
+  const formMetadataConfidenceRank: Record<VaultFormMetadataConfidence, number> = {
+    heuristic: 0,
+    filled: 1,
+    submitted_confirmed: 2,
+    user_corrected: 3,
+  };
+
+  function cloneVaultFormMetadataRecord(record: VaultFormMetadataRecord): VaultFormMetadataRecord {
+    return {
+      ...record,
+      selectorFallbacks: [...record.selectorFallbacks],
+    };
+  }
+
+  function buildVaultFormMetadataKey(record: {
+    origin: string;
+    formFingerprint: string;
+    fieldFingerprint: string;
+    fieldRole: VaultFormFieldRole;
+    itemId: string | null;
+  }): string {
+    return [
+      record.origin,
+      record.formFingerprint,
+      record.fieldFingerprint,
+      record.fieldRole,
+      record.itemId ?? '',
+    ].join('::');
+  }
+
+  function compareVaultFormMetadataPriority(
+    left: VaultFormMetadataRecord,
+    right: VaultFormMetadataRecord,
+  ): number {
+    const confidenceDelta =
+      formMetadataConfidenceRank[left.confidence] - formMetadataConfidenceRank[right.confidence];
+    if (confidenceDelta !== 0) {
+      return confidenceDelta;
+    }
+    const confirmedLeft = left.lastConfirmedAt ?? '';
+    const confirmedRight = right.lastConfirmedAt ?? '';
+    const confirmedDelta = confirmedLeft.localeCompare(confirmedRight);
+    if (confirmedDelta !== 0) {
+      return confirmedDelta;
+    }
+    const updatedDelta = left.updatedAt.localeCompare(right.updatedAt);
+    if (updatedDelta !== 0) {
+      return updatedDelta;
+    }
+    return left.metadataId.localeCompare(right.metadataId);
+  }
+
+  function sortVaultFormMetadataRecords(records: VaultFormMetadataRecord[]): VaultFormMetadataRecord[] {
+    return [...records].sort((left, right) => {
+      const priorityDelta = compareVaultFormMetadataPriority(right, left);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
+      }
+      return right.metadataId.localeCompare(left.metadataId);
+    });
+  }
+
+  function formMetadataPruneWeight(record: VaultFormMetadataRecord): number {
+    if (record.selectorStatus === 'retired') {
+      return 0;
+    }
+    if (record.selectorStatus === 'suspect') {
+      return 1;
+    }
+    return 2 + formMetadataConfidenceRank[record.confidence];
+  }
 
   return {
     deploymentState: {
@@ -2519,6 +2665,135 @@ export function createInMemoryVaultLiteStorage(input: {
           vaultItemHistory.delete(key);
         }
         return candidates.length;
+      },
+    },
+    vaultFormMetadata: {
+      async upsert(record) {
+        const normalized = cloneVaultFormMetadataRecord({
+          ...record,
+          ownerUserId: record.ownerUserId ?? null,
+          itemId: record.itemId ?? null,
+          autocompleteToken: record.autocompleteToken ?? null,
+          inputType: record.inputType ?? null,
+          fieldName: record.fieldName ?? null,
+          fieldId: record.fieldId ?? null,
+          labelTextNormalized: record.labelTextNormalized ?? null,
+          placeholderNormalized: record.placeholderNormalized ?? null,
+          sourceDeviceId: record.sourceDeviceId ?? null,
+          lastConfirmedAt: record.lastConfirmedAt ?? null,
+        });
+        const key = buildVaultFormMetadataKey(normalized);
+        const existing = vaultFormMetadata.get(key);
+        if (!existing) {
+          vaultFormMetadata.set(key, normalized);
+          return cloneVaultFormMetadataRecord(normalized);
+        }
+        if (compareVaultFormMetadataPriority(normalized, existing) < 0) {
+          return cloneVaultFormMetadataRecord(existing);
+        }
+        vaultFormMetadata.set(key, normalized);
+        return cloneVaultFormMetadataRecord(normalized);
+      },
+      async listByOrigin(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(500, Math.trunc(inputRecord.limit)))
+          : 100;
+        const records = sortVaultFormMetadataRecords(
+          Array.from(vaultFormMetadata.values()).filter((record) => record.origin === inputRecord.origin),
+        )
+          .slice(0, safeLimit)
+          .map(cloneVaultFormMetadataRecord);
+        return { records };
+      },
+      async listByOrigins(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limitPerOrigin)
+          ? Math.max(1, Math.min(200, Math.trunc(inputRecord.limitPerOrigin)))
+          : 50;
+        const output: VaultFormMetadataRecord[] = [];
+        for (const origin of inputRecord.origins) {
+          output.push(
+            ...sortVaultFormMetadataRecords(
+              Array.from(vaultFormMetadata.values()).filter((record) => record.origin === origin),
+            )
+              .slice(0, safeLimit)
+              .map(cloneVaultFormMetadataRecord),
+          );
+        }
+        return output;
+      },
+      async listByItem(inputRecord) {
+        const safeLimit = Number.isFinite(inputRecord.limit)
+          ? Math.max(1, Math.min(200, Math.trunc(inputRecord.limit)))
+          : 50;
+        const records = sortVaultFormMetadataRecords(
+          Array.from(vaultFormMetadata.values()).filter(
+            (record) => record.origin === inputRecord.origin && record.itemId === inputRecord.itemId,
+          ),
+        )
+          .slice(0, safeLimit)
+          .map(cloneVaultFormMetadataRecord);
+        return { records };
+      },
+      async markSelectorsSuspect(inputRecord) {
+        const key = buildVaultFormMetadataKey(inputRecord);
+        const existing = vaultFormMetadata.get(key);
+        if (!existing || existing.selectorStatus === 'retired') {
+          return 0;
+        }
+        vaultFormMetadata.set(key, {
+          ...existing,
+          selectorStatus: 'suspect',
+          updatedAt: inputRecord.updatedAt,
+        });
+        return 1;
+      },
+      async pruneExcessByOrigin(inputRecord) {
+        const safeMax = Number.isFinite(inputRecord.maxRecords)
+          ? Math.max(1, Math.trunc(inputRecord.maxRecords))
+          : 50;
+        const records = Array.from(vaultFormMetadata.values()).filter(
+          (record) => record.origin === inputRecord.origin,
+        );
+        if (records.length <= safeMax) {
+          return 0;
+        }
+        const protectedKeys = new Set<string>();
+        for (const record of records.filter((candidate) => candidate.selectorStatus === 'active')) {
+          const currentProtected = protectedKeys.has(record.fieldRole);
+          if (!currentProtected) {
+            protectedKeys.add(record.fieldRole);
+          }
+        }
+        const removable = [...records].sort((left, right) => {
+          const weightDelta = formMetadataPruneWeight(left) - formMetadataPruneWeight(right);
+          if (weightDelta !== 0) {
+            return weightDelta;
+          }
+          const updatedDelta = left.updatedAt.localeCompare(right.updatedAt);
+          if (updatedDelta !== 0) {
+            return updatedDelta;
+          }
+          return left.metadataId.localeCompare(right.metadataId);
+        });
+        let deleted = 0;
+        for (const record of removable) {
+          if (records.length - deleted <= safeMax) {
+            break;
+          }
+          const key = buildVaultFormMetadataKey(record);
+          if (record.selectorStatus === 'active' && protectedKeys.has(record.fieldRole)) {
+            const newestActiveForRole = sortVaultFormMetadataRecords(
+              records.filter((candidate) => candidate.selectorStatus === 'active' && candidate.fieldRole === record.fieldRole),
+            )[0];
+            if (newestActiveForRole?.metadataId === record.metadataId) {
+              continue;
+            }
+          }
+          if (vaultFormMetadata.delete(key)) {
+            deleted += 1;
+          }
+        }
+        return deleted;
       },
     },
     folders: {

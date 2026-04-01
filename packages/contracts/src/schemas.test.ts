@@ -23,6 +23,13 @@ import {
   SiteIconManualUpsertInputSchema,
   SiteIconResolveBatchInputSchema,
   SiteIconResolveBatchOutputSchema,
+  VaultFormFrameScopeSchema,
+  VaultFormMetadataConfidenceSchema,
+  VaultFormMetadataListOutputSchema,
+  VaultFormMetadataRecordSchema,
+  VaultFormMetadataSelectorStatusSchema,
+  VaultFormMetadataUpsertInputSchema,
+  VaultFormFieldRoleSchema,
   VaultJsonExportV1Schema,
   VaultItemCreateInputSchema,
   VaultItemRecordSchema,
@@ -183,6 +190,113 @@ describe('contracts schemas', () => {
           createdAt: '2026-03-15T12:00:00.000Z',
           updatedAt: '2026-03-15T12:05:00.000Z',
         },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('validates form metadata schemas', () => {
+    expect(VaultFormFieldRoleSchema.safeParse('username').success).toBe(true);
+    expect(VaultFormMetadataConfidenceSchema.safeParse('submitted_confirmed').success).toBe(true);
+    expect(VaultFormMetadataSelectorStatusSchema.safeParse('suspect').success).toBe(true);
+    expect(VaultFormFrameScopeSchema.safeParse('same_origin_iframe').success).toBe(true);
+
+    expect(
+      VaultFormMetadataRecordSchema.safeParse({
+        metadataId: 'meta_1',
+        ownerUserId: 'user_1',
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'username',
+        selectorCss: '#email',
+        selectorFallbacks: ['input[name="email"]'],
+        autocompleteToken: 'username',
+        inputType: 'email',
+        fieldName: 'email',
+        fieldId: 'email',
+        labelTextNormalized: 'email',
+        placeholderNormalized: 'seu email',
+        confidence: 'heuristic',
+        selectorStatus: 'active',
+        sourceDeviceId: 'device_1',
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:00:00.000Z',
+        lastConfirmedAt: null,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      VaultFormMetadataUpsertInputSchema.safeParse({
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'password_current',
+        selectorCss: 'input[type="password"]',
+        selectorFallbacks: ['input[autocomplete="current-password"]'],
+        autocompleteToken: 'current-password',
+        inputType: 'password',
+        fieldName: 'password',
+        fieldId: 'password',
+        labelTextNormalized: 'senha',
+        placeholderNormalized: null,
+        confidence: 'filled',
+        selectorStatus: 'active',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      VaultFormMetadataUpsertInputSchema.safeParse({
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'password_current',
+        selectorCss: 'input[type="password"]',
+        selectorFallbacks: ['a', 'b', 'c', 'd', 'e', 'f'],
+        autocompleteToken: 'current-password',
+        inputType: 'password',
+        fieldName: 'password',
+        fieldId: 'password',
+        labelTextNormalized: 'senha',
+        placeholderNormalized: null,
+        confidence: 'filled',
+        selectorStatus: 'active',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      VaultFormMetadataListOutputSchema.safeParse({
+        records: [
+          {
+            metadataId: 'meta_1',
+            ownerUserId: null,
+            itemId: null,
+            origin: 'https://accounts.example.com',
+            formFingerprint: 'form_fp_1',
+            fieldFingerprint: 'field_fp_1',
+            frameScope: 'top',
+            fieldRole: 'username',
+            selectorCss: '#email',
+            selectorFallbacks: [],
+            autocompleteToken: 'username',
+            inputType: 'email',
+            fieldName: 'email',
+            fieldId: 'email',
+            labelTextNormalized: 'email',
+            placeholderNormalized: null,
+            confidence: 'heuristic',
+            selectorStatus: 'active',
+            sourceDeviceId: null,
+            createdAt: '2026-04-01T00:00:00.000Z',
+            updatedAt: '2026-04-01T00:00:00.000Z',
+            lastConfirmedAt: null,
+          },
+        ],
       }).success,
     ).toBe(true);
   });

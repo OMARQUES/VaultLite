@@ -95,6 +95,7 @@ const PASSWORD_GENERATOR_HISTORY_CACHE_STORAGE_KEY = 'vaultlite.password_generat
 const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.password_generator_history.synced_at.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
 const FOLDER_STATE_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
+const FOLDER_STATE_REVALIDATION_COOLDOWN_MS = 15_000;
 const ITEM_ATTACHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
@@ -142,6 +143,8 @@ let passwordGeneratorHistoryCacheLoaded = false;
 let passwordGeneratorHistoryCacheLastSyncedAt = 0;
 let passwordGeneratorHistorySyncInFlight = null;
 let folderStateSyncInFlight = null;
+let folderStateRevalidationInFlight = null;
+let lastFolderStateRevalidationAt = 0;
 const itemAttachmentCacheByItemId = new Map();
 const itemAttachmentSyncInFlightByItemId = new Map();
 let itemCreateInFlight = null;
@@ -1347,6 +1350,9 @@ async function connectRealtimeSocket() {
       realtimeConnection.lastReceivedAt = Date.now();
       realtimeConnection.reconnectAttempt = 0;
       startRealtimeHeartbeat();
+      void scheduleFolderStateRevalidation({
+        awaitCompletion: false,
+      });
     };
     socket.onmessage = (event) => {
       realtimeConnection.lastReceivedAt = Date.now();
@@ -6177,6 +6183,14 @@ function applyFolderStateCache(payload, etag) {
   };
 }
 
+function folderStateSnapshotResult() {
+  return ok({
+    folders: folderStateCache.folders,
+    assignments: folderStateCache.assignments,
+    etag: folderStateCache.etag,
+  });
+}
+
 async function syncFolderStateCacheFromServer(options = {}) {
   const readyError = await ensureReadyState();
   if (readyError) {
@@ -6192,19 +6206,11 @@ async function syncFolderStateCacheFromServer(options = {}) {
     folderStateCache.loadedAt > 0 &&
     Date.now() - folderStateCache.loadedAt < FOLDER_STATE_SYNC_COOLDOWN_MS;
   if (shouldUseCachedState) {
-    return ok({
-      folders: folderStateCache.folders,
-      assignments: folderStateCache.assignments,
-      etag: folderStateCache.etag,
-    });
+    return folderStateSnapshotResult();
   }
   if (folderStateSyncInFlight) {
     if (options.awaitCompletion === false) {
-      return ok({
-        folders: folderStateCache.folders,
-        assignments: folderStateCache.assignments,
-        etag: folderStateCache.etag,
-      });
+      return folderStateSnapshotResult();
     }
     return folderStateSyncInFlight;
   }
@@ -6226,21 +6232,13 @@ async function syncFolderStateCacheFromServer(options = {}) {
         };
         await persistFolderStateCacheBestEffort();
       }
-      return ok({
-        folders: folderStateCache.folders,
-        assignments: folderStateCache.assignments,
-        etag: folderStateCache.etag,
-      });
+      return folderStateSnapshotResult();
     } catch (error) {
       if (isUnauthorizedApiError(error)) {
         await clearExtensionSessionToken();
       }
       if (Array.isArray(folderStateCache.folders) && folderStateCache.folders.length > 0) {
-        return ok({
-          folders: folderStateCache.folders,
-          assignments: folderStateCache.assignments,
-          etag: folderStateCache.etag,
-        });
+        return folderStateSnapshotResult();
       }
       return fail('folder_state_unavailable', 'Folder state is unavailable right now.');
     } finally {
@@ -6250,29 +6248,65 @@ async function syncFolderStateCacheFromServer(options = {}) {
 
   if (options.awaitCompletion === false) {
     void folderStateSyncInFlight;
-    return ok({
-      folders: folderStateCache.folders,
-      assignments: folderStateCache.assignments,
-      etag: folderStateCache.etag,
-    });
+    return folderStateSnapshotResult();
   }
   return folderStateSyncInFlight;
+}
+
+function scheduleFolderStateRevalidation(options = {}) {
+  if (state.phase !== 'ready' || !sessionToken) {
+    return folderStateSnapshotResult();
+  }
+  const now = Date.now();
+  const withinCooldown =
+    options.force !== true &&
+    lastFolderStateRevalidationAt > 0 &&
+    now - lastFolderStateRevalidationAt < FOLDER_STATE_REVALIDATION_COOLDOWN_MS;
+  if (withinCooldown) {
+    return folderStateSnapshotResult();
+  }
+  if (folderStateRevalidationInFlight) {
+    if (options.awaitCompletion === false) {
+      return folderStateSnapshotResult();
+    }
+    return folderStateRevalidationInFlight;
+  }
+  lastFolderStateRevalidationAt = now;
+  folderStateRevalidationInFlight = (async () => {
+    try {
+      return await syncFolderStateCacheFromServer({
+        force: true,
+        awaitCompletion: true,
+      });
+    } finally {
+      folderStateRevalidationInFlight = null;
+    }
+  })();
+  if (options.awaitCompletion === false) {
+    void folderStateRevalidationInFlight;
+    return folderStateSnapshotResult();
+  }
+  return folderStateRevalidationInFlight;
 }
 
 async function listFolderStateInternal(input = {}) {
   if ((!Array.isArray(folderStateCache.folders) || folderStateCache.folders.length === 0) && state.phase === 'ready') {
     await loadFolderStateCacheBestEffort();
   }
+  if (input?.revalidate === true) {
+    const revalidated = await scheduleFolderStateRevalidation({
+      awaitCompletion: input?.awaitCompletion !== false,
+    });
+    if (revalidated?.ok) {
+      return revalidated;
+    }
+  }
   const result = await syncFolderStateCacheFromServer({
     force: input?.force === true,
-    awaitCompletion: false,
+    awaitCompletion: input?.awaitCompletion !== false,
   });
   if (!result?.ok && Array.isArray(folderStateCache.folders)) {
-    return ok({
-      folders: folderStateCache.folders,
-      assignments: folderStateCache.assignments,
-      etag: folderStateCache.etag,
-    });
+    return folderStateSnapshotResult();
   }
   return result;
 }
@@ -7509,6 +7543,9 @@ async function unlockLocalInternal(input) {
     void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
     void maybeUpgradeLocalUnlockEnvelopeProfile(password);
     void loadCredentialCacheFromLocalBestEffort();
+    void scheduleFolderStateRevalidation({
+      awaitCompletion: false,
+    });
 
     if (shouldRefreshSessionAfterUnlock(currentPhase)) {
       void restoreSessionInternal(false).catch(() => {});

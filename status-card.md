@@ -2671,7 +2671,7 @@ Suggested next action: definir contrato de evento de histórico em `packages/con
 Card ID: `P13-C03`
 Title: `Form metadata capture and sync contracts`
 Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
-Status: `not_started`
+Status: `in_progress`
 Priority: `P0`
 Objective: Capturar e sincronizar metadados de formulário para melhorar preenchimentos futuros.
 Description: Salvar fingerprint/seletores/roles por origem e item, atualizar metadados quando o site mudar, e sincronizar entre dispositivos por realtime.

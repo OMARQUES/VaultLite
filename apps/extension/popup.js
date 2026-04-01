@@ -4468,6 +4468,7 @@ async function refreshFolderState(options = {}) {
   const response = await sendBackgroundCommand({
     type: 'vaultlite.list_folders_state',
     force: options.force === true,
+    revalidate: options.revalidate === true,
   });
   if (!response?.ok) {
     return;
@@ -4529,7 +4530,7 @@ function openDetailCreatePanel(itemType = 'login') {
   setDetailEditError('');
   closeDetailMenu();
   elements.detailTitle.textContent = detailCreateDraft.title || 'New item';
-  void refreshFolderState();
+  void refreshFolderState({ revalidate: true });
   renderCredentialDetails();
   persistPopupUiState();
 }
@@ -4549,7 +4550,7 @@ function openDetailEditPanel() {
   setDetailEditError('');
   closeDetailMenu();
   elements.detailTitle.textContent = detailEditDraft.title;
-  void refreshFolderState();
+  void refreshFolderState({ revalidate: true });
   void refreshDetailAttachments({
     force: false,
     silent: true,
@@ -5870,5 +5871,6 @@ void (async () => {
   });
   await loadPasswordGeneratorHistory();
   await refreshStateAndMaybeList();
+  void refreshFolderState({ revalidate: true });
   scheduleRefresh();
 })();

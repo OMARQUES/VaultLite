@@ -4,6 +4,11 @@ import type { VaultLiteAuthClient } from './auth-client';
 import { loadVaultUiState, saveVaultUiState, type VaultUiState } from './vault-ui-state';
 
 const FOLDER_MIGRATION_KEY_PREFIX = 'vaultlite:vault-folders-migrated:v1:';
+const LEGACY_SYNTHETIC_FOLDERS = [
+  { id: 'work', name: 'Work' },
+  { id: 'personal', name: 'Personal' },
+  { id: 'family', name: 'Family' },
+] as const;
 
 interface FolderSyncState {
   etag: string | null;
@@ -64,6 +69,13 @@ function normalizeFolderName(name: string): string {
   return name.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function isLegacySyntheticFolder(folder: { id: string; name: string }): boolean {
+  const normalizedName = normalizeFolderName(folder.name);
+  return LEGACY_SYNTHETIC_FOLDERS.some(
+    (entry) => entry.id === folder.id && normalizeFolderName(entry.name) === normalizedName,
+  );
+}
+
 function nextFolderIdFromName(name: string): string {
   const idBase = name
     .trim()
@@ -94,7 +106,10 @@ function applyRemoteFolderSnapshot(
 }
 
 function localStateHasFolderData(state: VaultUiState): boolean {
-  return state.folders.length > 0 || Object.keys(state.folderAssignments).length > 0;
+  if (Object.keys(state.folderAssignments).length > 0) {
+    return true;
+  }
+  return state.folders.some((folder) => !isLegacySyntheticFolder(folder));
 }
 
 async function mergeLocalMirrorIntoServer(
@@ -116,11 +131,17 @@ async function mergeLocalMirrorIntoServer(
     folderIdByNormalizedName.set(normalizeFolderName(folder.name), folder.folderId);
   }
   const mappedFolderIds = new Map<string, string>();
+  const referencedLocalFolderIds = new Set(
+    Object.values(localState.folderAssignments).filter((value): value is string => typeof value === 'string' && value.length > 0),
+  );
   let mutated = false;
 
   for (const folder of localState.folders) {
     const trimmedName = folder.name.trim();
     if (!trimmedName) {
+      continue;
+    }
+    if (isLegacySyntheticFolder(folder) && !referencedLocalFolderIds.has(folder.id)) {
       continue;
     }
     const normalizedName = normalizeFolderName(trimmedName);

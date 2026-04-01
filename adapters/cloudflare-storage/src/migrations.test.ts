@@ -40,6 +40,7 @@ describe('cloudflare migration loading', () => {
       '0018_automatic_icon_registry',
       '0019_vault_item_history',
       '0020_vault_folders',
+      '0021_vault_form_metadata',
     ]);
     expect(migrations[0]?.statements.length).toBeGreaterThan(1);
   });

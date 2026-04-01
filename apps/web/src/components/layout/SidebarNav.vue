@@ -525,14 +525,14 @@ watch(
       </button>
     </div>
 
-    <DialogModal :open="folderDialogOpen" title="New folder">
+    <DialogModal :open="folderDialogOpen" title="New folder" modal-class="folder-dialog-modal">
       <TextField ref="folderNameFieldRef" v-model="folderName" label="Folder name" autocomplete="off" />
       <p v-if="folderMutationError" class="module-empty-hint">{{ folderMutationError }}</p>
       <template #actions>
-        <SecondaryButton type="button" @click="closeFolderDialog">Cancel</SecondaryButton>
         <PrimaryButton type="button" :disabled="!folderName.trim() || folderMutationBusy" @click="createFolder">
           {{ folderMutationBusy ? 'Creating...' : 'Create folder' }}
         </PrimaryButton>
+        <SecondaryButton type="button" @click="closeFolderDialog">Cancel</SecondaryButton>
       </template>
     </DialogModal>
   </aside>

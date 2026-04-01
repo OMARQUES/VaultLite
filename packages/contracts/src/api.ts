@@ -169,6 +169,7 @@ export const RealtimeTopicSchema = z.enum([
   'vault.item.upserted',
   'vault.item.tombstoned',
   'vault.history.upserted',
+  'vault.form_metadata.upserted',
   'vault.folder.upserted',
   'vault.folder.assignment_changed',
   'icons.state.upserted',
@@ -208,6 +209,29 @@ export const RealtimeVaultHistoryUpsertedPayloadSchema = z
     itemRevision: z.number().int().positive(),
     changeType: z.enum(['create', 'update', 'delete', 'restore']),
     createdAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const RealtimeFormMetadataUpsertedPayloadSchema = z
+  .object({
+    metadataId: z.string().min(1),
+    ownerUserId: z.string().min(1).nullable(),
+    itemId: z.string().min(1).nullable(),
+    origin: z.string().url(),
+    formFingerprint: z.string().min(1),
+    fieldFingerprint: z.string().min(1),
+    fieldRole: z.enum([
+      'username',
+      'email',
+      'password_current',
+      'password_new',
+      'password_confirmation',
+      'otp',
+      'unknown',
+    ]),
+    confidence: z.enum(['heuristic', 'filled', 'submitted_confirmed', 'user_corrected']),
+    selectorStatus: z.enum(['active', 'suspect', 'retired']),
+    updatedAt: isoDatetimeSchema,
   })
   .strict();
 
@@ -849,6 +873,80 @@ export const VaultFolderAssignmentRecordSchema = z
     itemId: z.string().min(1),
     folderId: z.string().min(1),
     updatedAt: isoDatetimeSchema,
+  })
+  .strict();
+
+export const VaultFormFieldRoleSchema = z.enum([
+  'username',
+  'email',
+  'password_current',
+  'password_new',
+  'password_confirmation',
+  'otp',
+  'unknown',
+]);
+
+export const VaultFormMetadataConfidenceSchema = z.enum([
+  'heuristic',
+  'filled',
+  'submitted_confirmed',
+  'user_corrected',
+]);
+
+export const VaultFormMetadataSelectorStatusSchema = z.enum(['active', 'suspect', 'retired']);
+export const VaultFormFrameScopeSchema = z.enum(['top', 'same_origin_iframe']);
+
+export const VaultFormMetadataRecordSchema = z
+  .object({
+    metadataId: z.string().min(1),
+    ownerUserId: z.string().min(1).nullable(),
+    itemId: z.string().min(1).nullable(),
+    origin: z.string().url(),
+    formFingerprint: z.string().min(1),
+    fieldFingerprint: z.string().min(1),
+    frameScope: VaultFormFrameScopeSchema,
+    fieldRole: VaultFormFieldRoleSchema,
+    selectorCss: z.string().min(1),
+    selectorFallbacks: z.array(z.string().min(1)).max(5),
+    autocompleteToken: z.string().min(1).nullable(),
+    inputType: z.string().min(1).nullable(),
+    fieldName: z.string().min(1).nullable(),
+    fieldId: z.string().min(1).nullable(),
+    labelTextNormalized: z.string().min(1).max(120).nullable(),
+    placeholderNormalized: z.string().min(1).max(120).nullable(),
+    confidence: VaultFormMetadataConfidenceSchema,
+    selectorStatus: VaultFormMetadataSelectorStatusSchema,
+    sourceDeviceId: z.string().min(1).nullable(),
+    createdAt: isoDatetimeSchema,
+    updatedAt: isoDatetimeSchema,
+    lastConfirmedAt: isoDatetimeSchema.nullable(),
+  })
+  .strict();
+
+export const VaultFormMetadataUpsertInputSchema = z
+  .object({
+    itemId: z.string().min(1).nullable(),
+    origin: z.string().url(),
+    formFingerprint: z.string().min(1),
+    fieldFingerprint: z.string().min(1),
+    frameScope: VaultFormFrameScopeSchema,
+    fieldRole: VaultFormFieldRoleSchema,
+    selectorCss: z.string().min(1),
+    selectorFallbacks: z.array(z.string().min(1)).max(5),
+    autocompleteToken: z.string().min(1).nullable(),
+    inputType: z.string().min(1).nullable(),
+    fieldName: z.string().min(1).nullable(),
+    fieldId: z.string().min(1).nullable(),
+    labelTextNormalized: z.string().min(1).max(120).nullable(),
+    placeholderNormalized: z.string().min(1).max(120).nullable(),
+    confidence: VaultFormMetadataConfidenceSchema,
+    selectorStatus: VaultFormMetadataSelectorStatusSchema,
+  })
+  .strict();
+
+export const VaultFormMetadataListOutputSchema = z
+  .object({
+    records: z.array(VaultFormMetadataRecordSchema),
   })
   .strict();
 
@@ -1796,6 +1894,7 @@ export type RealtimeTopic = z.infer<typeof RealtimeTopicSchema>;
 export type RealtimeVaultItemUpsertedPayload = z.infer<typeof RealtimeVaultItemUpsertedPayloadSchema>;
 export type RealtimeVaultItemTombstonedPayload = z.infer<typeof RealtimeVaultItemTombstonedPayloadSchema>;
 export type RealtimeVaultHistoryUpsertedPayload = z.infer<typeof RealtimeVaultHistoryUpsertedPayloadSchema>;
+export type RealtimeFormMetadataUpsertedPayload = z.infer<typeof RealtimeFormMetadataUpsertedPayloadSchema>;
 export type RealtimeVaultFolderUpsertedPayload = z.infer<typeof RealtimeVaultFolderUpsertedPayloadSchema>;
 export type RealtimeVaultFolderAssignmentChangedPayload = z.infer<typeof RealtimeVaultFolderAssignmentChangedPayloadSchema>;
 export type RealtimeIconsStateUpsertedPayload = z.infer<typeof RealtimeIconsStateUpsertedPayloadSchema>;
@@ -1852,6 +1951,13 @@ export type VaultItemHistoryRecord = z.infer<typeof VaultItemHistoryRecordSchema
 export type VaultItemHistoryListOutput = z.infer<typeof VaultItemHistoryListOutputSchema>;
 export type VaultFolderRecord = z.infer<typeof VaultFolderRecordSchema>;
 export type VaultFolderAssignmentRecord = z.infer<typeof VaultFolderAssignmentRecordSchema>;
+export type VaultFormFieldRole = z.infer<typeof VaultFormFieldRoleSchema>;
+export type VaultFormMetadataConfidence = z.infer<typeof VaultFormMetadataConfidenceSchema>;
+export type VaultFormMetadataSelectorStatus = z.infer<typeof VaultFormMetadataSelectorStatusSchema>;
+export type VaultFormFrameScope = z.infer<typeof VaultFormFrameScopeSchema>;
+export type VaultFormMetadataRecord = z.infer<typeof VaultFormMetadataRecordSchema>;
+export type VaultFormMetadataUpsertInput = z.infer<typeof VaultFormMetadataUpsertInputSchema>;
+export type VaultFormMetadataListOutput = z.infer<typeof VaultFormMetadataListOutputSchema>;
 export type VaultFoldersStateOutput = z.infer<typeof VaultFoldersStateOutputSchema>;
 export type VaultFolderUpsertInput = z.infer<typeof VaultFolderUpsertInputSchema>;
 export type VaultFolderAssignmentUpsertInput = z.infer<typeof VaultFolderAssignmentUpsertInputSchema>;
