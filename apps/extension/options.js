@@ -1,4 +1,10 @@
-import { byId, ensureServerOriginPermission, formatTime, sendBackgroundCommand } from './runtime-ui.js';
+import {
+  byId,
+  ensureServerOriginPermission,
+  ensureSiteAutomationPermission,
+  formatTime,
+  sendBackgroundCommand,
+} from './runtime-ui.js';
 import { canonicalizeServerUrl } from './runtime-common.js';
 import { buildWebSettingsUrl } from './runtime-onboarding.js';
 import {
@@ -146,6 +152,7 @@ async function saveServerUrl() {
       setStatus('danger', permission.message || 'Could not request origin permission.');
       return;
     }
+    await ensureSiteAutomationPermission().catch(() => ({ ok: false }));
 
     const response = await sendBackgroundCommand({
       type: 'vaultlite.set_server_url',

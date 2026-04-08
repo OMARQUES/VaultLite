@@ -1,4 +1,4 @@
-import { byId, ensureServerOriginPermission, sendBackgroundCommand } from './runtime-ui.js';
+import { byId, ensureServerOriginPermission, ensureSiteAutomationPermission, sendBackgroundCommand } from './runtime-ui.js';
 import {
   buildPairingDescription,
   buildWebSettingsUrl,
@@ -117,6 +117,7 @@ async function ensureServerOriginConfigured() {
   if (!permission.ok) {
     return permission;
   }
+  await ensureSiteAutomationPermission().catch(() => ({ ok: false }));
 
   const response = await sendBackgroundCommand({
     type: 'vaultlite.set_server_url',

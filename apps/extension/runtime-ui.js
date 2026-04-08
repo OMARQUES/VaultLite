@@ -4,6 +4,7 @@ const BACKGROUND_COMMAND_RETRY_BUDGET_MS = 4_000;
 const BACKGROUND_COMMAND_RETRY_BASE_DELAY_MS = 120;
 const BACKGROUND_COMMAND_RETRY_MAX_DELAY_MS = 700;
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+const SITE_AUTOMATION_PERMISSION_PATTERNS = ['https://*/*'];
 
 function sleep(milliseconds) {
   return new Promise((resolve) => {
@@ -184,28 +185,15 @@ export async function sendBackgroundCommand(payload) {
   throw enriched;
 }
 
-export async function ensureServerOriginPermission(serverOrigin) {
+async function ensureOriginPatternsPermission(requestedPatterns, messages = {}) {
   if (!chrome.permissions?.contains) {
     return { ok: true };
   }
-
-  const origins = [serverOrigin];
-  const webOrigin = deriveWebOriginFromServerOrigin(serverOrigin);
-  if (webOrigin && webOrigin !== serverOrigin) {
-    origins.push(webOrigin);
-  }
-  const requestedPatterns = Array.from(
-    new Set(
-      origins
-        .map((origin) => originPattern(origin))
-        .filter((pattern) => typeof pattern === 'string' && pattern.length > 0),
-    ),
-  );
   if (requestedPatterns.length === 0) {
     return {
       ok: false,
       code: 'permission_pattern_invalid',
-      message: 'Server URL is invalid for permission request.',
+      message: messages.invalid ?? 'Permission target is invalid for permission request.',
     };
   }
   const alreadyGranted = await chrome.permissions.contains({
@@ -233,15 +221,43 @@ export async function ensureServerOriginPermission(serverOrigin) {
     return {
       ok: false,
       code: 'permission_denied',
-      message: 'Permission denied for this server origin.',
+      message: messages.denied ?? 'Permission denied for this feature.',
     };
   } catch {
     return {
       ok: false,
       code: 'permission_request_failed',
-      message: 'This action is not allowed in this extension context.',
+      message: messages.failed ?? 'This action is not allowed in this extension context.',
     };
   }
+}
+
+export async function ensureServerOriginPermission(serverOrigin) {
+  const origins = [serverOrigin];
+  const webOrigin = deriveWebOriginFromServerOrigin(serverOrigin);
+  if (webOrigin && webOrigin !== serverOrigin) {
+    origins.push(webOrigin);
+  }
+  const requestedPatterns = Array.from(
+    new Set(
+      origins
+        .map((origin) => originPattern(origin))
+        .filter((pattern) => typeof pattern === 'string' && pattern.length > 0),
+    ),
+  );
+  return ensureOriginPatternsPermission(requestedPatterns, {
+    invalid: 'Server URL is invalid for permission request.',
+    denied: 'Permission denied for this server origin.',
+    failed: 'This action is not allowed in this extension context.',
+  });
+}
+
+export async function ensureSiteAutomationPermission() {
+  return ensureOriginPatternsPermission(SITE_AUTOMATION_PERMISSION_PATTERNS, {
+    invalid: 'Automation permission target is invalid.',
+    denied: 'Permission denied for automatic site filling.',
+    failed: 'This action is not allowed in this extension context.',
+  });
 }
 
 export function byId(id) {

@@ -1,6 +1,11 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { copyToClipboard, ensureServerOriginPermission, sendBackgroundCommand } from '../runtime-ui.js';
+import {
+  copyToClipboard,
+  ensureServerOriginPermission,
+  ensureSiteAutomationPermission,
+  sendBackgroundCommand,
+} from '../runtime-ui.js';
 
 describe('sendBackgroundCommand', () => {
   test('retries once when background connection fails transiently', async () => {
@@ -89,6 +94,41 @@ describe('ensureServerOriginPermission', () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe('permission_request_failed');
+  });
+});
+
+describe('ensureSiteAutomationPermission', () => {
+  test('returns ok when broad automation permission is already granted', async () => {
+    globalThis.chrome = {
+      permissions: {
+        contains: vi.fn(async () => true),
+        request: vi.fn(async () => false),
+      },
+    };
+
+    const result = await ensureSiteAutomationPermission();
+
+    expect(result).toEqual({ ok: true });
+    expect(chrome.permissions.contains).toHaveBeenCalledWith({
+      origins: ['https://*/*'],
+    });
+    expect(chrome.permissions.request).not.toHaveBeenCalled();
+  });
+
+  test('requests broad automation permission when not yet granted', async () => {
+    globalThis.chrome = {
+      permissions: {
+        contains: vi.fn(async () => false),
+        request: vi.fn(async () => true),
+      },
+    };
+
+    const result = await ensureSiteAutomationPermission();
+
+    expect(result).toEqual({ ok: true });
+    expect(chrome.permissions.request).toHaveBeenCalledWith({
+      origins: ['https://*/*'],
+    });
   });
 });
 

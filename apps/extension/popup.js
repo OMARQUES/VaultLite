@@ -2,6 +2,7 @@ import {
   byId,
   copyToClipboard,
   ensureServerOriginPermission,
+  ensureSiteAutomationPermission,
   formatTime,
   hostFromUrl,
   sanitizeText,
@@ -235,6 +236,7 @@ let activeSortMode = 'default';
 const faviconIndexByItemId = new Map();
 let inFlight = false;
 let pendingFillItemId = null;
+let pendingOpenAndFillItemId = null;
 let refreshTimer = null;
 let searchDebounceTimer = null;
 let linkPollingTimer = null;
@@ -1992,7 +1994,7 @@ async function requestPopupSnapshot(options = {}) {
     query: options.query ?? elements.searchInput.value,
     typeFilter: options.typeFilter ?? activeTypeFilter,
     suggestedOnly: options.suggestedOnly ?? suggestedOnly,
-    pageUrl: typeof options.pageUrl === 'string' ? options.pageUrl : activePageUrl,
+    pageUrl: typeof options.pageUrl === 'string' ? options.pageUrl : undefined,
     selectedItemId:
       typeof options.selectedItemId === 'string'
         ? options.selectedItemId
@@ -3467,6 +3469,7 @@ function renderCredentialList(items, options = {}) {
     previousSelectedItemId === selectedItemId &&
     hasSameRenderableRows(previousItems, currentItems, {
       pageEligible: activePageEligible,
+      siteAutomationPermissionGranted: currentState?.siteAutomationPermissionGranted === true,
       fillDisabledReason,
     });
   if (canReuseExistingRows) {
@@ -3493,6 +3496,7 @@ function renderCredentialList(items, options = {}) {
     previousSelectedItemId !== selectedItemId &&
     hasSameRenderableRows(previousItems, currentItems, {
       pageEligible: activePageEligible,
+      siteAutomationPermissionGranted: currentState?.siteAutomationPermissionGranted === true,
       fillDisabledReason,
     }) &&
     elements.credentialsList.querySelector('.vault-row[data-item-id]') !== null;
@@ -3517,6 +3521,7 @@ function renderCredentialList(items, options = {}) {
       const quickAction = resolveRowQuickAction({
         item,
         pageEligible: activePageEligible,
+        siteAutomationPermissionGranted: currentState?.siteAutomationPermissionGranted === true,
         fillDisabledReason,
       });
       const rowClass = quickAction ? ' has-row-action' : '';
@@ -3545,6 +3550,23 @@ function renderCredentialList(items, options = {}) {
             aria-label="${sanitizeText(quickAction.tooltip)}"
           >
             <span class="row-action-glyph material-symbols-rounded" aria-hidden="true">language</span>
+          </button>
+        `;
+      } else if (quickAction?.type === 'open-and-fill') {
+        const disabledAttr = pendingOpenAndFillItemId === item.itemId ? 'disabled' : '';
+        const tooltip =
+          pendingOpenAndFillItemId === item.itemId ? 'Opening site and preparing fill...' : quickAction.tooltip;
+        sideAction = `
+          <button
+            type="button"
+            class="vault-row-side-hit is-open-and-fill"
+            data-row-action="open-and-fill"
+            data-item-id="${sanitizeText(item.itemId)}"
+            title="${sanitizeText(tooltip)}"
+            aria-label="${sanitizeText(tooltip)}"
+            ${disabledAttr}
+          >
+            Open &amp; Fill
           </button>
         `;
       } else if (quickAction?.type === 'fill') {
@@ -3734,6 +3756,7 @@ async function ensureServerOriginConfigured() {
   if (!permission.ok) {
     return permission;
   }
+  await ensureSiteAutomationPermission().catch(() => ({ ok: false }));
 
   // Always send set_server_url to force background reconciliation of dynamic bridge registration.
   const response = await sendBackgroundCommand({
@@ -4275,6 +4298,90 @@ async function triggerFill(itemId) {
   }
   if (outcome.alert) {
     setAlert(outcome.alert.level, outcome.alert.message);
+  }
+}
+
+async function triggerOpenAndFill(itemId) {
+  if (pendingOpenAndFillItemId === itemId) {
+    return;
+  }
+  pendingOpenAndFillItemId = itemId;
+  renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
+  try {
+    const response = await sendBackgroundCommand({
+      type: 'vaultlite.open_and_fill_credential',
+      itemId,
+    });
+    if (!response.ok) {
+      setAlert('danger', response.message || 'Could not open and fill this credential.');
+      return;
+    }
+    if (response.result === 'opened_and_fill_scheduled' || response.result === 'opened_only') {
+      window.close();
+      return;
+    }
+    if (response.result === 'invalid_target_url') {
+      setAlert('warning', 'This credential has no valid URL.');
+      return;
+    }
+    if (response.result === 'permission_required') {
+      setAlert('warning', 'Grant site automation permission to use Open & Fill.');
+      return;
+    }
+    setAlert('warning', 'Could not open and fill this credential.');
+  } finally {
+    pendingOpenAndFillItemId = null;
+    renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
+  }
+}
+
+async function triggerSmartLoginAction(itemId) {
+  if (pendingFillItemId === itemId || pendingOpenAndFillItemId === itemId) {
+    return;
+  }
+  pendingFillItemId = itemId;
+  pendingOpenAndFillItemId = itemId;
+  renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
+  try {
+    const response = await sendBackgroundCommand({
+      type: 'vaultlite.dispatch_login_row_action',
+      itemId,
+    });
+    if (!response.ok) {
+      setAlert('danger', response.message || 'Could not act on this credential.');
+      return;
+    }
+    if (
+      response.result === 'opened_and_fill_scheduled' ||
+      response.result === 'opened_only' ||
+      response.result === 'filled'
+    ) {
+      if (response.result !== 'filled') {
+        window.close();
+        return;
+      }
+      const outcome = describeFillResult(response.result);
+      if (outcome.alert) {
+        setAlert(outcome.alert.level, outcome.alert.message);
+      }
+      return;
+    }
+    const outcome = describeFillResult(response.result);
+    if (outcome.disableFillReason) {
+      fillBlockedState = {
+        pageUrl: activePageUrl,
+        reason: outcome.disableFillReason,
+      };
+      renderCredentialList(currentItems);
+      return;
+    }
+    if (outcome.alert) {
+      setAlert(outcome.alert.level, outcome.alert.message);
+    }
+  } finally {
+    pendingFillItemId = null;
+    pendingOpenAndFillItemId = null;
+    renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
   }
 }
 
@@ -5194,22 +5301,13 @@ function wireEvents() {
     const action = actionButton?.getAttribute('data-row-action');
     const actionItemId = actionButton?.getAttribute('data-item-id');
     if (action && actionItemId) {
-      if (action === 'open-url') {
+      if (action === 'open-url' || action === 'quick-fill' || action === 'open-and-fill') {
         event.preventDefault();
         event.stopPropagation();
         if (actionButton instanceof HTMLElement) {
           actionButton.blur();
         }
-        void openCredentialUrl(actionItemId, { closePopup: true });
-        return;
-      }
-      if (action === 'quick-fill') {
-        event.preventDefault();
-        event.stopPropagation();
-        if (actionButton instanceof HTMLElement) {
-          actionButton.blur();
-        }
-        void triggerFill(actionItemId);
+        void triggerSmartLoginAction(actionItemId);
         return;
       }
       if (action === 'restore-item') {

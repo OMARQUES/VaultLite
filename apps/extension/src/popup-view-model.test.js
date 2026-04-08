@@ -154,6 +154,7 @@ describe('popup view model helpers', () => {
         matchFlags: { exactOrigin: true, domainScore: 5 },
       },
       pageEligible: true,
+      siteAutomationPermissionGranted: true,
       fillDisabledReason: null,
     });
     expect(action).toEqual({
@@ -171,12 +172,50 @@ describe('popup view model helpers', () => {
         matchFlags: { exactOrigin: false, domainScore: 0 },
       },
       pageEligible: true,
+      siteAutomationPermissionGranted: false,
       fillDisabledReason: null,
     });
     expect(action).toEqual({
       type: 'open-url',
       disabled: false,
       tooltip: 'Open site URL',
+    });
+  });
+
+  test('uses open-and-fill action for login outside current site when automation permission is granted', () => {
+    const action = resolveRowQuickAction({
+      item: {
+        itemType: 'login',
+        firstUrl: 'https://amazon.com.br',
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+      },
+      pageEligible: true,
+      siteAutomationPermissionGranted: true,
+      fillDisabledReason: null,
+    });
+    expect(action).toEqual({
+      type: 'open-and-fill',
+      disabled: false,
+      tooltip: 'Open site and fill credentials',
+    });
+  });
+
+  test('prefers background-recommended fill action over stale match flags', () => {
+    const action = resolveRowQuickAction({
+      item: {
+        itemType: 'login',
+        firstUrl: 'https://amazon.com.br',
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+        rowAction: 'fill',
+      },
+      pageEligible: false,
+      siteAutomationPermissionGranted: true,
+      fillDisabledReason: null,
+    });
+    expect(action).toEqual({
+      type: 'fill',
+      disabled: false,
+      tooltip: 'Fill credentials on this page',
     });
   });
 

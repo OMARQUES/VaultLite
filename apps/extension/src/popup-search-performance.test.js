@@ -37,4 +37,15 @@ describe('popup search responsiveness safeguards', () => {
     expect(source).toContain('maybeScheduleWarmupListRefresh(response.state ?? currentState, 0);');
     expect(source).toContain('maybeScheduleWarmupListRefresh(stateSnapshot, 0);');
   });
+
+  test('popup snapshot requests do not pin a stale active page url by default', () => {
+    const source = readFileSync(popupPath, 'utf8');
+    const requestIndex = source.indexOf('async function requestPopupSnapshot(options = {}) {');
+    const explicitPageUrlIndex = source.indexOf("pageUrl: typeof options.pageUrl === 'string' ? options.pageUrl : undefined,", requestIndex);
+    const staleFallbackIndex = source.indexOf("pageUrl: typeof options.pageUrl === 'string' ? options.pageUrl : activePageUrl,", requestIndex);
+
+    expect(requestIndex).toBeGreaterThanOrEqual(0);
+    expect(explicitPageUrlIndex).toBeGreaterThan(requestIndex);
+    expect(staleFallbackIndex).toBe(-1);
+  });
 });

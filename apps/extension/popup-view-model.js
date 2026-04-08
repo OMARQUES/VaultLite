@@ -54,6 +54,7 @@ function quickActionSignature(item, input) {
   const quickAction = resolveRowQuickAction({
     item,
     pageEligible: input?.pageEligible === true,
+    siteAutomationPermissionGranted: input?.siteAutomationPermissionGranted === true,
     fillDisabledReason:
       typeof input?.fillDisabledReason === 'string' && input.fillDisabledReason.trim().length > 0
         ? input.fillDisabledReason.trim()
@@ -262,34 +263,53 @@ export function toNavigableUrl(rawUrl) {
   }
 }
 
-function isSuggestedLoginForCurrentPage(item) {
-  if (!item || item.itemType !== 'login') {
-    return false;
-  }
-  const matchFlags =
-    item.matchFlags && typeof item.matchFlags === 'object' && !Array.isArray(item.matchFlags)
-      ? item.matchFlags
-      : {};
-  if (matchFlags.exactOrigin === true) {
-    return true;
-  }
-  if (typeof matchFlags.domainScore === 'number' && Number.isFinite(matchFlags.domainScore)) {
-    return matchFlags.domainScore > 0;
-  }
-  return false;
-}
-
 export function resolveRowQuickAction(input) {
   const item = input?.item ?? null;
   if (item?.isDeleted === true) {
+    return null;
+  }
+  if (item?.itemType !== 'login') {
     return null;
   }
   const hasNavigableUrl = Boolean(toNavigableUrl(item?.firstUrl ?? ''));
   if (!hasNavigableUrl) {
     return null;
   }
-  const isSuggestedLogin = isSuggestedLoginForCurrentPage(item);
-  if (!isSuggestedLogin) {
+  const recommendedAction = typeof item?.rowAction === 'string' ? item.rowAction : null;
+  if (recommendedAction === 'fill') {
+    return {
+      type: 'fill',
+      disabled: false,
+      tooltip: 'Fill credentials on this page',
+    };
+  }
+  if (recommendedAction === 'open-and-fill') {
+    return {
+      type: 'open-and-fill',
+      disabled: false,
+      tooltip: 'Open site and fill credentials',
+    };
+  }
+  if (recommendedAction === 'open-url') {
+    return {
+      type: 'open-url',
+      disabled: false,
+      tooltip: 'Open site URL',
+    };
+  }
+  const matchFlags =
+    item.matchFlags && typeof item.matchFlags === 'object' && !Array.isArray(item.matchFlags)
+      ? item.matchFlags
+      : {};
+  const exactOriginMatch = matchFlags.exactOrigin === true;
+  if (!exactOriginMatch) {
+    if (input?.siteAutomationPermissionGranted === true) {
+      return {
+        type: 'open-and-fill',
+        disabled: false,
+        tooltip: 'Open site and fill credentials',
+      };
+    }
     return {
       type: 'open-url',
       disabled: false,

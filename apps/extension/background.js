@@ -82,6 +82,7 @@ const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
 const STORAGE_SESSION_TOMBSTONE_CACHE_KEY = 'vaultlite.session_tombstone_cache.v1';
 const STORAGE_SESSION_FOLDER_STATE_CACHE_KEY = 'vaultlite.session_folder_state_cache.v1';
+const STORAGE_PENDING_OPEN_FILL_JOBS_KEY = 'vaultlite.pending_open_fill_jobs.v1';
 const STORAGE_SESSION_FORM_METADATA_CACHE_KEY = 'vaultlite.session_form_metadata_cache.v1';
 const STORAGE_LOCAL_FORM_METADATA_CACHE_KEY = 'vaultlite.form_metadata_cache.v1';
 const STORAGE_ICON_DOMAIN_REGISTRATION_KEY = 'vaultlite.icon_domain_registration.v1';
@@ -123,6 +124,9 @@ const FORM_METADATA_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
 const FORM_METADATA_QUERY_LIMIT_PER_ORIGIN = 50;
 const FORM_METADATA_CACHE_PERSIST_DEBOUNCE_MS = 750;
 const REALTIME_FORM_METADATA_RESYNC_DEBOUNCE_MS = 1_500;
+const OPEN_AND_FILL_JOB_TTL_MS = 90_000;
+const OPEN_AND_FILL_RETRY_DELAYS_MS = [250, 750, 1_500];
+const SITE_AUTOMATION_PERMISSION_ORIGINS = ['https://*/*'];
 const ITEM_ATTACHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
@@ -207,6 +211,8 @@ let sessionListProjectionCache = {
   loadedAt: 0,
   items: [],
 };
+let pendingOpenFillJobsByTabId = new Map();
+let siteAutomationPermissionGranted = false;
 let bridgeUnavailable = false;
 const projectionCacheDiagnostics = {
   idbHitCount: 0,
@@ -1600,6 +1606,8 @@ function clearSensitiveMemory() {
   clearPopupReconcileTimer();
   popupReconcilePendingDomains.clear();
   popupReconcileSelectedItemId = null;
+  pendingOpenFillJobsByTabId.clear();
+  void persistPendingOpenFillJobsBestEffort();
   popupSyncState = {
     session: 'idle',
     vault: 'idle',
@@ -1956,6 +1964,7 @@ function snapshotForUi() {
     lockRevision: normalizeLockRevision(state.lockRevision),
     lastUnlockedLockRevision: normalizeLockRevision(lastUnlockedLockRevision),
     hasTrustedState: state.hasTrustedState,
+    siteAutomationPermissionGranted,
     hasTokenInMemory: Boolean(sessionToken),
     lastError: state.lastError,
     cacheWarmupState,
@@ -1968,6 +1977,128 @@ function snapshotForUi() {
     },
     linkRequest,
   };
+}
+
+function normalizePendingOpenFillJob(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return null;
+  }
+  const tabId = Number(entry.tabId);
+  const itemId = typeof entry.itemId === 'string' ? entry.itemId.trim() : '';
+  const targetUrl = typeof entry.targetUrl === 'string' ? entry.targetUrl : '';
+  const createdAt = Number(entry.createdAt);
+  const expiresAt = Number(entry.expiresAt);
+  const attemptCount = Number(entry.attemptCount);
+  const lastAttemptAt = Number(entry.lastAttemptAt);
+  const jobId = typeof entry.jobId === 'string' && entry.jobId.trim().length > 0 ? entry.jobId.trim() : '';
+  if (!Number.isInteger(tabId) || tabId < 0 || !itemId || !targetUrl) {
+    return null;
+  }
+  if (!Number.isFinite(createdAt) || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return null;
+  }
+  return {
+    jobId: jobId || `open-fill-${tabId}-${itemId}`,
+    tabId,
+    itemId,
+    targetUrl,
+    createdAt: Math.trunc(createdAt),
+    expiresAt: Math.trunc(expiresAt),
+    attemptCount: Number.isFinite(attemptCount) ? Math.max(0, Math.trunc(attemptCount)) : 0,
+    lastAttemptAt: Number.isFinite(lastAttemptAt) ? Math.max(0, Math.trunc(lastAttemptAt)) : 0,
+  };
+}
+
+function pruneExpiredPendingOpenFillJobs(now = Date.now()) {
+  let changed = false;
+  for (const [tabId, job] of pendingOpenFillJobsByTabId.entries()) {
+    if (!job || !Number.isFinite(job.expiresAt) || job.expiresAt <= now) {
+      pendingOpenFillJobsByTabId.delete(tabId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function persistPendingOpenFillJobsBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  pruneExpiredPendingOpenFillJobs();
+  if (pendingOpenFillJobsByTabId.size === 0) {
+    try {
+      await sessionStorage.remove(STORAGE_PENDING_OPEN_FILL_JOBS_KEY);
+    } catch {
+      // Best effort only.
+    }
+    return;
+  }
+  const serializedJobs = {};
+  for (const [tabId, job] of pendingOpenFillJobsByTabId.entries()) {
+    serializedJobs[String(tabId)] = {
+      jobId: job.jobId,
+      tabId: job.tabId,
+      itemId: job.itemId,
+      targetUrl: job.targetUrl,
+      createdAt: job.createdAt,
+      expiresAt: job.expiresAt,
+      attemptCount: job.attemptCount,
+      lastAttemptAt: job.lastAttemptAt,
+    };
+  }
+  try {
+    await sessionStorage.set({
+      [STORAGE_PENDING_OPEN_FILL_JOBS_KEY]: serializedJobs,
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+function setPendingOpenFillJob(job) {
+  const normalized = normalizePendingOpenFillJob(job);
+  if (!normalized) {
+    return false;
+  }
+  pendingOpenFillJobsByTabId.set(normalized.tabId, normalized);
+  return true;
+}
+
+function getPendingOpenFillJob(tabId) {
+  pruneExpiredPendingOpenFillJobs();
+  return pendingOpenFillJobsByTabId.get(tabId) ?? null;
+}
+
+async function upsertPendingOpenFillJob(job) {
+  if (!setPendingOpenFillJob(job)) {
+    return false;
+  }
+  await persistPendingOpenFillJobsBestEffort();
+  return true;
+}
+
+async function deletePendingOpenFillJob(tabId) {
+  if (!pendingOpenFillJobsByTabId.has(tabId)) {
+    return;
+  }
+  pendingOpenFillJobsByTabId.delete(tabId);
+  await persistPendingOpenFillJobsBestEffort();
+}
+
+async function refreshSiteAutomationPermissionState() {
+  if (!chrome.permissions?.contains) {
+    siteAutomationPermissionGranted = false;
+    return siteAutomationPermissionGranted;
+  }
+  try {
+    siteAutomationPermissionGranted = await chrome.permissions.contains({
+      origins: SITE_AUTOMATION_PERMISSION_ORIGINS,
+    });
+  } catch {
+    siteAutomationPermissionGranted = false;
+  }
+  return siteAutomationPermissionGranted;
 }
 
 function isCredentialCacheFresh() {
@@ -2082,6 +2213,7 @@ function popupStaleFlags(input = {}) {
 
 async function getPopupSnapshotInternal(input = {}) {
   await ensurePopupSnapshotLocalCaches(input);
+  await refreshSiteAutomationPermissionState();
 
   const explicitPageUrl = typeof input.pageUrl === 'string' ? input.pageUrl : '';
   let activePageUrl = explicitPageUrl;
@@ -2618,6 +2750,7 @@ async function loadPersistedState() {
         STORAGE_SESSION_LIST_CACHE_KEY,
         STORAGE_SESSION_TOMBSTONE_CACHE_KEY,
         STORAGE_ICON_DOMAIN_REGISTRATION_KEY,
+        STORAGE_PENDING_OPEN_FILL_JOBS_KEY,
       ]);
     } catch {
       sessionState = {};
@@ -2635,6 +2768,7 @@ async function loadPersistedState() {
   const sessionListProjectionEntry = sessionState?.[STORAGE_SESSION_LIST_CACHE_KEY] ?? null;
   const sessionTombstoneEntry = sessionState?.[STORAGE_SESSION_TOMBSTONE_CACHE_KEY] ?? null;
   const iconDomainRegistrationEntry = sessionState?.[STORAGE_ICON_DOMAIN_REGISTRATION_KEY] ?? null;
+  const pendingOpenFillJobsEntry = sessionState?.[STORAGE_PENDING_OPEN_FILL_JOBS_KEY] ?? null;
 
   state.serverOrigin = config?.serverOrigin ?? null;
   state.deploymentFingerprint = trusted?.deploymentFingerprint ?? config?.deploymentFingerprint ?? null;
@@ -2734,6 +2868,21 @@ async function loadPersistedState() {
   } else {
     clearSessionTombstoneCacheInMemory();
   }
+
+  pendingOpenFillJobsByTabId.clear();
+  if (pendingOpenFillJobsEntry && typeof pendingOpenFillJobsEntry === 'object' && !Array.isArray(pendingOpenFillJobsEntry)) {
+    for (const rawJob of Object.values(pendingOpenFillJobsEntry)) {
+      const normalizedJob = normalizePendingOpenFillJob(rawJob);
+      if (normalizedJob) {
+        pendingOpenFillJobsByTabId.set(normalizedJob.tabId, normalizedJob);
+      }
+    }
+    if (pruneExpiredPendingOpenFillJobs()) {
+      void persistPendingOpenFillJobsBestEffort();
+    }
+  }
+
+  await refreshSiteAutomationPermissionState();
 
   iconDomainRegistrationByItemId.clear();
   lastIconDomainSyncFingerprint = '';
@@ -4200,6 +4349,13 @@ function projectCredentialForPopup(credential, pageUrl) {
       // Ignore malformed URL and keep searching.
     }
   }
+  const rowAction = resolveLoginRowActionForPage({
+    itemType: credential.itemType,
+    pageUrl,
+    credentialUrls: candidateUrls,
+    siteAutomationPermissionGranted,
+    hasNavigableUrl: firstUrl.length > 0,
+  });
 
   return {
     itemId: credential.itemId,
@@ -4216,7 +4372,26 @@ function projectCredentialForPopup(credential, pageUrl) {
       exactOrigin,
       domainScore,
     },
+    rowAction,
   };
+}
+
+function resolveLoginRowActionForPage(input = {}) {
+  if (input?.itemType !== 'login') {
+    return null;
+  }
+  if (input?.hasNavigableUrl !== true) {
+    return null;
+  }
+  const pageUrl = typeof input?.pageUrl === 'string' ? input.pageUrl : '';
+  const credentialUrls = Array.isArray(input?.credentialUrls) ? input.credentialUrls : [];
+  if (isPageUrlEligibleForFill(pageUrl) && isCredentialAllowedForSite(pageUrl, credentialUrls)) {
+    return 'fill';
+  }
+  if (input?.siteAutomationPermissionGranted === true) {
+    return 'open-and-fill';
+  }
+  return 'open-url';
 }
 
 function buildItemSubtitle(credential) {
@@ -5769,6 +5944,13 @@ function projectCredentialIndexForPage(entry, pageUrl) {
     }
   }
   const firstUrl = typeof entry?.firstUrl === 'string' ? entry.firstUrl : '';
+  const rowAction = resolveLoginRowActionForPage({
+    itemType: entry?.itemType ?? 'login',
+    pageUrl,
+    credentialUrls: urls,
+    siteAutomationPermissionGranted,
+    hasNavigableUrl: firstUrl.length > 0,
+  });
   return {
     itemId: entry?.itemId ?? '',
     itemType: entry?.itemType ?? 'login',
@@ -5783,6 +5965,7 @@ function projectCredentialIndexForPage(entry, pageUrl) {
       exactOrigin,
       domainScore,
     },
+    rowAction,
   };
 }
 
@@ -5903,7 +6086,35 @@ async function listCredentialsInternal(input = {}) {
   });
 }
 
-async function fillCredentialInternal(itemId) {
+function resolveCredentialLaunchUrl(targetCredential, preferredUrl = null) {
+  const preferred =
+    typeof preferredUrl === 'string' && preferredUrl.trim().length > 0 ? preferredUrl.trim() : null;
+  const candidates = preferred ? [preferred, ...(Array.isArray(targetCredential?.urls) ? targetCredential.urls : [])] : targetCredential?.urls;
+  for (const rawUrl of Array.isArray(candidates) ? candidates : []) {
+    if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
+      continue;
+    }
+    try {
+      const parsed = new URL(rawUrl.trim().includes('://') ? rawUrl.trim() : `https://${rawUrl.trim()}`);
+      return parsed.toString();
+    } catch {
+      // Ignore malformed URL entries.
+    }
+  }
+  return null;
+}
+
+async function fillCredentialInTabInternal(input = {}) {
+  const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
+  const tabId = Number(input?.tabId);
+  const tabUrl = typeof input?.tabUrl === 'string' ? input.tabUrl : '';
+  if (!itemId) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+  if (!Number.isInteger(tabId) || tabId < 0 || !tabUrl) {
+    return fail('manual_fill_unavailable', 'Manual fill unavailable on this page.');
+  }
+
   const cacheResult = await refreshCredentialCache({
     awaitCompletion: false,
     preferLocalCache: true,
@@ -5921,22 +6132,17 @@ async function fillCredentialInternal(itemId) {
     return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
   }
 
-  const activeTab = await fetchActiveTab();
-  if (!activeTab || !activeTab.tabUrl) {
-    return fail('manual_fill_unavailable', 'Manual fill unavailable on this page.');
-  }
-
-  if (!isPageUrlEligibleForFill(activeTab.tabUrl)) {
+  if (!isPageUrlEligibleForFill(tabUrl)) {
     return ok({ result: 'manual_fill_unavailable' });
   }
 
-  if (!isCredentialAllowedForSite(activeTab.tabUrl, targetCredential.urls)) {
+  if (!isCredentialAllowedForSite(tabUrl, targetCredential.urls)) {
     return ok({ result: 'credential_not_allowed_for_site' });
   }
 
   try {
     const formMetadataResponse = await queryFormMetadataInternal({
-      origins: [activeTab.tabUrl],
+      origins: [tabUrl],
       itemId,
       awaitCompletion: false,
     });
@@ -5945,18 +6151,18 @@ async function fillCredentialInternal(itemId) {
       : [];
 
     await chrome.scripting.executeScript({
-      target: { tabId: activeTab.tabId, allFrames: false },
+      target: { tabId, allFrames: false },
       files: ['content-script.js'],
     });
 
-    const recheckedTab = await chrome.tabs.get(activeTab.tabId);
-    if (!recheckedTab || recheckedTab.url !== activeTab.tabUrl) {
+    const recheckedTab = await chrome.tabs.get(tabId);
+    if (!recheckedTab || recheckedTab.url !== tabUrl) {
       return ok({ result: 'page_changed_try_again' });
     }
 
-    const fillResponse = await chrome.tabs.sendMessage(activeTab.tabId, {
+    const fillResponse = await chrome.tabs.sendMessage(tabId, {
       type: 'vaultlite.fill',
-      expectedPageUrl: activeTab.tabUrl,
+      expectedPageUrl: tabUrl,
       itemId,
       credential: {
         username: targetCredential.username,
@@ -5973,7 +6179,7 @@ async function fillCredentialInternal(itemId) {
       try {
         await applyFormMetadataTelemetryInternal({
           itemId,
-          senderOrigin: canonicalizeFormMetadataOrigin(activeTab.tabUrl),
+          senderOrigin: canonicalizeFormMetadataOrigin(tabUrl),
           heuristicObservations: Array.isArray(fillResponse.telemetry.heuristicObservations)
             ? fillResponse.telemetry.heuristicObservations
             : [],
@@ -5996,6 +6202,208 @@ async function fillCredentialInternal(itemId) {
   } catch {
     return ok({ result: 'manual_fill_unavailable' });
   }
+}
+
+async function fillCredentialInternal(itemId) {
+  const activeTab = await fetchActiveTab();
+  if (!activeTab || !activeTab.tabUrl) {
+    return fail('manual_fill_unavailable', 'Manual fill unavailable on this page.');
+  }
+  return fillCredentialInTabInternal({
+    itemId,
+    tabId: activeTab.tabId,
+    tabUrl: activeTab.tabUrl,
+    source: 'manual_fill',
+  });
+}
+
+async function dispatchLoginRowActionInternal(input = {}) {
+  const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+
+  const cacheResult = await refreshCredentialCache({
+    awaitCompletion: false,
+    preferLocalCache: true,
+  });
+  if (!cacheResult.ok) {
+    return cacheResult;
+  }
+  armIdleLockTimer();
+
+  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
+  if (!targetCredential) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+  if (targetCredential.itemType !== 'login') {
+    return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
+  }
+
+  const activeTab = await fetchActiveTab();
+  const activeTabUrl = activeTab?.tabUrl ?? '';
+  if (activeTab && activeTabUrl && isPageUrlEligibleForFill(activeTabUrl)) {
+    if (isCredentialAllowedForSite(activeTabUrl, targetCredential.urls)) {
+      const fillResult = await fillCredentialInTabInternal({
+        itemId,
+        tabId: activeTab.tabId,
+        tabUrl: activeTabUrl,
+        source: 'row_action',
+      });
+      if (fillResult?.ok) {
+        return ok({
+          result: fillResult.result,
+          uiAction: 'fill',
+        });
+      }
+      return fillResult;
+    }
+  }
+
+  const openAndFillResult = await openAndFillCredentialInternal(input);
+  if (openAndFillResult?.ok) {
+    return ok({
+      ...openAndFillResult,
+      uiAction:
+        openAndFillResult.result === 'opened_only'
+          ? 'open-url'
+          : openAndFillResult.result === 'opened_and_fill_scheduled'
+            ? 'open-and-fill'
+            : 'open-url',
+    });
+  }
+  return openAndFillResult;
+}
+
+async function openAndFillCredentialInternal(input = {}) {
+  const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+
+  const cacheResult = await refreshCredentialCache({
+    awaitCompletion: false,
+    preferLocalCache: true,
+  });
+  if (!cacheResult.ok) {
+    return cacheResult;
+  }
+  armIdleLockTimer();
+
+  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
+  if (!targetCredential) {
+    return fail('credential_not_found', 'Credential not found in extension cache.');
+  }
+  if (targetCredential.itemType !== 'login') {
+    return fail('invalid_target_url', 'Automatic open and fill is available for login items only.');
+  }
+
+  const targetUrl = resolveCredentialLaunchUrl(targetCredential, input?.preferredUrl ?? null);
+  if (!targetUrl) {
+    return fail('invalid_target_url', 'This credential has no valid URL.');
+  }
+
+  let openedTab = null;
+  try {
+    openedTab = await chrome.tabs.create({ url: targetUrl, active: true });
+  } catch {
+    return fail('open_url_failed', 'Could not open credential URL right now.');
+  }
+  if (!openedTab || typeof openedTab.id !== 'number') {
+    return fail('open_url_failed', 'Could not open credential URL right now.');
+  }
+
+  const canAutomate = await refreshSiteAutomationPermissionState();
+  if (!canAutomate) {
+    return ok({ result: 'opened_only', tabId: openedTab.id });
+  }
+
+  const pendingJobStored = setPendingOpenFillJob({
+    jobId: `open-fill-${openedTab.id}-${randomBase64Url(6)}`,
+    tabId: openedTab.id,
+    itemId,
+    targetUrl,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + OPEN_AND_FILL_JOB_TTL_MS,
+    attemptCount: 0,
+    lastAttemptAt: 0,
+  });
+  if (!pendingJobStored) {
+    return ok({ result: 'opened_only', tabId: openedTab.id });
+  }
+  await persistPendingOpenFillJobsBestEffort();
+  return ok({ result: 'opened_and_fill_scheduled', tabId: openedTab.id });
+}
+
+function isRetryableOpenAndFillResult(result) {
+  return (
+    result === 'manual_fill_unavailable' ||
+    result === 'page_changed_try_again' ||
+    result === 'unsupported_form' ||
+    result === 'no_eligible_fields'
+  );
+}
+
+async function processPendingOpenFillJobForTab(tabId, tabUrl) {
+  const pendingJob = getPendingOpenFillJob(tabId);
+  if (!pendingJob) {
+    return;
+  }
+  if (typeof tabUrl !== 'string' || tabUrl.length === 0) {
+    return;
+  }
+  if (!isPageUrlEligibleForFill(tabUrl)) {
+    await deletePendingOpenFillJob(tabId);
+    return;
+  }
+  const nextAttemptCount = Math.max(0, pendingJob.attemptCount) + 1;
+  const attemptResult = await fillCredentialInTabInternal({
+    itemId: pendingJob.itemId,
+    tabId,
+    tabUrl,
+    source: 'open_and_fill',
+  });
+  if (!attemptResult?.ok) {
+    await deletePendingOpenFillJob(tabId);
+    return;
+  }
+  if (attemptResult.result === 'filled') {
+    await deletePendingOpenFillJob(tabId);
+    return;
+  }
+  if (!isRetryableOpenAndFillResult(attemptResult.result) || nextAttemptCount >= OPEN_AND_FILL_RETRY_DELAYS_MS.length + 1) {
+    await deletePendingOpenFillJob(tabId);
+    return;
+  }
+  const delayMs = OPEN_AND_FILL_RETRY_DELAYS_MS[nextAttemptCount - 1] ?? OPEN_AND_FILL_RETRY_DELAYS_MS.at(-1) ?? 1_500;
+  const updated = await upsertPendingOpenFillJob({
+    ...pendingJob,
+    tabId,
+    attemptCount: nextAttemptCount,
+    lastAttemptAt: Date.now(),
+  });
+  if (!updated) {
+    return;
+  }
+  void (async () => {
+    await delay(delayMs);
+    const latestJob = getPendingOpenFillJob(tabId);
+    if (!latestJob || latestJob.jobId !== pendingJob.jobId || latestJob.expiresAt <= Date.now()) {
+      if (latestJob && latestJob.expiresAt <= Date.now()) {
+        await deletePendingOpenFillJob(tabId);
+      }
+      return;
+    }
+    let latestTab = null;
+    try {
+      latestTab = await chrome.tabs.get(tabId);
+    } catch {
+      await deletePendingOpenFillJob(tabId);
+      return;
+    }
+    const latestTabUrl = typeof latestTab?.url === 'string' ? latestTab.url : '';
+    await processPendingOpenFillJobForTab(tabId, latestTabUrl);
+  })();
 }
 
 async function getCredentialFieldInternal(itemId, field) {
@@ -9001,6 +9409,20 @@ async function handleCommand(command, senderContext, sender) {
       }
       return fillCredentialInternal(command.itemId);
     }
+    case 'vaultlite.dispatch_login_row_action': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'fill:dispatch');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return dispatchLoginRowActionInternal(command);
+    }
+    case 'vaultlite.open_and_fill_credential': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'fill:dispatch');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return openAndFillCredentialInternal(command);
+    }
     case 'vaultlite.form_metadata_submit_signal': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'form_metadata:signal');
       if (capabilityError) {
@@ -9119,6 +9541,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return true;
 });
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo?.status !== 'complete' || !Number.isInteger(tabId) || tabId < 0) {
+    return;
+  }
+  void (async () => {
+    await initializeBackgroundRuntime();
+    schedulePopupRealtimeNotification(['popup_state']);
+    const pendingJob = getPendingOpenFillJob(tabId);
+    if (!pendingJob) {
+      return;
+    }
+    const tabUrl = typeof tab?.url === 'string' ? tab.url : '';
+    await processPendingOpenFillJobForTab(tabId, tabUrl);
+  })().catch(() => {
+    void deletePendingOpenFillJob(tabId);
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    return;
+  }
+  void deletePendingOpenFillJob(tabId);
+});
+
+chrome.tabs.onActivated.addListener(() => {
+  schedulePopupRealtimeNotification(['popup_state']);
+});
+
+if (chrome.windows?.onFocusChanged) {
+  chrome.windows.onFocusChanged.addListener(() => {
+    schedulePopupRealtimeNotification(['popup_state']);
+  });
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   void initializeBackgroundRuntime(true);
