@@ -425,6 +425,107 @@ describe('runtime api client manual icon payloads', () => {
     });
   });
 
+  test('form metadata endpoints use extension bearer routes and keep bearer token out of request body', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          metadataId: 'meta_1',
+          ownerUserId: 'user_1',
+          itemId: null,
+          origin: 'https://accounts.example.com',
+          formFingerprint: 'form_fp_1',
+          fieldFingerprint: 'field_fp_1',
+          frameScope: 'top',
+          fieldRole: 'username',
+          selectorCss: '#email',
+          selectorFallbacks: ['input[name=\"email\"]'],
+          autocompleteToken: 'username',
+          inputType: 'email',
+          fieldName: 'email',
+          fieldId: 'email',
+          labelTextNormalized: 'email',
+          placeholderNormalized: null,
+          confidence: 'heuristic',
+          selectorStatus: 'active',
+          sourceDeviceId: 'device_1',
+          createdAt: '2026-04-01T12:00:00.000Z',
+          updatedAt: '2026-04-01T12:00:00.000Z',
+          lastConfirmedAt: null,
+        }),
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          records: [],
+        }),
+        clone() {
+          return this;
+        },
+      });
+
+    await api.upsertFormMetadata({
+      bearerToken: 'secret-token',
+      itemId: null,
+      origin: 'https://accounts.example.com/login',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      frameScope: 'top',
+      fieldRole: 'username',
+      selectorCss: '#email',
+      selectorFallbacks: ['input[name="email"]'],
+      autocompleteToken: 'username',
+      inputType: 'email',
+      fieldName: 'email',
+      fieldId: 'email',
+      labelTextNormalized: 'email',
+      placeholderNormalized: null,
+      confidence: 'heuristic',
+      selectorStatus: 'active',
+    });
+    await api.queryFormMetadata({
+      bearerToken: 'secret-token',
+      origins: ['https://accounts.example.com/login', 'https://portal.example.com/sign-in'],
+      itemId: 'item_1',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [upsertUrl, upsertInit] = fetchMock.mock.calls[0];
+    expect(upsertUrl).toBe(`${serverOrigin}/api/extension/form-metadata/upsert`);
+    expect(upsertInit.headers.authorization).toBe('Bearer secret-token');
+    expect(JSON.parse(String(upsertInit.body))).toEqual({
+      itemId: null,
+      origin: 'https://accounts.example.com/login',
+      formFingerprint: 'form_fp_1',
+      fieldFingerprint: 'field_fp_1',
+      frameScope: 'top',
+      fieldRole: 'username',
+      selectorCss: '#email',
+      selectorFallbacks: ['input[name="email"]'],
+      autocompleteToken: 'username',
+      inputType: 'email',
+      fieldName: 'email',
+      fieldId: 'email',
+      labelTextNormalized: 'email',
+      placeholderNormalized: null,
+      confidence: 'heuristic',
+      selectorStatus: 'active',
+    });
+
+    const [queryUrl, queryInit] = fetchMock.mock.calls[1];
+    expect(queryUrl).toBe(`${serverOrigin}/api/extension/form-metadata/query`);
+    expect(queryInit.headers.authorization).toBe('Bearer secret-token');
+    expect(JSON.parse(String(queryInit.body))).toEqual({
+      origins: ['https://accounts.example.com/login', 'https://portal.example.com/sign-in'],
+      itemId: 'item_1',
+    });
+  });
+
   test('extension attachment upload endpoints use dedicated bearer routes', async () => {
     fetchMock
       .mockResolvedValueOnce({

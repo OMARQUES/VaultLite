@@ -1883,6 +1883,202 @@ describe('createVaultLiteApi', () => {
     expect(publishedEvents).toHaveLength(2);
   });
 
+  test('publishes sanitized form metadata realtime deltas only when the stored record changes', async () => {
+    const storage = createTestStorage();
+    const clock = new AdjustableClock(new Date('2026-04-01T18:00:00.000Z'));
+    const idGenerator = new IncrementingIdGenerator();
+    const accountKitKeys = generateAccountKitKeyPair();
+    const publishedEvents: unknown[] = [];
+
+    const app = createVaultLiteApi({
+      storage,
+      clock,
+      idGenerator,
+      runtimeMode: 'test',
+      deploymentFingerprint: 'deployment_fp_v1',
+      serverUrl: 'https://vaultlite.example.com',
+      bootstrapAdminToken: 'bootstrap-secret',
+      secureCookies: true,
+      accountKitPrivateKey: accountKitKeys.privateKey,
+      accountKitPublicKey: accountKitKeys.publicKey,
+      realtime: {
+        enabled: true,
+        wsBaseUrl: 'wss://api.vaultlite.example.com',
+        connectTokenSecret: 'realtime_secret_for_tests_that_is_long_enough',
+        connectTokenTtlSeconds: 45,
+        authLeaseSeconds: 600,
+        heartbeatIntervalMs: 25_000,
+        flags: {
+          realtime_ws_v1: true,
+          realtime_delta_vault_v1: true,
+          realtime_delta_icons_v1: true,
+          realtime_delta_history_v1: true,
+          realtime_delta_attachments_v1: true,
+          realtime_apply_web_v1: true,
+          realtime_apply_extension_v1: true,
+          icons_state_sync_v1: false,
+          icons_ws_apply_web_v1: false,
+          icons_ws_apply_extension_v1: false,
+          icons_discovery_v2_v1: false,
+          icons_fast_first_v1: false,
+          icons_best_later_v1: false,
+          icons_http_fallback_v1: false,
+          icons_manual_private_ticket_v1: false,
+          icons_provider_favicon_vemetric_enabled: false,
+          icons_provider_google_s2_enabled: false,
+          icons_provider_icon_horse_enabled: false,
+          icons_provider_duckduckgo_ip3_enabled: false,
+          icons_provider_faviconextractor_enabled: false,
+        },
+        hubNamespace: {
+          idFromName(name: string) {
+            return name;
+          },
+          get() {
+            return {
+              async fetch(input: RequestInfo | URL, init?: RequestInit) {
+                const request = input instanceof Request ? input : new Request(input, init);
+                const url = new URL(request.url);
+                if (url.pathname === '/publish') {
+                  publishedEvents.push(await request.json());
+                }
+                return new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+            };
+          },
+        },
+      },
+    });
+
+    await storage.users.create({
+      userId: 'user_form_1',
+      username: 'alice',
+      role: 'user',
+      authSalt: 'A'.repeat(22),
+      authVerifier: 'proof_payload',
+      encryptedAccountBundle: 'bundle_payload',
+      accountKeyWrapped: 'wrapped_payload',
+      bundleVersion: 0,
+      lifecycleState: 'active',
+      createdAt: '2026-04-01T10:00:00.000Z',
+      updatedAt: '2026-04-01T10:00:00.000Z',
+    });
+    await storage.devices.register({
+      deviceId: 'device_form_ext_1',
+      userId: 'user_form_1',
+      deviceName: 'Extension',
+      platform: 'extension',
+      deviceState: 'active',
+      createdAt: '2026-04-01T10:00:00.000Z',
+      revokedAt: null,
+    });
+    const rawToken = 'extension_form_metadata_token_v1';
+    await storage.sessions.create({
+      sessionId: sha256Base64Url(rawToken),
+      userId: 'user_form_1',
+      deviceId: 'device_form_ext_1',
+      csrfToken: 'csrf_form_ext_1',
+      createdAt: '2026-04-01T10:00:00.000Z',
+      expiresAt: '2026-04-01T20:00:00.000Z',
+      recentReauthAt: '2026-04-01T10:00:00.000Z',
+      revokedAt: null,
+      rotatedFromSessionId: null,
+    });
+
+    const first = await app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${rawToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemId: null,
+        origin: 'https://accounts.example.com/login',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'username',
+        selectorCss: '#email',
+        selectorFallbacks: ['input[name=\"email\"]'],
+        autocompleteToken: 'username',
+        inputType: 'email',
+        fieldName: 'email',
+        fieldId: 'email',
+        labelTextNormalized: 'email',
+        placeholderNormalized: 'your email',
+        confidence: 'filled',
+        selectorStatus: 'active',
+      }),
+    });
+    expect(first.status).toBe(200);
+    expect(publishedEvents).toHaveLength(1);
+    expect(publishedEvents[0]).toEqual(
+      expect.objectContaining({
+        topic: 'vault.form_metadata.upserted',
+        sourceDeviceId: 'device_form_ext_1',
+        payload: expect.objectContaining({
+          origin: 'https://accounts.example.com',
+          fieldRole: 'username',
+          confidence: 'filled',
+          selectorStatus: 'active',
+        }),
+      }),
+    );
+    expect(publishedEvents[0]).not.toEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          selectorCss: expect.anything(),
+        }),
+      }),
+    );
+    expect(publishedEvents[0]).not.toEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          selectorFallbacks: expect.anything(),
+        }),
+      }),
+    );
+    expect(publishedEvents[0]).not.toEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          labelTextNormalized: expect.anything(),
+        }),
+      }),
+    );
+
+    clock.setNow(new Date('2026-04-01T18:05:00.000Z'));
+    const duplicate = await app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${rawToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'username',
+        selectorCss: '#email',
+        selectorFallbacks: ['input[name=\"email\"]'],
+        autocompleteToken: 'username',
+        inputType: 'email',
+        fieldName: 'email',
+        fieldId: 'email',
+        labelTextNormalized: 'email',
+        placeholderNormalized: 'your email',
+        confidence: 'filled',
+        selectorStatus: 'active',
+      }),
+    });
+    expect(duplicate.status).toBe(200);
+    expect(publishedEvents).toHaveLength(1);
+  });
+
   test('does not consume connect token when origin is invalid and consumes atomically on first valid upgrade', async () => {
     const storage = createTestStorage();
     const clock = new AdjustableClock(new Date('2026-03-27T12:00:00.000Z'));

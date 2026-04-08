@@ -1,6 +1,8 @@
 export const STORAGE_LOCAL_CONFIG_KEY = 'vaultlite.extension.config.v1';
 export const STORAGE_LOCAL_TRUSTED_KEY = 'vaultlite.extension.trusted.v1';
 export const STORAGE_SESSION_KEY = 'vaultlite.extension.session.v1';
+export const POPUP_LAST_STATE_STORAGE_KEY = 'vaultlite.popup.last_state.v1';
+export const POPUP_LAST_READY_LIST_STORAGE_KEY = 'vaultlite.popup.last_ready_list.v1';
 
 const BLOCKED_SCHEMES = new Set([
   'chrome:',
@@ -41,7 +43,7 @@ const CONTEXT_CAPABILITIES = {
     'unlock:local',
     'state:write',
   ]),
-  content_script: new Set(['fill:execute', 'bridge:auto_pair']),
+  content_script: new Set(['fill:execute', 'bridge:auto_pair', 'form_metadata:signal']),
 };
 
 export function contextHasCapability(context, capability) {

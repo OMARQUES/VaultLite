@@ -944,6 +944,13 @@ export const VaultFormMetadataUpsertInputSchema = z
   })
   .strict();
 
+export const VaultFormMetadataQueryInputSchema = z
+  .object({
+    origins: z.array(z.string().url()).min(1).max(100),
+    itemId: z.string().min(1).nullable().optional(),
+  })
+  .strict();
+
 export const VaultFormMetadataListOutputSchema = z
   .object({
     records: z.array(VaultFormMetadataRecordSchema),
@@ -1957,6 +1964,7 @@ export type VaultFormMetadataSelectorStatus = z.infer<typeof VaultFormMetadataSe
 export type VaultFormFrameScope = z.infer<typeof VaultFormFrameScopeSchema>;
 export type VaultFormMetadataRecord = z.infer<typeof VaultFormMetadataRecordSchema>;
 export type VaultFormMetadataUpsertInput = z.infer<typeof VaultFormMetadataUpsertInputSchema>;
+export type VaultFormMetadataQueryInput = z.infer<typeof VaultFormMetadataQueryInputSchema>;
 export type VaultFormMetadataListOutput = z.infer<typeof VaultFormMetadataListOutputSchema>;
 export type VaultFoldersStateOutput = z.infer<typeof VaultFoldersStateOutputSchema>;
 export type VaultFolderUpsertInput = z.infer<typeof VaultFolderUpsertInputSchema>;

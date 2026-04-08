@@ -82,6 +82,7 @@ import {
   RemoteAuthenticationChallengeInputSchema,
   RemoteAuthenticationChallengeOutputSchema,
   RealtimeConnectTokenOutputSchema,
+  RealtimeFormMetadataUpsertedPayloadSchema,
   RuntimeMetadataSchema,
   RemoteAuthenticationInputSchema,
   SessionRestoreResponseSchema,
@@ -107,6 +108,10 @@ import {
   VaultItemExtensionUpdateInputSchema,
   VaultFoldersStateOutputSchema,
   VaultFolderUpsertInputSchema,
+  VaultFormMetadataListOutputSchema,
+  VaultFormMetadataQueryInputSchema,
+  VaultFormMetadataRecordSchema,
+  VaultFormMetadataUpsertInputSchema,
   VaultFolderAssignmentUpsertInputSchema,
   VaultFolderMutationOutputSchema,
   VaultItemHistoryListOutputSchema,
@@ -136,6 +141,7 @@ import type {
   DeviceRecord,
   SessionRecord,
   UserAccountRecord,
+  VaultFormMetadataRecord as StoredVaultFormMetadataRecord,
   VaultLiteStorage,
 } from '@vaultlite/storage-abstractions';
 import {
@@ -315,6 +321,9 @@ const VAULT_ITEM_HISTORY_PRUNE_LIMIT = 200;
 const VAULT_ITEM_HISTORY_PAGE_SIZE_DEFAULT = 30;
 const VAULT_ITEM_HISTORY_PAGE_SIZE_MAX = 100;
 const VAULT_ITEM_BODY_LIMIT_BYTES = MAX_VAULT_ITEM_ENCRYPTED_PAYLOAD_BYTES + 16 * 1024;
+const VAULT_FORM_METADATA_BODY_LIMIT_BYTES = 24 * 1024;
+const VAULT_FORM_METADATA_QUERY_BODY_LIMIT_BYTES = 16 * 1024;
+const VAULT_FORM_METADATA_QUERY_LIMIT_PER_ORIGIN = 50;
 const ATTACHMENT_INIT_BODY_LIMIT_BYTES = 16 * 1024;
 const ATTACHMENT_ENVELOPE_BODY_LIMIT_BYTES = MAX_ATTACHMENT_UPLOAD_ENVELOPE_BODY_BYTES;
 const REALTIME_CONNECT_TOKEN_RATE_LIMIT_ATTEMPTS = 30;
@@ -1879,6 +1888,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     if (topic.startsWith('vault.item.')) {
       return realtimeConfig.flags.realtime_delta_vault_v1;
     }
+    if (topic.startsWith('vault.form_metadata.')) {
+      return realtimeConfig.flags.realtime_delta_vault_v1;
+    }
     if (topic.startsWith('vault.history.')) {
       return realtimeConfig.flags.realtime_delta_history_v1;
     }
@@ -1901,6 +1913,9 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
     const record = payload as Record<string, unknown>;
     if (topic.startsWith('vault.item.')) {
       return typeof record.itemId === 'string' ? record.itemId : null;
+    }
+    if (topic.startsWith('vault.form_metadata.')) {
+      return typeof record.metadataId === 'string' ? record.metadataId : null;
     }
     if (topic.startsWith('vault.history.')) {
       return typeof record.itemId === 'string' ? record.itemId : null;
@@ -2064,6 +2079,150 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         changeType: historyRecord.changeType,
         createdAt: historyRecord.createdAt,
       },
+    });
+  }
+
+  function canonicalizeVaultFormMetadataOrigin(origin: string): string | null {
+    return canonicalizeServerOrigin(origin);
+  }
+
+  function isConfirmedVaultFormMetadataConfidence(
+    confidence: StoredVaultFormMetadataRecord['confidence'],
+  ): boolean {
+    return confidence === 'submitted_confirmed' || confidence === 'user_corrected';
+  }
+
+  function isVaultFormMetadataSemanticNoOp(
+    left: StoredVaultFormMetadataRecord,
+    right: StoredVaultFormMetadataRecord,
+  ): boolean {
+    return (
+      left.ownerUserId === right.ownerUserId &&
+      left.itemId === right.itemId &&
+      left.origin === right.origin &&
+      left.formFingerprint === right.formFingerprint &&
+      left.fieldFingerprint === right.fieldFingerprint &&
+      left.frameScope === right.frameScope &&
+      left.fieldRole === right.fieldRole &&
+      left.selectorCss === right.selectorCss &&
+      left.selectorFallbacks.length === right.selectorFallbacks.length &&
+      left.selectorFallbacks.every((value, index) => value === right.selectorFallbacks[index]) &&
+      left.autocompleteToken === right.autocompleteToken &&
+      left.inputType === right.inputType &&
+      left.fieldName === right.fieldName &&
+      left.fieldId === right.fieldId &&
+      left.labelTextNormalized === right.labelTextNormalized &&
+      left.placeholderNormalized === right.placeholderNormalized &&
+      left.confidence === right.confidence &&
+      left.selectorStatus === right.selectorStatus &&
+      left.lastConfirmedAt === right.lastConfirmedAt
+    );
+  }
+
+  function hasVaultFormMetadataStoredChange(
+    left: StoredVaultFormMetadataRecord,
+    right: StoredVaultFormMetadataRecord,
+  ): boolean {
+    return (
+      left.metadataId !== right.metadataId ||
+      left.ownerUserId !== right.ownerUserId ||
+      left.itemId !== right.itemId ||
+      left.origin !== right.origin ||
+      left.formFingerprint !== right.formFingerprint ||
+      left.fieldFingerprint !== right.fieldFingerprint ||
+      left.frameScope !== right.frameScope ||
+      left.fieldRole !== right.fieldRole ||
+      left.selectorCss !== right.selectorCss ||
+      left.selectorFallbacks.length !== right.selectorFallbacks.length ||
+      left.selectorFallbacks.some((value, index) => value !== right.selectorFallbacks[index]) ||
+      left.autocompleteToken !== right.autocompleteToken ||
+      left.inputType !== right.inputType ||
+      left.fieldName !== right.fieldName ||
+      left.fieldId !== right.fieldId ||
+      left.labelTextNormalized !== right.labelTextNormalized ||
+      left.placeholderNormalized !== right.placeholderNormalized ||
+      left.confidence !== right.confidence ||
+      left.selectorStatus !== right.selectorStatus ||
+      left.sourceDeviceId !== right.sourceDeviceId ||
+      left.createdAt !== right.createdAt ||
+      left.updatedAt !== right.updatedAt ||
+      left.lastConfirmedAt !== right.lastConfirmedAt
+    );
+  }
+
+  async function findExistingVaultFormMetadataRecord(input: {
+    itemId: string | null;
+    origin: string;
+    formFingerprint: string;
+    fieldFingerprint: string;
+    fieldRole: StoredVaultFormMetadataRecord['fieldRole'];
+  }): Promise<StoredVaultFormMetadataRecord | null> {
+    const candidates =
+      input.itemId === null
+        ? (
+            await options.storage.vaultFormMetadata.listByOrigin({
+              origin: input.origin,
+              limit: VAULT_FORM_METADATA_QUERY_LIMIT_PER_ORIGIN,
+            })
+          ).records
+        : (
+            await options.storage.vaultFormMetadata.listByItem({
+              itemId: input.itemId,
+              origin: input.origin,
+              limit: VAULT_FORM_METADATA_QUERY_LIMIT_PER_ORIGIN,
+            })
+          ).records;
+    return (
+      candidates.find(
+        (record) =>
+          record.itemId === input.itemId &&
+          record.origin === input.origin &&
+          record.formFingerprint === input.formFingerprint &&
+          record.fieldFingerprint === input.fieldFingerprint &&
+          record.fieldRole === input.fieldRole,
+      ) ?? null
+    );
+  }
+
+  function sortQueriedVaultFormMetadataRecords(input: {
+    records: StoredVaultFormMetadataRecord[];
+    currentUserId: string;
+  }): StoredVaultFormMetadataRecord[] {
+    function rankRecord(record: StoredVaultFormMetadataRecord): number {
+      if (record.selectorStatus === 'retired') {
+        return -1;
+      }
+      if (record.selectorStatus === 'suspect') {
+        return 0;
+      }
+      const isCurrentUserRecord = record.ownerUserId === input.currentUserId;
+      if (record.confidence === 'user_corrected' || record.confidence === 'submitted_confirmed') {
+        return isCurrentUserRecord ? 500 : 400;
+      }
+      if (record.confidence === 'filled') {
+        return isCurrentUserRecord ? 300 : 200;
+      }
+      return 100;
+    }
+    return [...input.records].sort((left, right) => {
+      const leftScore = rankRecord(left);
+      const rightScore = rankRecord(right);
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+      const confirmedDelta = (right.lastConfirmedAt ?? '').localeCompare(left.lastConfirmedAt ?? '');
+      if (confirmedDelta !== 0) {
+        return confirmedDelta;
+      }
+      const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
+      if (updatedDelta !== 0) {
+        return updatedDelta;
+      }
+      const originDelta = left.origin.localeCompare(right.origin);
+      if (originDelta !== 0) {
+        return originDelta;
+      }
+      return left.metadataId.localeCompare(right.metadataId);
     });
   }
 
@@ -8141,6 +8300,182 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       VaultFolderMutationOutputSchema.parse({
         ok: true,
         result: 'success_changed',
+      }),
+    );
+  });
+
+  app.post('/api/extension/form-metadata/upsert', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_FORM_METADATA_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultFormMetadataUpsertInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+
+    const canonicalOrigin = canonicalizeVaultFormMetadataOrigin(parsedInput.data.origin);
+    if (!canonicalOrigin) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    if (parsedInput.data.itemId) {
+      const linkedItem = await options.storage.vaultItems.findByItemId(
+        parsedInput.data.itemId,
+        sessionContext.user.userId,
+      );
+      if (!linkedItem) {
+        return jsonResponse(404, { ok: false, code: 'not_found' });
+      }
+    }
+
+    const nowIso = isoNow(options.clock);
+    const existing = await findExistingVaultFormMetadataRecord({
+      itemId: parsedInput.data.itemId ?? null,
+      origin: canonicalOrigin,
+      formFingerprint: parsedInput.data.formFingerprint,
+      fieldFingerprint: parsedInput.data.fieldFingerprint,
+      fieldRole: parsedInput.data.fieldRole,
+    });
+    const nextRecord: StoredVaultFormMetadataRecord = {
+      metadataId: existing?.metadataId ?? options.idGenerator.nextId('form_metadata'),
+      ownerUserId: sessionContext.user.userId,
+      itemId: parsedInput.data.itemId ?? null,
+      origin: canonicalOrigin,
+      formFingerprint: parsedInput.data.formFingerprint,
+      fieldFingerprint: parsedInput.data.fieldFingerprint,
+      frameScope: parsedInput.data.frameScope,
+      fieldRole: parsedInput.data.fieldRole,
+      selectorCss: parsedInput.data.selectorCss,
+      selectorFallbacks: parsedInput.data.selectorFallbacks,
+      autocompleteToken: parsedInput.data.autocompleteToken ?? null,
+      inputType: parsedInput.data.inputType ?? null,
+      fieldName: parsedInput.data.fieldName ?? null,
+      fieldId: parsedInput.data.fieldId ?? null,
+      labelTextNormalized: parsedInput.data.labelTextNormalized ?? null,
+      placeholderNormalized: parsedInput.data.placeholderNormalized ?? null,
+      confidence: parsedInput.data.confidence,
+      selectorStatus: parsedInput.data.selectorStatus,
+      sourceDeviceId: sessionContext.device.deviceId,
+      createdAt: existing?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+      lastConfirmedAt: isConfirmedVaultFormMetadataConfidence(parsedInput.data.confidence)
+        ? nowIso
+        : existing?.lastConfirmedAt ?? null,
+    };
+
+    if (existing && isVaultFormMetadataSemanticNoOp(existing, nextRecord)) {
+      return jsonResponse(200, VaultFormMetadataRecordSchema.parse(existing));
+    }
+
+    const stored = await options.storage.vaultFormMetadata.upsert(nextRecord);
+    await options.storage.vaultFormMetadata.pruneExcessByOrigin({
+      origin: canonicalOrigin,
+      maxRecords: VAULT_FORM_METADATA_QUERY_LIMIT_PER_ORIGIN,
+    });
+
+    const changed = !existing || hasVaultFormMetadataStoredChange(existing, stored);
+    if (changed) {
+      await publishRealtimeEvent({
+        userId: sessionContext.user.userId,
+        topic: 'vault.form_metadata.upserted',
+        sourceDeviceId: sessionContext.device.deviceId,
+        occurredAt: stored.updatedAt,
+        payload: RealtimeFormMetadataUpsertedPayloadSchema.parse({
+          metadataId: stored.metadataId,
+          ownerUserId: stored.ownerUserId,
+          itemId: stored.itemId,
+          origin: stored.origin,
+          formFingerprint: stored.formFingerprint,
+          fieldFingerprint: stored.fieldFingerprint,
+          fieldRole: stored.fieldRole,
+          confidence: stored.confidence,
+          selectorStatus: stored.selectorStatus,
+          updatedAt: stored.updatedAt,
+        }),
+      });
+    }
+
+    return jsonResponse(200, VaultFormMetadataRecordSchema.parse(stored));
+  });
+
+  app.post('/api/extension/form-metadata/query', async (c) => {
+    const sessionContext = await requireAuthenticatedSession(c.req.raw, {
+      allowExtensionBearer: true,
+    });
+    if (!sessionContext) {
+      return jsonResponse(401, { ok: false, code: 'unauthorized' });
+    }
+    if (sessionContext.authMode !== 'extension_bearer') {
+      return jsonResponse(403, { ok: false, code: 'extension_bearer_required' });
+    }
+
+    const parsedBody = await parseJsonBodyWithLimit<unknown>({
+      request: c.req.raw,
+      maxBytes: VAULT_FORM_METADATA_QUERY_BODY_LIMIT_BYTES,
+      tooLargeCode: 'payload_too_large',
+    });
+    if (!parsedBody.ok) {
+      return parsedBody.response;
+    }
+    const parsedInput = VaultFormMetadataQueryInputSchema.safeParse(parsedBody.body);
+    if (!parsedInput.success) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+
+    const canonicalizedOrigins = parsedInput.data.origins.map((origin) =>
+      canonicalizeVaultFormMetadataOrigin(origin),
+    );
+    if (canonicalizedOrigins.some((origin) => origin === null)) {
+      return jsonResponse(400, { ok: false, code: 'invalid_input' });
+    }
+    const canonicalOrigins = Array.from(new Set(canonicalizedOrigins as string[]));
+
+    const requestedItemId = parsedInput.data.itemId ?? null;
+    if (requestedItemId) {
+      const linkedItem = await options.storage.vaultItems.findByItemId(
+        requestedItemId,
+        sessionContext.user.userId,
+      );
+      if (!linkedItem) {
+        return jsonResponse(404, { ok: false, code: 'not_found' });
+      }
+    }
+
+    const records = await options.storage.vaultFormMetadata.listByOrigins({
+      origins: canonicalOrigins,
+      limitPerOrigin: VAULT_FORM_METADATA_QUERY_LIMIT_PER_ORIGIN,
+    });
+    const filtered = records.filter((record) => {
+      if (record.selectorStatus === 'retired') {
+        return false;
+      }
+      if (!requestedItemId) {
+        return true;
+      }
+      return record.itemId === null || record.itemId === requestedItemId;
+    });
+
+    return jsonResponse(
+      200,
+      VaultFormMetadataListOutputSchema.parse({
+        records: sortQueriedVaultFormMetadataRecords({
+          records: filtered,
+          currentUserId: sessionContext.user.userId,
+        }).map((record) => VaultFormMetadataRecordSchema.parse(record)),
       }),
     );
   });

@@ -1,3 +1,5 @@
+import { matchesQuery } from './runtime-common.js';
+
 export function selectItemIdAfterRefresh(previousItemId, items) {
   if (!Array.isArray(items) || items.length === 0) {
     return null;
@@ -123,6 +125,47 @@ export function shouldRenderVaultSkeleton(input) {
 
 export function shouldUseExpandedLayout(selectedItemId) {
   return typeof selectedItemId === 'string' && selectedItemId.length > 0;
+}
+
+export function shouldPreserveVisibleListDuringWarmup(input) {
+  const warmupState = typeof input?.cacheWarmupState === 'string' ? input.cacheWarmupState : '';
+  const warmupRunning = warmupState === 'running' || warmupState === 'syncing' || warmupState === 'loading_local';
+  const incomingItems = Array.isArray(input?.incomingItems) ? input.incomingItems : [];
+  const visibleItems = Array.isArray(input?.visibleItems) ? input.visibleItems : [];
+  if (!warmupRunning) {
+    return false;
+  }
+  if (incomingItems.length > 0) {
+    return false;
+  }
+  return visibleItems.length > 0;
+}
+
+export function filterPopupItemsLocally(input) {
+  const items = Array.isArray(input?.items) ? input.items : [];
+  const typeFilter = typeof input?.typeFilter === 'string' ? input.typeFilter : 'all';
+  const suggestedOnly = input?.suggestedOnly === true;
+  return items.filter((item) => {
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    if (typeFilter === 'trash') {
+      if (item.isDeleted !== true) {
+        return false;
+      }
+      return matchesQuery(item, input?.query ?? '');
+    }
+    if (item.isDeleted === true) {
+      return false;
+    }
+    if (typeFilter !== 'all' && item.itemType !== typeFilter) {
+      return false;
+    }
+    if (suggestedOnly && item?.matchFlags?.exactOrigin !== true && Number(item?.matchFlags?.domainScore ?? 0) <= 0) {
+      return false;
+    }
+    return matchesQuery(item, input?.query ?? '');
+  });
 }
 
 const POPUP_DETAIL_DRAFT_TTL_MS = 15 * 60 * 1000;

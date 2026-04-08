@@ -3,12 +3,14 @@ import { describe, expect, test } from 'vitest';
 import {
   buildPersistedPopupUiState,
   buildCredentialMonogram,
+  filterPopupItemsLocally,
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
   hasSameItemOrder,
   hasSameRenderableRows,
   shouldRenderVaultSkeleton,
+  shouldPreserveVisibleListDuringWarmup,
   toNavigableUrl,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
@@ -376,5 +378,131 @@ describe('popup view model helpers', () => {
       detailFolderId: '',
       detailDraft: null,
     });
+  });
+
+  test('filters popup items locally for search, suggestion, and type scope', () => {
+    const items = [
+      {
+        itemId: 'a',
+        itemType: 'login',
+        title: 'Amazon',
+        subtitle: 'user@example.com',
+        searchText: 'marketplace',
+        username: 'user@example.com',
+        urls: ['https://amazon.com'],
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+        isDeleted: false,
+      },
+      {
+        itemId: 'b',
+        itemType: 'login',
+        title: 'GitHub',
+        subtitle: 'dev@example.com',
+        searchText: 'code hosting',
+        username: 'dev@example.com',
+        urls: ['https://github.com/login'],
+        matchFlags: { exactOrigin: true, domainScore: 5 },
+        isDeleted: false,
+      },
+      {
+        itemId: 'c',
+        itemType: 'card',
+        title: 'Nubank',
+        subtitle: '•••• 4242',
+        searchText: 'credit card',
+        urls: [],
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+        isDeleted: false,
+      },
+    ];
+
+    expect(
+      filterPopupItemsLocally({
+        items,
+        query: 'git',
+        typeFilter: 'all',
+        suggestedOnly: false,
+      }).map((item) => item.itemId),
+    ).toEqual(['b']);
+
+    expect(
+      filterPopupItemsLocally({
+        items,
+        query: '',
+        typeFilter: 'all',
+        suggestedOnly: true,
+      }).map((item) => item.itemId),
+    ).toEqual(['b']);
+
+    expect(
+      filterPopupItemsLocally({
+        items,
+        query: '',
+        typeFilter: 'card',
+        suggestedOnly: false,
+      }).map((item) => item.itemId),
+    ).toEqual(['c']);
+  });
+
+  test('keeps only deleted items for trash scope local filtering', () => {
+    const items = [
+      {
+        itemId: 'live',
+        itemType: 'login',
+        title: 'Live',
+        subtitle: 'user@example.com',
+        searchText: 'live',
+        urls: ['https://example.com'],
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+        isDeleted: false,
+      },
+      {
+        itemId: 'deleted',
+        itemType: 'login',
+        title: 'Deleted bank',
+        subtitle: 'archived',
+        searchText: 'archived bank',
+        urls: ['https://bank.example.com'],
+        matchFlags: { exactOrigin: false, domainScore: 0 },
+        isDeleted: true,
+      },
+    ];
+
+    expect(
+      filterPopupItemsLocally({
+        items,
+        query: 'bank',
+        typeFilter: 'trash',
+        suggestedOnly: false,
+      }).map((item) => item.itemId),
+    ).toEqual(['deleted']);
+  });
+
+  test('preserves visible list when warmup is still running and remote list is temporarily empty', () => {
+    expect(
+      shouldPreserveVisibleListDuringWarmup({
+        cacheWarmupState: 'syncing',
+        incomingItems: [],
+        visibleItems: [{ itemId: 'a' }],
+      }),
+    ).toBe(true);
+  });
+
+  test('does not preserve visible list when warmup is done or remote already has items', () => {
+    expect(
+      shouldPreserveVisibleListDuringWarmup({
+        cacheWarmupState: 'completed',
+        incomingItems: [],
+        visibleItems: [{ itemId: 'a' }],
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldPreserveVisibleListDuringWarmup({
+        cacheWarmupState: 'syncing',
+        incomingItems: [{ itemId: 'remote' }],
+        visibleItems: [{ itemId: 'a' }],
+      }),
+    ).toBe(false);
   });
 });

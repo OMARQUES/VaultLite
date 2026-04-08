@@ -494,6 +494,51 @@ export function createExtensionApiClient(serverOrigin) {
         }),
       });
     },
+    async upsertFormMetadata(input = {}) {
+      return requestJson(`${base}/api/extension/form-metadata/upsert`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          itemId:
+            typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : null,
+          origin: input?.origin,
+          formFingerprint: input?.formFingerprint,
+          fieldFingerprint: input?.fieldFingerprint,
+          frameScope: input?.frameScope,
+          fieldRole: input?.fieldRole,
+          selectorCss: input?.selectorCss,
+          selectorFallbacks: Array.isArray(input?.selectorFallbacks) ? input.selectorFallbacks : [],
+          autocompleteToken:
+            typeof input?.autocompleteToken === 'string' && input.autocompleteToken.length > 0
+              ? input.autocompleteToken
+              : null,
+          inputType: typeof input?.inputType === 'string' && input.inputType.length > 0 ? input.inputType : null,
+          fieldName: typeof input?.fieldName === 'string' && input.fieldName.length > 0 ? input.fieldName : null,
+          fieldId: typeof input?.fieldId === 'string' && input.fieldId.length > 0 ? input.fieldId : null,
+          labelTextNormalized:
+            typeof input?.labelTextNormalized === 'string' && input.labelTextNormalized.length > 0
+              ? input.labelTextNormalized
+              : null,
+          placeholderNormalized:
+            typeof input?.placeholderNormalized === 'string' && input.placeholderNormalized.length > 0
+              ? input.placeholderNormalized
+              : null,
+          confidence: input?.confidence,
+          selectorStatus: input?.selectorStatus,
+        }),
+      });
+    },
+    async queryFormMetadata(input = {}) {
+      return requestJson(`${base}/api/extension/form-metadata/query`, {
+        method: 'POST',
+        headers: buildHeaders({ bearerToken: input?.bearerToken }),
+        body: JSON.stringify({
+          origins: Array.isArray(input?.origins) ? input.origins : [],
+          itemId:
+            typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : undefined,
+        }),
+      });
+    },
     async initAttachmentUpload(input = {}) {
       return requestJson(`${base}/api/extension/attachments/uploads/init`, {
         method: 'POST',

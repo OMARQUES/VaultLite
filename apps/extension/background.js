@@ -1,4 +1,6 @@
 import {
+  POPUP_LAST_READY_LIST_STORAGE_KEY,
+  POPUP_LAST_STATE_STORAGE_KEY,
   STORAGE_LOCAL_CONFIG_KEY,
   STORAGE_LOCAL_TRUSTED_KEY,
   STORAGE_SESSION_KEY,
@@ -47,6 +49,24 @@ import {
   saveExtensionVaultCache,
   writeExtensionVaultCachePending,
 } from './local-vault-cache.js';
+import {
+  sameLocalUnlockKdfProfile,
+  shouldRewriteLocalUnlockEnvelope,
+  shouldScheduleLocalUnlockEnvelopeMaintenance,
+} from './local-unlock-maintenance.js';
+import {
+  applyQueriedFormMetadataRecords,
+  buildFormMetadataCacheIdentity,
+  canonicalizeFormMetadataOrigin,
+  createEmptyFormMetadataCache,
+  findCachedFormMetadataRecord,
+  getCachedFormMetadataRecords,
+  getStaleFormMetadataOrigins,
+  markCachedFormMetadataRecordSuspect,
+  normalizeFormMetadataCache,
+  shouldUpsertFormMetadataRecord,
+  upsertFormMetadataRecordInCache,
+} from './form-metadata-cache.js';
 
 const CREDENTIAL_CACHE_TTL_MS = 10 * 60 * 1000;
 const RESTORE_THROTTLE_MS = 15_000;
@@ -62,6 +82,8 @@ const STORAGE_LINK_PAIRING_SESSION_KEY = 'vaultlite.link_pairing_session.v1';
 const STORAGE_SESSION_LIST_CACHE_KEY = 'vaultlite.session_list_cache.v1';
 const STORAGE_SESSION_TOMBSTONE_CACHE_KEY = 'vaultlite.session_tombstone_cache.v1';
 const STORAGE_SESSION_FOLDER_STATE_CACHE_KEY = 'vaultlite.session_folder_state_cache.v1';
+const STORAGE_SESSION_FORM_METADATA_CACHE_KEY = 'vaultlite.session_form_metadata_cache.v1';
+const STORAGE_LOCAL_FORM_METADATA_CACHE_KEY = 'vaultlite.form_metadata_cache.v1';
 const STORAGE_ICON_DOMAIN_REGISTRATION_KEY = 'vaultlite.icon_domain_registration.v1';
 const ICON_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const ICON_DISCOVERY_RETRY_MS = 15 * 60 * 1000;
@@ -86,6 +108,7 @@ const UNLOCK_GRANT_RETRY_COOLDOWN_MS = 10_000;
 const UNLOCK_GRANT_APPROVAL_COOLDOWN_MS = 2_000;
 const UNLOCK_GRANT_APPROVAL_ALARM_NAME = 'vaultlite.unlock_grant_approval.v1';
 const UNLOCK_GRANT_APPROVAL_ALARM_PERIOD_MINUTES = 0.5;
+const LOCAL_UNLOCK_ENVELOPE_MAINTENANCE_DELAY_MS = 15_000;
 const UNLOCK_GRANT_DEFAULT_INTERVAL_SECONDS = 5;
 const UNLOCK_GRANT_TTL_SECONDS = 120;
 const UNLOCK_GRANT_STATUS_SLOWDOWN_SECONDS = 5;
@@ -96,6 +119,10 @@ const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.password_gen
 const PASSWORD_GENERATOR_HISTORY_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
 const FOLDER_STATE_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
 const FOLDER_STATE_REVALIDATION_COOLDOWN_MS = 15_000;
+const FORM_METADATA_SYNC_COOLDOWN_MS = 10 * 60 * 1000;
+const FORM_METADATA_QUERY_LIMIT_PER_ORIGIN = 50;
+const FORM_METADATA_CACHE_PERSIST_DEBOUNCE_MS = 750;
+const REALTIME_FORM_METADATA_RESYNC_DEBOUNCE_MS = 1_500;
 const ITEM_ATTACHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
@@ -111,6 +138,7 @@ const REALTIME_KEEPALIVE_INTERVAL_MS = 20_000;
 const REALTIME_METADATA_REFRESH_INTERVAL_MS = 5 * 60_000;
 const REALTIME_POPUP_NOTIFY_DEBOUNCE_MS = 150;
 const REALTIME_POPUP_SIGNAL_STORAGE_KEY = 'vaultlite.realtime.popup.signal.v1';
+const POPUP_RECONCILE_DEBOUNCE_MS = 60;
 const REALTIME_ICONS_RESYNC_DEBOUNCE_MS = 1_500;
 const REALTIME_ICONS_RESYNC_COOLDOWN_MS = 10_000;
 const REALTIME_CURSOR_PERSIST_DEBOUNCE_MS = 2_000;
@@ -167,6 +195,13 @@ let folderStateCache = {
   folders: [],
   assignments: [],
 };
+let formMetadataCache = createEmptyFormMetadataCache();
+let formMetadataCacheLoaded = false;
+let formMetadataCachePersistTimer = null;
+let formMetadataCachePersistInFlight = null;
+let formMetadataQueryInFlightByKey = new Map();
+let formMetadataQueryPendingRevalidateByKey = new Map();
+let formMetadataUpsertInFlightByKey = new Map();
 let sessionListProjectionCache = {
   cacheKey: null,
   loadedAt: 0,
@@ -222,6 +257,7 @@ let unlockGrantApproveInFlight = null;
 let unlockGrantConsumeInFlight = null;
 let lastUnlockGrantAttemptAt = 0;
 let lastUnlockGrantApproveAttemptAt = 0;
+let localUnlockEnvelopeMaintenanceTimer = null;
 let recoverRetryState = {
   attempts: 0,
   nextAttemptAt: 0,
@@ -268,6 +304,10 @@ const realtimeConnection = {
 };
 let realtimePopupNotifyTimer = null;
 const realtimePopupNotifyDomains = new Set();
+let realtimeFormMetadataResyncTimer = null;
+let realtimeFormMetadataResyncInFlight = null;
+let realtimeFormMetadataResyncQueued = false;
+const realtimeFormMetadataResyncOrigins = new Set();
 let realtimeIconsResyncTimer = null;
 let realtimeIconsResyncInFlight = null;
 let realtimeIconsResyncQueued = false;
@@ -275,6 +315,19 @@ let realtimeIconsResyncIncludeManual = false;
 let lastRealtimeIconsResyncAt = 0;
 const realtimeIconsResyncDomains = new Set();
 let realtimeCursorPersistTimer = null;
+let popupSnapshotRevision = 0;
+let popupReconcileTimer = null;
+let popupReconcileInFlight = null;
+const popupReconcilePendingDomains = new Set();
+let popupReconcileSelectedItemId = null;
+let popupSyncState = {
+  session: 'idle',
+  vault: 'idle',
+  folders: 'idle',
+  icons: 'idle',
+  history: 'idle',
+  attachments: 'idle',
+};
 
 function sessionStorageArea() {
   if (!chrome.storage || !chrome.storage.session) {
@@ -419,28 +472,6 @@ function localUnlockPayloadFromTrustedState(accountKey = null) {
   };
 }
 
-function sameLocalUnlockKdfProfile(leftProfile, rightProfile) {
-  if (!leftProfile || !rightProfile) {
-    return false;
-  }
-  const leftTagLength = Number.isFinite(leftProfile.tagLength)
-    ? Math.trunc(Number(leftProfile.tagLength))
-    : Number.isFinite(leftProfile.dkLen)
-      ? Math.trunc(Number(leftProfile.dkLen))
-      : 32;
-  const rightTagLength = Number.isFinite(rightProfile.tagLength)
-    ? Math.trunc(Number(rightProfile.tagLength))
-    : Number.isFinite(rightProfile.dkLen)
-      ? Math.trunc(Number(rightProfile.dkLen))
-      : 32;
-  return (
-    leftProfile.memory === rightProfile.memory &&
-    leftProfile.passes === rightProfile.passes &&
-    leftProfile.parallelism === rightProfile.parallelism &&
-    leftTagLength === rightTagLength
-  );
-}
-
 async function maybeUpgradeLocalUnlockEnvelopeProfile(password) {
   if (!trustedState || typeof password !== 'string' || password.length === 0) {
     return;
@@ -458,9 +489,11 @@ async function maybeUpgradeLocalUnlockEnvelopeProfile(password) {
   } catch {
     calibratedProfile = currentProfile;
   }
-  const shouldRewriteEnvelope =
-    !sameLocalUnlockKdfProfile(currentProfile, calibratedProfile) ||
-    !trustedState.localUnlockEnvelope?.kdfProfile;
+  const shouldRewriteEnvelope = shouldRewriteLocalUnlockEnvelope({
+    currentProfile,
+    nextProfile: calibratedProfile,
+    envelopeHasProfile: Boolean(trustedState.localUnlockEnvelope?.kdfProfile),
+  });
   if (!shouldRewriteEnvelope) {
     return;
   }
@@ -1170,6 +1203,30 @@ function refreshFromRealtimeDomains(domains) {
       schedulePopupRealtimeNotification(['folders']);
     });
   }
+  if (domains.includes('form_metadata')) {
+    schedulePopupRealtimeNotification(['form_metadata']);
+  }
+}
+
+function clearLocalUnlockEnvelopeMaintenanceTimer() {
+  if (localUnlockEnvelopeMaintenanceTimer !== null) {
+    clearTimeout(localUnlockEnvelopeMaintenanceTimer);
+    localUnlockEnvelopeMaintenanceTimer = null;
+  }
+}
+
+function scheduleLocalUnlockEnvelopeMaintenance(password) {
+  clearLocalUnlockEnvelopeMaintenanceTimer();
+  if (!shouldScheduleLocalUnlockEnvelopeMaintenance({ trustedState, password })) {
+    return;
+  }
+  localUnlockEnvelopeMaintenanceTimer = setTimeout(() => {
+    localUnlockEnvelopeMaintenanceTimer = null;
+    if (state.phase !== 'ready') {
+      return;
+    }
+    void maybeUpgradeLocalUnlockEnvelopeProfile(password);
+  }, LOCAL_UNLOCK_ENVELOPE_MAINTENANCE_DELAY_MS);
 }
 
 function handleRealtimeServerEvent(eventEnvelope) {
@@ -1230,6 +1287,18 @@ function handleRealtimeServerEvent(eventEnvelope) {
       vaultItemHistoryCacheByItemId.clear();
     }
     schedulePopupRealtimeNotification(['vault_history']);
+    return;
+  }
+  if (topic.startsWith('vault.form_metadata.')) {
+    const origin =
+      typeof eventEnvelope?.payload?.origin === 'string' && eventEnvelope.payload.origin.trim().length > 0
+        ? eventEnvelope.payload.origin.trim()
+        : null;
+    if (origin) {
+      queueRealtimeFormMetadataResync({
+        origins: [origin],
+      });
+    }
     return;
   }
   if (topic.startsWith('vault.folder.')) {
@@ -1527,6 +1596,19 @@ async function reconcileUnlockGrantApprovalAlarm() {
 }
 
 function clearSensitiveMemory() {
+  clearLocalUnlockEnvelopeMaintenanceTimer();
+  clearPopupReconcileTimer();
+  popupReconcilePendingDomains.clear();
+  popupReconcileSelectedItemId = null;
+  popupSyncState = {
+    session: 'idle',
+    vault: 'idle',
+    folders: 'idle',
+    icons: 'idle',
+    history: 'idle',
+    attachments: 'idle',
+  };
+  bumpPopupSnapshotRevision();
   unlockedContext = null;
   void clearPersistedUnlockedContext();
   clearLinkPairingSession();
@@ -1657,6 +1739,21 @@ async function clearTrusted() {
   await chrome.storage.local.remove(STORAGE_LOCAL_TRUSTED_KEY);
 }
 
+async function clearPersistedPopupSnapshotsBestEffort() {
+  const sessionStorage = sessionStorageArea();
+  if (!sessionStorage) {
+    return;
+  }
+  try {
+    await sessionStorage.remove([
+      POPUP_LAST_STATE_STORAGE_KEY,
+      POPUP_LAST_READY_LIST_STORAGE_KEY,
+    ]);
+  } catch {
+    // Best effort only.
+  }
+}
+
 async function persistSessionToken() {
   const sessionStorage = sessionStorageArea();
   if (!sessionStorage) {
@@ -1722,6 +1819,7 @@ async function clearTrustedStateForReconnect(reasonMessage) {
   await clearCredentialCacheForIdentityBestEffort(cacheIdentity);
   await clearPersistedSessionListProjectionCacheBestEffort();
   await clearPasswordGeneratorHistoryCache();
+  await clearFormMetadataCache();
   clearSensitiveMemory();
   setPhase('pairing_required', reasonMessage);
 }
@@ -1769,6 +1867,14 @@ function mapKnownErrorToMessage(errorCode) {
       return 'Could not connect to VaultLite server. Verify URL and local API status.';
     case 'server_origin_mismatch':
       return 'Server URL does not match runtime metadata. Verify your API/Web environment.';
+    case 'unsupported_local_unlock_version':
+      return 'Trusted local unlock data is incompatible. Reconnect this extension from web settings.';
+    case 'trusted_state_invalid_auth_salt':
+      return 'Trusted local state is corrupted. Reconnect this extension from web settings.';
+    case 'argon2_memory_budget_exceeded':
+      return 'This browser could not allocate enough memory to unlock locally. Close other tabs and try again.';
+    case 'argon2_runtime_unavailable':
+      return 'Local unlock crypto is unavailable in this browser context. Reload the extension and try again.';
     default:
       return null;
   }
@@ -1782,10 +1888,24 @@ function describeError(error, fallbackCode = 'unexpected_error') {
         ? error.message
         : fallbackCode;
   const mappedMessage = mapKnownErrorToMessage(errorCode);
+  const rawMessage = extractErrorMessage(error);
   return {
     code: errorCode,
-    message: mappedMessage ?? 'Operation failed. Try again.',
+    message: mappedMessage ?? rawMessage ?? 'Operation failed. Try again.',
   };
+}
+
+function extractErrorMessage(error) {
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return error.trim();
+  }
+  if (typeof error?.message === 'string' && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error?.cause?.message === 'string' && error.cause.message.trim().length > 0) {
+    return error.cause.message.trim();
+  }
+  return null;
 }
 
 function isCredentialDecryptFailure(error) {
@@ -1842,6 +1962,10 @@ function snapshotForUi() {
     cacheWarmupError,
     listSource: projectionCacheDiagnostics.lastListSource,
     bridgeUnavailable,
+    popupSyncState: {
+      ...popupSyncState,
+      revision: popupSnapshotRevision,
+    },
     linkRequest,
   };
 }
@@ -1866,6 +1990,177 @@ function shouldRefreshSessionAfterUnlock(previousPhase) {
     return true;
   }
   return isSessionNearExpiry(60_000);
+}
+
+function bumpPopupSnapshotRevision() {
+  popupSnapshotRevision += 1;
+}
+
+function popupSyncStateSnapshot() {
+  return {
+    ...popupSyncState,
+  };
+}
+
+function normalizePopupReconcileDomains(domains) {
+  const allowed = new Set(['session', 'vault', 'folders', 'icons', 'history', 'attachments']);
+  const input = Array.isArray(domains) ? domains : [];
+  return Array.from(
+    new Set(
+      input
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => allowed.has(entry)),
+    ),
+  );
+}
+
+function updatePopupSyncDomains(domains, nextStatus) {
+  const normalizedDomains = normalizePopupReconcileDomains(domains);
+  if (normalizedDomains.length === 0) {
+    return false;
+  }
+  let changed = false;
+  for (const domain of normalizedDomains) {
+    if (popupSyncState[domain] !== nextStatus) {
+      popupSyncState[domain] = nextStatus;
+      changed = true;
+    }
+  }
+  if (changed) {
+    bumpPopupSnapshotRevision();
+  }
+  return changed;
+}
+
+async function ensurePopupSnapshotLocalCaches(input = {}) {
+  const skipCredentialHydration = input?.skipCredentialHydration === true;
+  const skipProjectionHydration = input?.skipProjectionHydration === true;
+  if (credentialsCache.credentials.length === 0) {
+    const projectionLoaded = skipProjectionHydration ? sessionListProjectionCache.items.length > 0 : await loadSessionListProjectionCacheBestEffort();
+    if (skipCredentialHydration) {
+      // Fast-path snapshots must not force the full encrypted vault cache into memory.
+    } else if (projectionLoaded) {
+      void loadCredentialCacheFromLocalBestEffort();
+    } else {
+      await loadCredentialCacheFromLocalBestEffort();
+    }
+  }
+  if (normalizeTypeFilter(input.typeFilter) === 'trash') {
+    await loadSessionTombstoneCacheBestEffort();
+  }
+  const hasFolderCache =
+    Array.isArray(folderStateCache.folders) &&
+    Array.isArray(folderStateCache.assignments) &&
+    (folderStateCache.folders.length > 0 || folderStateCache.assignments.length > 0);
+  if (!hasFolderCache && state.phase === 'ready') {
+    await loadFolderStateCacheBestEffort();
+  }
+}
+
+function popupStaleFlags(input = {}) {
+  const selectedItemId =
+    typeof input?.selectedItemId === 'string' && input.selectedItemId.trim().length > 0
+      ? input.selectedItemId.trim()
+      : null;
+  const hasFolderCache =
+    Array.isArray(folderStateCache.folders) &&
+    Array.isArray(folderStateCache.assignments) &&
+    (folderStateCache.folders.length > 0 || folderStateCache.assignments.length > 0);
+  return {
+    vault: !(credentialsCache.credentials.length > 0 && isCredentialCacheFresh()),
+    folders:
+      !hasFolderCache ||
+      !Number.isFinite(folderStateCache.loadedAt) ||
+      Date.now() - folderStateCache.loadedAt >= FOLDER_STATE_SYNC_COOLDOWN_MS,
+    icons:
+      canonicalIconCacheByDomain.size === 0 &&
+      Object.keys(manualIconMap).length === 0,
+    history: selectedItemId ? !vaultItemHistoryCacheByItemId.has(selectedItemId) : true,
+    attachments: selectedItemId ? cachedItemAttachments(selectedItemId) === null : true,
+  };
+}
+
+async function getPopupSnapshotInternal(input = {}) {
+  await ensurePopupSnapshotLocalCaches(input);
+
+  const explicitPageUrl = typeof input.pageUrl === 'string' ? input.pageUrl : '';
+  let activePageUrl = explicitPageUrl;
+  if (!activePageUrl) {
+    const activeTab = await fetchActiveTab();
+    activePageUrl = activeTab?.tabUrl ?? '';
+  }
+  const pageEligible = isPageUrlEligibleForFill(activePageUrl);
+  const normalizedTypeFilter = normalizeTypeFilter(input.typeFilter);
+
+  let projectedItems =
+    credentialsCache.credentials.length > 0
+      ? projectCredentialsForPage(activePageUrl)
+      : projectCredentialsFromSessionCacheForPage(activePageUrl);
+  const projectedTombstones = projectTombstonesForList();
+  let items =
+    normalizedTypeFilter === 'trash'
+      ? filterProjectedTombstones({
+          items: projectedTombstones,
+          query: input.query,
+          typeFilter: normalizedTypeFilter,
+        }).sort((left, right) => {
+          const leftDeletedAt = Date.parse(String(left?.deletedAt ?? ''));
+          const rightDeletedAt = Date.parse(String(right?.deletedAt ?? ''));
+          const safeLeft = Number.isFinite(leftDeletedAt) ? leftDeletedAt : 0;
+          const safeRight = Number.isFinite(rightDeletedAt) ? rightDeletedAt : 0;
+          if (safeRight !== safeLeft) {
+            return safeRight - safeLeft;
+          }
+          return String(left?.itemId ?? '').localeCompare(String(right?.itemId ?? ''));
+        })
+      : filterProjectedCredentials({
+          items: projectedItems,
+          query: input.query,
+          typeFilter: normalizedTypeFilter,
+          suggestedOnly: input.suggestedOnly,
+        }).sort(sortProjectedCredentials);
+
+  items = applyCachedIconsToProjection(items);
+  const selectedItemId =
+    typeof input?.selectedItemId === 'string' && input.selectedItemId.trim().length > 0
+      ? input.selectedItemId.trim()
+      : null;
+  const selectedItem =
+    selectedItemId && Array.isArray(items) ? items.find((entry) => entry?.itemId === selectedItemId) ?? null : null;
+
+  return ok({
+    source: 'local_cache',
+    stale: popupStaleFlags({ selectedItemId }),
+    syncState: popupSyncStateSnapshot(),
+    revision: popupSnapshotRevision,
+    state: snapshotForUi(),
+    page: {
+      url: activePageUrl,
+      eligible: pageEligible,
+      exactMatchCount: items.filter((entry) => entry?.matchFlags?.exactOrigin === true).length,
+    },
+    items,
+    folders: Array.isArray(folderStateCache.folders) ? folderStateCache.folders : [],
+    assignments: Array.isArray(folderStateCache.assignments) ? folderStateCache.assignments : [],
+    etag: typeof folderStateCache.etag === 'string' ? folderStateCache.etag : null,
+    selectedItem,
+  });
+}
+
+async function getPopupSnapshotForUnlockInternal(input = {}) {
+  await loadFolderStateCacheBestEffort();
+  return getPopupSnapshotInternal({
+    ...input,
+    skipProjectionHydration: true,
+    skipCredentialHydration: true,
+  });
+}
+
+function clearPopupReconcileTimer() {
+  if (popupReconcileTimer !== null) {
+    clearTimeout(popupReconcileTimer);
+    popupReconcileTimer = null;
+  }
 }
 
 function extensionCacheIdentity() {
@@ -2573,7 +2868,9 @@ async function resetTrustedStateInternal() {
   });
   await clearCredentialCacheForIdentityBestEffort(cacheIdentity);
   await clearPersistedSessionListProjectionCacheBestEffort();
+  await clearFormMetadataCache();
   clearSensitiveMemory();
+  await clearPersistedPopupSnapshotsBestEffort();
   await clearTrusted();
   try {
     await reconcileAutoPairBridgeScript();
@@ -2901,6 +3198,7 @@ async function setServerUrlInternal(rawServerUrl) {
     await clearLinkPairingSessionPersisted();
     const previousWebOrigin = deriveWebOriginFromServerOrigin(previousServerOrigin);
     await revokeOriginPermissions([previousServerOrigin, previousWebOrigin]);
+    await clearFormMetadataCache();
   }
   state.deploymentFingerprint = metadata?.deploymentFingerprint ?? state.deploymentFingerprint;
   applyRealtimeRuntimeMetadata(metadata);
@@ -3569,6 +3867,15 @@ async function performCredentialCacheWarmup(options = {}) {
     cacheWarmupState = 'loading_local';
     cacheWarmupError = null;
     return ok();
+  }
+
+  if (!force && preferLocalCache && credentialsCache.credentials.length === 0) {
+    const localLoaded = await loadCredentialCacheFromLocalBestEffort();
+    if (localLoaded || credentialsCache.credentials.length > 0) {
+      cacheWarmupState = 'ready_local';
+      cacheWarmupError = null;
+      return ok();
+    }
   }
 
   const apiClient = currentApiClient();
@@ -5597,7 +5904,10 @@ async function listCredentialsInternal(input = {}) {
 }
 
 async function fillCredentialInternal(itemId) {
-  const cacheResult = await refreshCredentialCache();
+  const cacheResult = await refreshCredentialCache({
+    awaitCompletion: false,
+    preferLocalCache: true,
+  });
   if (!cacheResult.ok) {
     return cacheResult;
   }
@@ -5625,6 +5935,15 @@ async function fillCredentialInternal(itemId) {
   }
 
   try {
+    const formMetadataResponse = await queryFormMetadataInternal({
+      origins: [activeTab.tabUrl],
+      itemId,
+      awaitCompletion: false,
+    });
+    const fillMetadataRecords = formMetadataResponse.ok
+      ? selectFillCandidateFormMetadataRecords(formMetadataResponse.records)
+      : [];
+
     await chrome.scripting.executeScript({
       target: { tabId: activeTab.tabId, allFrames: false },
       files: ['content-script.js'],
@@ -5638,14 +5957,39 @@ async function fillCredentialInternal(itemId) {
     const fillResponse = await chrome.tabs.sendMessage(activeTab.tabId, {
       type: 'vaultlite.fill',
       expectedPageUrl: activeTab.tabUrl,
+      itemId,
       credential: {
         username: targetCredential.username,
         password: targetCredential.password,
       },
+      formMetadataRecords: fillMetadataRecords,
     });
 
     if (!fillResponse || typeof fillResponse.result !== 'string') {
       return ok({ result: 'manual_fill_unavailable' });
+    }
+
+    if (fillResponse.result === 'filled' && fillResponse.telemetry && typeof fillResponse.telemetry === 'object') {
+      try {
+        await applyFormMetadataTelemetryInternal({
+          itemId,
+          senderOrigin: canonicalizeFormMetadataOrigin(activeTab.tabUrl),
+          heuristicObservations: Array.isArray(fillResponse.telemetry.heuristicObservations)
+            ? fillResponse.telemetry.heuristicObservations
+            : [],
+          fillObservations: Array.isArray(fillResponse.telemetry.fillObservations)
+            ? fillResponse.telemetry.fillObservations
+            : [],
+          suspectRecords: Array.isArray(fillResponse.telemetry.suspectRecords)
+            ? fillResponse.telemetry.suspectRecords
+            : [],
+          retiredRecords: Array.isArray(fillResponse.telemetry.retiredRecords)
+            ? fillResponse.telemetry.retiredRecords
+            : [],
+        });
+      } catch {
+        // Preserve manual fill success even if metadata sync is temporarily unavailable.
+      }
     }
 
     return ok({ result: fillResponse.result });
@@ -5655,7 +5999,9 @@ async function fillCredentialInternal(itemId) {
 }
 
 async function getCredentialFieldInternal(itemId, field) {
-  const cacheResult = await refreshCredentialCache();
+  const cacheResult = await refreshCredentialCache({
+    preferLocalCache: true,
+  });
   if (!cacheResult.ok) {
     return cacheResult;
   }
@@ -6124,6 +6470,610 @@ async function persistFolderStateCacheBestEffort() {
   }
 }
 
+function currentFormMetadataCacheIdentityKey() {
+  return buildFormMetadataCacheIdentity({
+    deploymentFingerprint: state.deploymentFingerprint ?? trustedState?.deploymentFingerprint ?? null,
+    userId: state.userId ?? null,
+    username: state.username ?? trustedState?.username ?? null,
+    deviceId: state.deviceId ?? trustedState?.deviceId ?? null,
+  });
+}
+
+function snapshotFormMetadataCacheForStorage() {
+  return normalizeFormMetadataCache(formMetadataCache);
+}
+
+function formMetadataQueryResult(input = {}) {
+  return ok({
+    records: getCachedFormMetadataRecords(formMetadataCache, {
+      origins: Array.isArray(input.origins) ? input.origins : [],
+      itemId: typeof input.itemId === 'string' ? input.itemId : null,
+      currentUserId: state.userId ?? null,
+    }),
+    cached: input.cached !== false,
+  });
+}
+
+function scheduleFormMetadataCachePersist() {
+  if (formMetadataCachePersistTimer !== null) {
+    clearTimeout(formMetadataCachePersistTimer);
+  }
+  formMetadataCachePersistTimer = setTimeout(() => {
+    formMetadataCachePersistTimer = null;
+    if (formMetadataCachePersistInFlight) {
+      return;
+    }
+    const payload = snapshotFormMetadataCacheForStorage();
+    formMetadataCachePersistInFlight = (async () => {
+      const sessionStorage = sessionStorageArea();
+      if (sessionStorage) {
+        try {
+          await sessionStorage.set({
+            [STORAGE_SESSION_FORM_METADATA_CACHE_KEY]: payload,
+          });
+        } catch {
+          // Best effort only.
+        }
+      }
+      try {
+        await chrome.storage.local.set({
+          [STORAGE_LOCAL_FORM_METADATA_CACHE_KEY]: payload,
+        });
+      } catch {
+        // Best effort only.
+      }
+    })().finally(() => {
+      formMetadataCachePersistInFlight = null;
+    });
+  }, FORM_METADATA_CACHE_PERSIST_DEBOUNCE_MS);
+}
+
+async function hydrateFormMetadataCacheFromStorage() {
+  if (formMetadataCacheLoaded) {
+    return;
+  }
+  formMetadataCacheLoaded = true;
+  const sessionStorage = sessionStorageArea();
+  let sessionCache = createEmptyFormMetadataCache();
+  let localCache = createEmptyFormMetadataCache();
+  if (sessionStorage) {
+    try {
+      const stored = await sessionStorage.get(STORAGE_SESSION_FORM_METADATA_CACHE_KEY);
+      sessionCache = normalizeFormMetadataCache(stored?.[STORAGE_SESSION_FORM_METADATA_CACHE_KEY]);
+    } catch {
+      sessionCache = createEmptyFormMetadataCache();
+    }
+  }
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_LOCAL_FORM_METADATA_CACHE_KEY);
+    localCache = normalizeFormMetadataCache(stored?.[STORAGE_LOCAL_FORM_METADATA_CACHE_KEY]);
+  } catch {
+    localCache = createEmptyFormMetadataCache();
+  }
+  const expectedIdentityKey = currentFormMetadataCacheIdentityKey();
+  const validSessionCache =
+    !expectedIdentityKey || !sessionCache.identityKey || sessionCache.identityKey === expectedIdentityKey
+      ? sessionCache
+      : createEmptyFormMetadataCache();
+  const validLocalCache =
+    !expectedIdentityKey || !localCache.identityKey || localCache.identityKey === expectedIdentityKey
+      ? localCache
+      : createEmptyFormMetadataCache();
+  const hasSessionOrigins = Object.keys(validSessionCache.origins ?? {}).length > 0;
+  const hasLocalOrigins = Object.keys(validLocalCache.origins ?? {}).length > 0;
+  formMetadataCache = hasSessionOrigins ? validSessionCache : hasLocalOrigins ? validLocalCache : createEmptyFormMetadataCache();
+  if (expectedIdentityKey) {
+    formMetadataCache.identityKey = expectedIdentityKey;
+  }
+}
+
+async function clearFormMetadataCache() {
+  formMetadataCache = createEmptyFormMetadataCache();
+  formMetadataCacheLoaded = true;
+  formMetadataQueryInFlightByKey.clear();
+  formMetadataQueryPendingRevalidateByKey.clear();
+  formMetadataUpsertInFlightByKey.clear();
+  if (formMetadataCachePersistTimer !== null) {
+    clearTimeout(formMetadataCachePersistTimer);
+    formMetadataCachePersistTimer = null;
+  }
+  formMetadataCachePersistInFlight = null;
+  const sessionStorage = sessionStorageArea();
+  if (sessionStorage) {
+    try {
+      await sessionStorage.remove(STORAGE_SESSION_FORM_METADATA_CACHE_KEY);
+    } catch {
+      // Best effort only.
+    }
+  }
+  try {
+    await chrome.storage.local.remove(STORAGE_LOCAL_FORM_METADATA_CACHE_KEY);
+  } catch {
+    // Best effort only.
+  }
+}
+
+function normalizeFormMetadataOriginsInput(origins) {
+  return Array.from(
+    new Set(
+      (Array.isArray(origins) ? origins : [])
+        .map((origin) => canonicalizeFormMetadataOrigin(origin))
+        .filter((origin) => typeof origin === 'string' && origin.length > 0),
+    ),
+  );
+}
+
+async function syncFormMetadataOriginsFromServer(input = {}) {
+  const origins = normalizeFormMetadataOriginsInput(input.origins);
+  if (origins.length === 0) {
+    return fail('invalid_input', 'At least one origin is required.');
+  }
+  await hydrateFormMetadataCacheFromStorage();
+  const staleOrigins = input.force === true
+    ? origins
+    : getStaleFormMetadataOrigins(formMetadataCache, {
+        origins,
+        now: Date.now(),
+        maxAgeMs: FORM_METADATA_SYNC_COOLDOWN_MS,
+      });
+  if (staleOrigins.length === 0) {
+    return formMetadataQueryResult({
+      origins,
+      itemId: input.itemId,
+      cached: true,
+    });
+  }
+  const apiClient = currentApiClient();
+  const queryKey = staleOrigins.slice().sort().join('|');
+  if (formMetadataQueryInFlightByKey.has(queryKey)) {
+    if (input.force === true) {
+      formMetadataQueryPendingRevalidateByKey.set(queryKey, staleOrigins);
+    }
+    if (input.awaitCompletion === false) {
+      return formMetadataQueryResult({
+        origins,
+        itemId: input.itemId,
+        cached: true,
+      });
+    }
+    return formMetadataQueryInFlightByKey.get(queryKey);
+  }
+  const cachedResult = formMetadataQueryResult({
+    origins,
+    itemId: input.itemId,
+    cached: true,
+  });
+  if (!apiClient || !sessionToken) {
+    return Array.isArray(cachedResult.records) && cachedResult.records.length > 0
+      ? cachedResult
+      : fail('form_metadata_unavailable', 'Form metadata is unavailable right now.');
+  }
+
+  const syncPromise = (async () => {
+    try {
+      const response = await apiClient.queryFormMetadata({
+        bearerToken: sessionToken,
+        origins: staleOrigins,
+      });
+      formMetadataCache = applyQueriedFormMetadataRecords(formMetadataCache, {
+        identityKey: currentFormMetadataCacheIdentityKey(),
+        origins: staleOrigins,
+        records: Array.isArray(response?.records) ? response.records : [],
+        syncedAt: Date.now(),
+      });
+      scheduleFormMetadataCachePersist();
+      return formMetadataQueryResult({
+        origins,
+        itemId: input.itemId,
+        cached: false,
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      return Array.isArray(cachedResult.records) && cachedResult.records.length > 0
+        ? cachedResult
+        : fail('form_metadata_unavailable', 'Form metadata is unavailable right now.');
+    } finally {
+      formMetadataQueryInFlightByKey.delete(queryKey);
+      const pendingRevalidateOrigins = formMetadataQueryPendingRevalidateByKey.get(queryKey);
+      formMetadataQueryPendingRevalidateByKey.delete(queryKey);
+      if (Array.isArray(pendingRevalidateOrigins) && pendingRevalidateOrigins.length > 0) {
+        void syncFormMetadataOriginsFromServer({
+          origins: pendingRevalidateOrigins,
+          force: true,
+          awaitCompletion: false,
+        });
+      }
+    }
+  })();
+  formMetadataQueryInFlightByKey.set(queryKey, syncPromise);
+  if (input.awaitCompletion === false) {
+    void syncPromise;
+    return cachedResult;
+  }
+  return syncPromise;
+}
+
+async function queryFormMetadataInternal(input = {}) {
+  const readyError = await ensureReadyState({
+    allowOffline: true,
+  });
+  if (readyError) {
+    return readyError;
+  }
+  const origins = normalizeFormMetadataOriginsInput(input.origins);
+  if (origins.length === 0) {
+    return fail('invalid_input', 'At least one origin is required.');
+  }
+  await hydrateFormMetadataCacheFromStorage();
+  const staleOrigins = input.revalidate === true
+    ? origins
+    : getStaleFormMetadataOrigins(formMetadataCache, {
+        origins,
+        now: Date.now(),
+        maxAgeMs: FORM_METADATA_SYNC_COOLDOWN_MS,
+      });
+  if (staleOrigins.length === 0) {
+    return formMetadataQueryResult({
+      origins,
+      itemId: input.itemId,
+      cached: true,
+    });
+  }
+  const cachedResult = formMetadataQueryResult({
+    origins,
+    itemId: input.itemId,
+    cached: true,
+  });
+  if (Array.isArray(cachedResult.records) && cachedResult.records.length > 0 && input.awaitCompletion === false) {
+    void syncFormMetadataOriginsFromServer({
+      origins,
+      itemId: input.itemId,
+      force: input.revalidate === true,
+      awaitCompletion: false,
+    });
+    return cachedResult;
+  }
+  return syncFormMetadataOriginsFromServer({
+    origins,
+    itemId: input.itemId,
+    force: input.revalidate === true,
+    awaitCompletion: input.awaitCompletion !== false,
+  });
+}
+
+async function upsertFormMetadataInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
+  const canonicalOrigin = canonicalizeFormMetadataOrigin(input.origin);
+  if (
+    !canonicalOrigin ||
+    typeof input?.formFingerprint !== 'string' ||
+    typeof input?.fieldFingerprint !== 'string' ||
+    typeof input?.fieldRole !== 'string' ||
+    typeof input?.selectorCss !== 'string'
+  ) {
+    return fail('invalid_input', 'Form metadata payload is invalid.');
+  }
+  const itemId = typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : null;
+  const candidate = {
+    ...input,
+    itemId,
+    origin: canonicalOrigin,
+  };
+  await hydrateFormMetadataCacheFromStorage();
+  if (!shouldUpsertFormMetadataRecord(formMetadataCache, candidate)) {
+    return ok({
+      record: findCachedFormMetadataRecord(formMetadataCache, candidate),
+      skipped: true,
+    });
+  }
+  const structuralKey = [canonicalOrigin, input.formFingerprint, input.fieldFingerprint, input.fieldRole, itemId ?? ''].join(
+    '|',
+  );
+  if (formMetadataUpsertInFlightByKey.has(structuralKey)) {
+    return formMetadataUpsertInFlightByKey.get(structuralKey);
+  }
+
+  const upsertPromise = (async () => {
+    try {
+      const record = await apiClient.upsertFormMetadata({
+        bearerToken: sessionToken,
+        ...input,
+        itemId,
+        origin: canonicalOrigin,
+      });
+      formMetadataCache = upsertFormMetadataRecordInCache(formMetadataCache, record, {
+        identityKey: currentFormMetadataCacheIdentityKey(),
+        syncedAt: Date.now(),
+      });
+      scheduleFormMetadataCachePersist();
+      schedulePopupRealtimeNotification(['form_metadata']);
+      return ok({
+        record,
+      });
+    } catch (error) {
+      if (isUnauthorizedApiError(error)) {
+        await clearExtensionSessionToken();
+      }
+      const described = describeError(error, 'form_metadata_sync_failed');
+      return fail(described.code, described.message);
+    } finally {
+      formMetadataUpsertInFlightByKey.delete(structuralKey);
+    }
+  })();
+  formMetadataUpsertInFlightByKey.set(structuralKey, upsertPromise);
+  return upsertPromise;
+}
+
+async function markFormMetadataSuspectInternal(input = {}) {
+  const readyError = await ensureReadyState();
+  if (readyError) {
+    return readyError;
+  }
+  await hydrateFormMetadataCacheFromStorage();
+  const canonicalOrigin = canonicalizeFormMetadataOrigin(input.origin);
+  if (!canonicalOrigin) {
+    return fail('invalid_input', 'A valid origin is required.');
+  }
+  let suspectCandidate = markCachedFormMetadataRecordSuspect(formMetadataCache, {
+    identityKey: currentFormMetadataCacheIdentityKey(),
+    origin: canonicalOrigin,
+    formFingerprint: input.formFingerprint,
+    fieldFingerprint: input.fieldFingerprint,
+    fieldRole: input.fieldRole,
+    itemId: input.itemId ?? null,
+    updatedAt: nowIso(),
+    sourceDeviceId: state.deviceId ?? null,
+  });
+  if (!suspectCandidate.found) {
+    await syncFormMetadataOriginsFromServer({
+      origins: [canonicalOrigin],
+      force: true,
+      awaitCompletion: true,
+    });
+    suspectCandidate = markCachedFormMetadataRecordSuspect(formMetadataCache, {
+      identityKey: currentFormMetadataCacheIdentityKey(),
+      origin: canonicalOrigin,
+      formFingerprint: input.formFingerprint,
+      fieldFingerprint: input.fieldFingerprint,
+      fieldRole: input.fieldRole,
+      itemId: input.itemId ?? null,
+      updatedAt: nowIso(),
+      sourceDeviceId: state.deviceId ?? null,
+    });
+  }
+  if (!suspectCandidate.found || !suspectCandidate.record) {
+    return fail('not_found', 'Form metadata entry not found.');
+  }
+  return upsertFormMetadataInternal({
+    ...suspectCandidate.record,
+    selectorStatus: 'suspect',
+  });
+}
+
+function formMetadataStructuralKey(record = {}) {
+  return [
+    typeof record?.origin === 'string' ? record.origin : '',
+    typeof record?.formFingerprint === 'string' ? record.formFingerprint : '',
+    typeof record?.fieldFingerprint === 'string' ? record.fieldFingerprint : '',
+    typeof record?.fieldRole === 'string' ? record.fieldRole : '',
+    typeof record?.itemId === 'string' ? record.itemId : '',
+  ].join('::');
+}
+
+function senderOriginForFormMetadata(sender) {
+  const senderUrl =
+    (typeof sender?.url === 'string' && sender.url) ||
+    (typeof sender?.documentUrl === 'string' && sender.documentUrl) ||
+    (typeof sender?.tab?.url === 'string' && sender.tab.url) ||
+    '';
+  return canonicalizeFormMetadataOrigin(senderUrl);
+}
+
+function normalizeSerializableFormMetadataObservation(raw, itemIdOverride = undefined) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const canonicalOrigin = canonicalizeFormMetadataOrigin(raw.origin);
+  if (
+    !canonicalOrigin ||
+    typeof raw.formFingerprint !== 'string' ||
+    raw.formFingerprint.length === 0 ||
+    typeof raw.fieldFingerprint !== 'string' ||
+    raw.fieldFingerprint.length === 0 ||
+    typeof raw.frameScope !== 'string' ||
+    raw.frameScope.length === 0 ||
+    typeof raw.fieldRole !== 'string' ||
+    raw.fieldRole.length === 0 ||
+    typeof raw.selectorCss !== 'string' ||
+    raw.selectorCss.length === 0 ||
+    typeof raw.confidence !== 'string' ||
+    raw.confidence.length === 0 ||
+    typeof raw.selectorStatus !== 'string' ||
+    raw.selectorStatus.length === 0
+  ) {
+    return null;
+  }
+  return {
+    itemId:
+      typeof itemIdOverride === 'string'
+        ? itemIdOverride
+        : typeof raw.itemId === 'string' && raw.itemId.trim().length > 0
+          ? raw.itemId.trim()
+          : null,
+    origin: canonicalOrigin,
+    formFingerprint: raw.formFingerprint,
+    fieldFingerprint: raw.fieldFingerprint,
+    frameScope: raw.frameScope,
+    fieldRole: raw.fieldRole,
+    selectorCss: raw.selectorCss,
+    selectorFallbacks: Array.isArray(raw.selectorFallbacks) ? raw.selectorFallbacks : [],
+    autocompleteToken:
+      typeof raw.autocompleteToken === 'string' && raw.autocompleteToken.length > 0 ? raw.autocompleteToken : null,
+    inputType: typeof raw.inputType === 'string' && raw.inputType.length > 0 ? raw.inputType : null,
+    fieldName: typeof raw.fieldName === 'string' && raw.fieldName.length > 0 ? raw.fieldName : null,
+    fieldId: typeof raw.fieldId === 'string' && raw.fieldId.length > 0 ? raw.fieldId : null,
+    labelTextNormalized:
+      typeof raw.labelTextNormalized === 'string' && raw.labelTextNormalized.length > 0
+        ? raw.labelTextNormalized
+        : null,
+    placeholderNormalized:
+      typeof raw.placeholderNormalized === 'string' && raw.placeholderNormalized.length > 0
+        ? raw.placeholderNormalized
+        : null,
+    confidence: raw.confidence,
+    selectorStatus: raw.selectorStatus,
+  };
+}
+
+function selectFillCandidateFormMetadataRecords(records) {
+  if (!Array.isArray(records)) {
+    return [];
+  }
+  return records.filter(
+    (record) =>
+      record &&
+      record.selectorStatus === 'active' &&
+      (record.fieldRole === 'username' || record.fieldRole === 'email' || record.fieldRole === 'password_current'),
+  );
+}
+
+async function retireFormMetadataRecordInternal(record) {
+  return upsertFormMetadataInternal({
+    ...record,
+    selectorStatus: 'retired',
+  });
+}
+
+async function applyFormMetadataTelemetryInternal(input = {}) {
+  const itemId =
+    typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : null;
+  const senderOrigin = typeof input?.senderOrigin === 'string' ? input.senderOrigin : null;
+  const heuristicObservations = Array.isArray(input?.heuristicObservations) ? input.heuristicObservations : [];
+  const fillObservations = Array.isArray(input?.fillObservations) ? input.fillObservations : [];
+  const suspectRecords = Array.isArray(input?.suspectRecords) ? input.suspectRecords : [];
+  const retiredRecords = Array.isArray(input?.retiredRecords) ? input.retiredRecords : [];
+
+  for (const rawRecord of suspectRecords) {
+    const normalized = normalizeSerializableFormMetadataObservation(rawRecord);
+    if (!normalized || (senderOrigin && normalized.origin !== senderOrigin)) {
+      continue;
+    }
+    await markFormMetadataSuspectInternal({
+      origin: normalized.origin,
+      formFingerprint: normalized.formFingerprint,
+      fieldFingerprint: normalized.fieldFingerprint,
+      fieldRole: normalized.fieldRole,
+      itemId: normalized.itemId,
+    });
+  }
+
+  for (const rawObservation of heuristicObservations) {
+    const normalized = normalizeSerializableFormMetadataObservation(rawObservation, null);
+    if (!normalized || (senderOrigin && normalized.origin !== senderOrigin)) {
+      continue;
+    }
+    await upsertFormMetadataInternal(normalized);
+  }
+
+  const successfulObservations = [];
+  for (const rawObservation of fillObservations) {
+    const normalized = normalizeSerializableFormMetadataObservation(rawObservation, itemId);
+    if (!normalized || (senderOrigin && normalized.origin !== senderOrigin)) {
+      continue;
+    }
+    successfulObservations.push(normalized);
+    await upsertFormMetadataInternal(normalized);
+  }
+
+  const successfulKeys = new Set(successfulObservations.map((record) => formMetadataStructuralKey(record)));
+  for (const rawRecord of retiredRecords) {
+    const normalized = normalizeSerializableFormMetadataObservation(rawRecord);
+    if (
+      !normalized ||
+      (senderOrigin && normalized.origin !== senderOrigin) ||
+      successfulKeys.has(formMetadataStructuralKey(normalized))
+    ) {
+      continue;
+    }
+    await retireFormMetadataRecordInternal(normalized);
+  }
+
+  return ok({
+    result: 'success',
+  });
+}
+
+async function handleFormMetadataSubmitSignalInternal(input = {}, sender) {
+  const senderOrigin = senderOriginForFormMetadata(sender);
+  if (!senderOrigin) {
+    return fail('invalid_sender', 'Form metadata signal origin is invalid.');
+  }
+  return applyFormMetadataTelemetryInternal({
+    itemId: input?.itemId,
+    senderOrigin,
+    heuristicObservations: [],
+    fillObservations: Array.isArray(input?.observations) ? input.observations : [],
+    suspectRecords: [],
+    retiredRecords: Array.isArray(input?.retiredRecords) ? input.retiredRecords : [],
+  });
+}
+
+function queueRealtimeFormMetadataResync(input = {}) {
+  for (const origin of normalizeFormMetadataOriginsInput(input.origins)) {
+    realtimeFormMetadataResyncOrigins.add(origin);
+  }
+  if (realtimeFormMetadataResyncOrigins.size === 0) {
+    return;
+  }
+  if (realtimeFormMetadataResyncTimer !== null) {
+    return;
+  }
+  realtimeFormMetadataResyncTimer = setTimeout(() => {
+    realtimeFormMetadataResyncTimer = null;
+    void flushRealtimeFormMetadataResync();
+  }, REALTIME_FORM_METADATA_RESYNC_DEBOUNCE_MS);
+}
+
+async function flushRealtimeFormMetadataResync() {
+  if (realtimeFormMetadataResyncInFlight) {
+    realtimeFormMetadataResyncQueued = true;
+    return;
+  }
+  const origins = Array.from(realtimeFormMetadataResyncOrigins);
+  realtimeFormMetadataResyncOrigins.clear();
+  if (origins.length === 0) {
+    return;
+  }
+  realtimeFormMetadataResyncInFlight = (async () => {
+    try {
+      await syncFormMetadataOriginsFromServer({
+        origins,
+        force: true,
+        awaitCompletion: true,
+      });
+      schedulePopupRealtimeNotification(['form_metadata']);
+    } finally {
+      realtimeFormMetadataResyncInFlight = null;
+      if (realtimeFormMetadataResyncQueued || realtimeFormMetadataResyncOrigins.size > 0) {
+        realtimeFormMetadataResyncQueued = false;
+        queueRealtimeFormMetadataResync({
+          origins: Array.from(realtimeFormMetadataResyncOrigins),
+        });
+      }
+    }
+  })();
+  await realtimeFormMetadataResyncInFlight;
+}
+
 async function loadFolderStateCacheBestEffort() {
   const sessionStorage = sessionStorageArea();
   if (!sessionStorage) {
@@ -6290,8 +7240,24 @@ function scheduleFolderStateRevalidation(options = {}) {
 }
 
 async function listFolderStateInternal(input = {}) {
+  const hasFolderCache =
+    Array.isArray(folderStateCache.folders) &&
+    Array.isArray(folderStateCache.assignments) &&
+    (folderStateCache.folders.length > 0 || folderStateCache.assignments.length > 0);
+  if (!input?.force && hasFolderCache) {
+    if (input?.revalidate === true) {
+      void scheduleFolderStateRevalidation({
+        awaitCompletion: input?.awaitCompletion !== false,
+      });
+    }
+    return folderStateSnapshotResult();
+  }
   if ((!Array.isArray(folderStateCache.folders) || folderStateCache.folders.length === 0) && state.phase === 'ready') {
     await loadFolderStateCacheBestEffort();
+  }
+  const readyError = await ensureReadyState({ allowOffline: true });
+  if (readyError) {
+    return hasFolderCache ? folderStateSnapshotResult() : readyError;
   }
   if (input?.revalidate === true) {
     const revalidated = await scheduleFolderStateRevalidation({
@@ -6429,19 +7395,25 @@ function upsertCachedItemAttachments(itemId, records) {
 }
 
 async function listItemAttachmentsInternal(input = {}) {
-  const readyError = await ensureReadyState();
-  if (readyError) {
-    return readyError;
-  }
-  const apiClient = currentApiClient();
-  if (!apiClient || !sessionToken) {
-    return fail('remote_authentication_required', 'Session unavailable.');
-  }
   const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
   if (!itemId) {
     return fail('invalid_input', 'Item id is required.');
   }
   const force = input?.force === true;
+  if (!force) {
+    const cached = cachedItemAttachments(itemId);
+    if (cached) {
+      return ok({ uploads: cached });
+    }
+  }
+  const readyError = await ensureReadyState({ allowOffline: true });
+  if (readyError) {
+    return fail(readyError.code, readyError.message);
+  }
+  const apiClient = currentApiClient();
+  if (!apiClient || !sessionToken) {
+    return fail('remote_authentication_required', 'Session unavailable.');
+  }
   if (!force) {
     const cached = cachedItemAttachments(itemId);
     if (cached) {
@@ -6477,6 +7449,13 @@ async function listItemAttachmentsInternal(input = {}) {
     }
   })();
   itemAttachmentSyncInFlightByItemId.set(itemId, promise);
+  if (input?.awaitCompletion === false) {
+    const cached = itemAttachmentCacheByItemId.get(itemId)?.records ?? [];
+    if (cached.length > 0) {
+      void promise;
+      return ok({ uploads: cached });
+    }
+  }
   return promise;
 }
 
@@ -7069,20 +8048,23 @@ async function restoreVaultItemInternal(input = {}) {
 }
 
 async function listVaultItemHistoryInternal(input = {}) {
-  const readyError = await ensureReadyState();
-  if (readyError) {
-    return readyError;
-  }
   const itemId =
     typeof input?.itemId === 'string' && input.itemId.trim().length > 0 ? input.itemId.trim() : '';
   if (!itemId) {
     return fail('invalid_input', 'Item id is required.');
   }
+  const force = input?.force === true;
+  if (!force && vaultItemHistoryCacheByItemId.has(itemId)) {
+    return ok(vaultItemHistoryCacheByItemId.get(itemId));
+  }
+  const readyError = await ensureReadyState({ allowOffline: true });
+  if (readyError) {
+    return readyError;
+  }
   const apiClient = currentApiClient();
   if (!apiClient || !sessionToken || !unlockedContext?.accountKey) {
     return fail('remote_authentication_required', 'Session unavailable.');
   }
-  const force = input?.force === true;
   if (!force && vaultItemHistoryCacheByItemId.has(itemId)) {
     return ok(vaultItemHistoryCacheByItemId.get(itemId));
   }
@@ -7135,6 +8117,134 @@ async function listVaultItemHistoryInternal(input = {}) {
     }
     return fail('vault_item_history_unavailable', 'Item history is unavailable right now.');
   }
+}
+
+async function runPopupReconcileDomains(domains, selectedItemId = null) {
+  const normalizedDomains = normalizePopupReconcileDomains(domains);
+  if (normalizedDomains.length === 0) {
+    return;
+  }
+
+  if (updatePopupSyncDomains(normalizedDomains, 'running')) {
+    schedulePopupRealtimeNotification(['popup_state']);
+  }
+
+  const notifyDomains = new Set(['popup_state']);
+  let failure = false;
+  const selectedItem =
+    typeof selectedItemId === 'string' && selectedItemId.trim().length > 0 ? selectedItemId.trim() : null;
+
+  for (const domain of normalizedDomains) {
+    try {
+      if (domain === 'session') {
+        await restoreSessionInternal(false);
+        notifyDomains.add('popup_state');
+      } else if (domain === 'vault') {
+        const result = await refreshCredentialCache({
+          force: true,
+          awaitCompletion: true,
+          preferLocalCache: true,
+        });
+        if (!result?.ok) {
+          failure = true;
+        } else {
+          notifyDomains.add('vault');
+          notifyDomains.add('icons_state');
+        }
+      } else if (domain === 'folders') {
+        const result = await scheduleFolderStateRevalidation({
+          awaitCompletion: true,
+        });
+        if (!result?.ok) {
+          failure = true;
+        } else {
+          notifyDomains.add('folders');
+        }
+      } else if (domain === 'icons') {
+        await hydrateManualIconsFromServerBestEffort();
+        await refreshIconCacheFromRealtimeSignal();
+        notifyDomains.add('icons_manual');
+        notifyDomains.add('icons_state');
+      } else if (domain === 'attachments' && selectedItem) {
+        const result = await listItemAttachmentsInternal({
+          itemId: selectedItem,
+          force: true,
+          awaitCompletion: true,
+        });
+        if (!result?.ok) {
+          failure = true;
+        } else {
+          notifyDomains.add('attachments');
+        }
+      } else if (domain === 'history' && selectedItem) {
+        const result = await listVaultItemHistoryInternal({
+          itemId: selectedItem,
+          force: true,
+        });
+        if (!result?.ok) {
+          failure = true;
+        } else {
+          notifyDomains.add('vault_history');
+        }
+      }
+    } catch {
+      failure = true;
+    }
+  }
+
+  updatePopupSyncDomains(normalizedDomains, failure ? 'failed' : 'idle');
+  schedulePopupRealtimeNotification(Array.from(notifyDomains));
+}
+
+async function drainPopupReconcileQueue() {
+  if (popupReconcileInFlight) {
+    return popupReconcileInFlight;
+  }
+  popupReconcileInFlight = (async () => {
+    while (popupReconcilePendingDomains.size > 0) {
+      const nextDomains = Array.from(popupReconcilePendingDomains);
+      popupReconcilePendingDomains.clear();
+      const nextSelectedItemId = popupReconcileSelectedItemId;
+      await runPopupReconcileDomains(nextDomains, nextSelectedItemId);
+    }
+  })().finally(() => {
+    popupReconcileInFlight = null;
+  });
+  return popupReconcileInFlight;
+}
+
+function queuePopupReconcile(domains, options = {}) {
+  const normalizedDomains = normalizePopupReconcileDomains(domains);
+  if (normalizedDomains.length === 0) {
+    return false;
+  }
+  for (const domain of normalizedDomains) {
+    popupReconcilePendingDomains.add(domain);
+  }
+  if (typeof options?.selectedItemId === 'string' && options.selectedItemId.trim().length > 0) {
+    popupReconcileSelectedItemId = options.selectedItemId.trim();
+  }
+  if (updatePopupSyncDomains(normalizedDomains, 'pending')) {
+    schedulePopupRealtimeNotification(['popup_state']);
+  }
+  if (popupReconcileTimer === null) {
+    popupReconcileTimer = setTimeout(() => {
+      popupReconcileTimer = null;
+      void drainPopupReconcileQueue();
+    }, POPUP_RECONCILE_DEBOUNCE_MS);
+  }
+  return true;
+}
+
+async function schedulePopupReconcileInternal(input = {}) {
+  const scheduled = queuePopupReconcile(input?.domains, {
+    selectedItemId: input?.selectedItemId,
+  });
+  return ok({
+    scheduled,
+    syncState: popupSyncStateSnapshot(),
+    revision: popupSnapshotRevision,
+  });
 }
 
 async function applyTrustedPairingResult(pairingResult) {
@@ -7538,20 +8648,41 @@ async function unlockLocalInternal(input) {
     };
     setPhase('ready', null);
     setLastUnlockedLockRevision(state.lockRevision);
-    await persistUnlockedContext();
+    await persistUnlockedContext().catch((error) => {
+      console.warn('[vaultlite][unlock] failed to persist unlocked context', error);
+    });
     armIdleLockTimer();
     void maybeAutoApproveUnlockGrants({ source: 'phase-ready' });
-    void maybeUpgradeLocalUnlockEnvelopeProfile(password);
-    void loadCredentialCacheFromLocalBestEffort();
-    void scheduleFolderStateRevalidation({
-      awaitCompletion: false,
-    });
-
-    if (shouldRefreshSessionAfterUnlock(currentPhase)) {
-      void restoreSessionInternal(false).catch(() => {});
+    scheduleLocalUnlockEnvelopeMaintenance(password);
+    let popupSnapshot = null;
+    try {
+      popupSnapshot = await getPopupSnapshotForUnlockInternal({
+        query: '',
+        typeFilter: 'all',
+        suggestedOnly: false,
+        pageUrl: typeof input?.pageUrl === 'string' ? input.pageUrl : '',
+        selectedItemId: '',
+      });
+    } catch {
+      popupSnapshot = null;
+    }
+    if (!popupSnapshot?.ok) {
+      return ok({ state: snapshotForUi() });
     }
 
-    return ok({ state: snapshotForUi() });
+    return ok({
+      state: popupSnapshot.state,
+      page: popupSnapshot.page,
+      items: popupSnapshot.items,
+      folders: popupSnapshot.folders,
+      assignments: popupSnapshot.assignments,
+      etag: popupSnapshot.etag,
+      stale: popupSnapshot.stale,
+      syncState: popupSnapshot.syncState,
+      revision: popupSnapshot.revision,
+      selectedItem: popupSnapshot.selectedItem,
+      source: popupSnapshot.source,
+    });
   } catch (error) {
     clearSensitiveMemory();
     const described = describeError(error, 'invalid_credentials');
@@ -7567,6 +8698,7 @@ async function unlockLocalInternal(input) {
 }
 
 async function lockInternal() {
+  clearPopupReconcileTimer();
   clearSensitiveMemory();
   if (trustedState && sessionToken) {
     setPhase('local_unlock_required', null);
@@ -7626,13 +8758,15 @@ async function initializeBackgroundRuntimeCore() {
   if (hasValidUnlockedContext()) {
     setPhase('ready', null);
     touchUnlockedContext();
-    void loadCredentialCacheFromLocalBestEffort();
+    await Promise.all([
+      loadSessionListProjectionCacheBestEffort(),
+      loadFolderStateCacheBestEffort(),
+    ]);
   } else {
     unlockedContext = null;
     void clearPersistedUnlockedContext();
     setPhase('local_unlock_required', null);
   }
-  void restoreSessionInternal(false).catch(() => {});
 }
 
 async function initializeBackgroundRuntime(force = false) {
@@ -7672,6 +8806,29 @@ async function handleCommand(command, senderContext, sender) {
         await restoreSessionInternal(false);
       }
       return ok({ state: snapshotForUi() });
+    }
+    case 'vaultlite.get_popup_snapshot': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return getPopupSnapshotInternal({
+        query: command.query ?? '',
+        typeFilter: command.typeFilter ?? 'all',
+        suggestedOnly: command.suggestedOnly === true,
+        pageUrl: typeof command.pageUrl === 'string' ? command.pageUrl : '',
+        selectedItemId: typeof command.selectedItemId === 'string' ? command.selectedItemId : '',
+      });
+    }
+    case 'vaultlite.schedule_popup_reconcile': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return schedulePopupReconcileInternal({
+        domains: command.domains,
+        selectedItemId: typeof command.selectedItemId === 'string' ? command.selectedItemId : '',
+      });
     }
     case 'vaultlite.get_page_context': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
@@ -7802,6 +8959,27 @@ async function handleCommand(command, senderContext, sender) {
       }
       return upsertVaultFolderInternal(command);
     }
+    case 'vaultlite.form_metadata_query': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return queryFormMetadataInternal(command);
+    }
+    case 'vaultlite.form_metadata_upsert': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return upsertFormMetadataInternal(command);
+    }
+    case 'vaultlite.form_metadata_mark_suspect': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:write');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return markFormMetadataSuspectInternal(command);
+    }
     case 'vaultlite.list_item_attachments': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
       if (capabilityError) {
@@ -7822,6 +9000,13 @@ async function handleCommand(command, senderContext, sender) {
         return capabilityError;
       }
       return fillCredentialInternal(command.itemId);
+    }
+    case 'vaultlite.form_metadata_submit_signal': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'form_metadata:signal');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return handleFormMetadataSubmitSignalInternal(command, sender);
     }
     case 'vaultlite.get_credential_field': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'clipboard:reveal');
@@ -7923,10 +9108,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     void handleCommand(message, senderContext, sender)
       .then((result) => sendResponse(result))
       .catch((error) => {
+        console.error('[vaultlite][background] command failed', error);
         const described = describeError(error, 'internal_error');
         sendResponse(fail(described.code, described.message));
       });
   } catch (error) {
+    console.error('[vaultlite][background] command failed', error);
     const described = describeError(error, 'internal_error');
     sendResponse(fail(described.code, described.message));
   }

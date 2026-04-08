@@ -26,6 +26,7 @@ import {
   VaultFormFrameScopeSchema,
   VaultFormMetadataConfidenceSchema,
   VaultFormMetadataListOutputSchema,
+  VaultFormMetadataQueryInputSchema,
   VaultFormMetadataRecordSchema,
   VaultFormMetadataSelectorStatusSchema,
   VaultFormMetadataUpsertInputSchema,
@@ -299,6 +300,19 @@ describe('contracts schemas', () => {
         ],
       }).success,
     ).toBe(true);
+
+    expect(
+      VaultFormMetadataQueryInputSchema.safeParse({
+        origins: ['https://accounts.example.com', 'https://portal.example.com/login'],
+        itemId: 'item_1',
+      }).success,
+    ).toBe(true);
+
+    expect(
+      VaultFormMetadataQueryInputSchema.safeParse({
+        origins: [],
+      }).success,
+    ).toBe(false);
   });
 
   it('validates attachment upload lifecycle contracts', () => {

@@ -616,4 +616,186 @@ describe('vault item CRUD API', () => {
       ],
     });
   });
+
+  test('upserts and queries form metadata via extension bearer endpoints', async () => {
+    const fixture = await createAuthenticatedVaultFixture();
+    const extensionToken = await issueExtensionBearerForFixture({
+      storage: fixture.storage,
+      clock: fixture.clock,
+      userId: 'user_1',
+    });
+
+    const createItem = await fixture.app.request('/api/extension/vault/items', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemType: 'login',
+        encryptedPayload: 'encrypted_login_payload_for_form_metadata_v1',
+      }),
+    });
+    expect(createItem.status).toBe(201);
+    const createdItem = (await createItem.json()) as { itemId: string };
+
+    const heuristicUpsert = await fixture.app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemId: null,
+        origin: 'https://accounts.example.com/login?next=%2Fhome',
+        formFingerprint: 'form_fp_shared',
+        fieldFingerprint: 'field_fp_username',
+        frameScope: 'top',
+        fieldRole: 'username',
+        selectorCss: '#email',
+        selectorFallbacks: ['input[name=\"email\"]'],
+        autocompleteToken: 'username',
+        inputType: 'email',
+        fieldName: 'email',
+        fieldId: 'email',
+        labelTextNormalized: 'email',
+        placeholderNormalized: 'your email',
+        confidence: 'heuristic',
+        selectorStatus: 'active',
+      }),
+    });
+    expect(heuristicUpsert.status).toBe(200);
+    expect(await heuristicUpsert.json()).toEqual(
+      expect.objectContaining({
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        confidence: 'heuristic',
+      }),
+    );
+
+    const linkedUpsert = await fixture.app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemId: createdItem.itemId,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_shared',
+        fieldFingerprint: 'field_fp_password',
+        frameScope: 'top',
+        fieldRole: 'password_current',
+        selectorCss: 'input[type=\"password\"]',
+        selectorFallbacks: ['input[autocomplete=\"current-password\"]'],
+        autocompleteToken: 'current-password',
+        inputType: 'password',
+        fieldName: 'password',
+        fieldId: 'password',
+        labelTextNormalized: 'password',
+        placeholderNormalized: null,
+        confidence: 'submitted_confirmed',
+        selectorStatus: 'active',
+      }),
+    });
+    expect(linkedUpsert.status).toBe(200);
+
+    const query = await fixture.app.request('/api/extension/form-metadata/query', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        origins: ['https://accounts.example.com/login'],
+        itemId: createdItem.itemId,
+      }),
+    });
+    expect(query.status).toBe(200);
+    expect(await query.json()).toEqual({
+      records: [
+        expect.objectContaining({
+          itemId: createdItem.itemId,
+          origin: 'https://accounts.example.com',
+          confidence: 'submitted_confirmed',
+        }),
+        expect.objectContaining({
+          itemId: null,
+          origin: 'https://accounts.example.com',
+          confidence: 'heuristic',
+        }),
+      ],
+    });
+  });
+
+  test('requires extension bearer for form metadata endpoints and rejects invalid input', async () => {
+    const fixture = await createAuthenticatedVaultFixture();
+
+    const missingBearer = await fixture.app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: fixture.aliceHeaders,
+      body: JSON.stringify({
+        itemId: null,
+        origin: 'https://accounts.example.com',
+        formFingerprint: 'form_fp_1',
+        fieldFingerprint: 'field_fp_1',
+        frameScope: 'top',
+        fieldRole: 'username',
+        selectorCss: '#email',
+        selectorFallbacks: [],
+        autocompleteToken: 'username',
+        inputType: 'email',
+        fieldName: 'email',
+        fieldId: 'email',
+        labelTextNormalized: 'email',
+        placeholderNormalized: null,
+        confidence: 'heuristic',
+        selectorStatus: 'active',
+      }),
+    });
+    expect(missingBearer.status).toBe(403);
+    expect(await missingBearer.json()).toEqual({
+      ok: false,
+      code: 'extension_bearer_required',
+    });
+
+    const invalidBearer = await fixture.app.request('/api/extension/form-metadata/query', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer not_a_valid_extension_token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        origins: ['https://accounts.example.com'],
+      }),
+    });
+    expect(invalidBearer.status).toBe(401);
+    expect(await invalidBearer.json()).toEqual({
+      ok: false,
+      code: 'unauthorized',
+    });
+
+    const extensionToken = await issueExtensionBearerForFixture({
+      storage: fixture.storage,
+      clock: fixture.clock,
+      userId: 'user_1',
+    });
+    const invalidInput = await fixture.app.request('/api/extension/form-metadata/upsert', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        itemId: null,
+        origin: 'notaurl',
+        selectorFallbacks: ['a', 'b', 'c', 'd', 'e', 'f'],
+      }),
+    });
+    expect(invalidInput.status).toBe(400);
+    expect(await invalidInput.json()).toEqual({
+      ok: false,
+      code: 'invalid_input',
+    });
+  });
 });

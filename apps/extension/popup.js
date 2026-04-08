@@ -13,16 +13,24 @@ import {
   buildServerUrlSuggestion,
   buildWebVaultUrl,
 } from './runtime-onboarding.js';
-import { canonicalizeServerUrl, isPageUrlEligibleForFill, STORAGE_LOCAL_TRUSTED_KEY } from './runtime-common.js';
+import {
+  canonicalizeServerUrl,
+  isPageUrlEligibleForFill,
+  POPUP_LAST_READY_LIST_STORAGE_KEY,
+  POPUP_LAST_STATE_STORAGE_KEY,
+  STORAGE_LOCAL_TRUSTED_KEY,
+} from './runtime-common.js';
 import { describeFillResult, shouldDisableControlWhileBusy } from './popup-behavior.js';
 import {
   buildPersistedPopupUiState,
   buildCredentialMonogram,
+  filterPopupItemsLocally,
   hasSameItemOrder,
   hasSameRenderableRows,
   parsePersistedPopupUiState,
   resolveRowQuickAction,
   resolvePopupPhase,
+  shouldPreserveVisibleListDuringWarmup,
   shouldRenderVaultSkeleton,
   selectItemIdAfterRefresh,
   toggleSelectedItem,
@@ -226,6 +234,7 @@ let suggestedOnly = false;
 let activeSortMode = 'default';
 const faviconIndexByItemId = new Map();
 let inFlight = false;
+let pendingFillItemId = null;
 let refreshTimer = null;
 let searchDebounceTimer = null;
 let linkPollingTimer = null;
@@ -249,6 +258,8 @@ let pendingListScrollRestoreFrameSecondary = null;
 let shouldPinSelectedRowOnNextRender = false;
 let lastReadyListSnapshot = [];
 let lastReadyListPageSnapshot = { url: '', eligible: false };
+let localSearchBaseItems = [];
+let localSearchBaseScopeKey = '';
 let refreshIntervalMs = 20_000;
 let transportReconnectTimer = null;
 let lastStableStateSnapshot = null;
@@ -301,8 +312,6 @@ const detailSecretState = {
   passwordValue: '',
 };
 const POPUP_UI_STATE_STORAGE_KEY = 'vaultlite.popup.ui.v1';
-const POPUP_LAST_STATE_STORAGE_KEY = 'vaultlite.popup.last_state.v1';
-const POPUP_LAST_READY_LIST_STORAGE_KEY = 'vaultlite.popup.last_ready_list.v1';
 const POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS = 2 * 60 * 1000;
 const PASSWORD_GENERATOR_HISTORY_STORAGE_KEY = 'vaultlite.popup.password.generator.history.v1';
 const PASSWORD_GENERATOR_HISTORY_SYNCED_AT_STORAGE_KEY = 'vaultlite.popup.password.generator.history.synced_at.v1';
@@ -585,6 +594,7 @@ async function refreshDetailAttachments(options = {}) {
     type: 'vaultlite.list_item_attachments',
     itemId,
     force: options.force === true,
+    awaitCompletion: options.awaitCompletion !== false,
   });
   if (detailAttachmentItemId !== itemId) {
     return;
@@ -1296,11 +1306,12 @@ function scheduleReadySearchFocus() {
 }
 
 function setAlert(kind, message) {
-  void kind;
-  void message;
-  elements.statusAlert.hidden = true;
-  elements.statusAlert.className = 'alert alert--warning';
-  elements.statusAlert.textContent = '';
+  const normalizedKind =
+    kind === 'success' || kind === 'danger' || kind === 'warning' ? kind : 'warning';
+  const normalizedMessage = typeof message === 'string' ? message.trim() : '';
+  elements.statusAlert.hidden = normalizedMessage.length === 0;
+  elements.statusAlert.className = `alert alert--${normalizedKind}`;
+  elements.statusAlert.textContent = normalizedMessage;
   popupAutosizer?.schedule();
 }
 
@@ -1366,21 +1377,12 @@ function isKnownRenderablePhase(phase) {
 
 function resolveEffectivePopupPhase(state) {
   const phase = resolvePopupPhase(state);
-  if (phase === 'pairing_required' && state?.hasTrustedState === true && !state?.lastError) {
-    return 'local_unlock_required';
-  }
   if (phase !== 'reconnecting_background') {
     return phase;
   }
   const fallbackPhase = state?.reconnectFallbackPhase;
-  if (fallbackPhase === 'pairing_required' && state?.hasTrustedState === true) {
-    return 'local_unlock_required';
-  }
   if (isKnownRenderablePhase(fallbackPhase)) {
     return fallbackPhase;
-  }
-  if (state?.hasTrustedState === true) {
-    return 'local_unlock_required';
   }
   return 'pairing_required';
 }
@@ -1432,18 +1434,10 @@ function getStableSnapshotForReconnect() {
 function buildReconnectingSnapshot(baseState) {
   const source = baseState && typeof baseState === 'object' ? baseState : FALLBACK_PAIRING_STATE;
   const fallbackPhase = resolvePopupPhase(source);
-  const normalizedFallbackPhase =
-    fallbackPhase === 'pairing_required' && source?.hasTrustedState === true
-      ? 'local_unlock_required'
-      : fallbackPhase;
   return {
     ...source,
     phase: 'reconnecting_background',
-    reconnectFallbackPhase: isKnownRenderablePhase(normalizedFallbackPhase)
-      ? normalizedFallbackPhase
-      : source?.hasTrustedState
-        ? 'local_unlock_required'
-        : 'pairing_required',
+    reconnectFallbackPhase: isKnownRenderablePhase(fallbackPhase) ? fallbackPhase : 'pairing_required',
     lastError: null,
   };
 }
@@ -1501,6 +1495,7 @@ async function loadPersistedPopupUiState() {
 async function clearPersistedFirstPaintSnapshots() {
   lastReadyListSnapshot = [];
   lastReadyListPageSnapshot = { url: '', eligible: false };
+  setLocalSearchBaseItems([]);
   if (!chrome.storage?.session) {
     return;
   }
@@ -1523,23 +1518,38 @@ async function loadTrustedIdentitySignatureFromLocal() {
   }
 }
 
-function sanitizePersistedPopupState(rawState, expectedTrustedSignature) {
+function sanitizePersistedPopupState(rawState, expectedTrustedSignature, expectedServerOrigin = null) {
   if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
+    return null;
+  }
+  const hasExpectedTrustedSignature =
+    typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
+  if (!hasExpectedTrustedSignature) {
     return null;
   }
   const updatedAt = Number(rawState.updatedAt);
   const withinConfidenceWindow =
     Number.isFinite(updatedAt) && Date.now() - updatedAt <= POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS;
   const payloadTrustedSignature = resolveTrustedIdentitySignatureFromPersistedPayload(rawState);
-  if (typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0) {
-    if (
-      !payloadTrustedSignature ||
-      (payloadTrustedSignature !== expectedTrustedSignature &&
-        !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
-    ) {
-      return null;
-    }
-  } else if (!payloadTrustedSignature || !withinConfidenceWindow) {
+  if (
+    !payloadTrustedSignature ||
+    (payloadTrustedSignature !== expectedTrustedSignature &&
+      !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
+  ) {
+    return null;
+  }
+  const payloadServerOrigin =
+    typeof rawState.serverOrigin === 'string' && rawState.serverOrigin.trim().length > 0
+      ? rawState.serverOrigin.trim()
+      : null;
+  if (
+    expectedServerOrigin &&
+    payloadServerOrigin &&
+    payloadServerOrigin !== expectedServerOrigin.trim()
+  ) {
+    return null;
+  }
+  if (!withinConfidenceWindow) {
     return null;
   }
   const phase = resolvePopupPhase(rawState);
@@ -1550,9 +1560,8 @@ function sanitizePersistedPopupState(rawState, expectedTrustedSignature) {
   if (phase === 'pairing_required' && !hasTrustedState) {
     return null;
   }
-  const normalizedPhase = phase === 'pairing_required' && hasTrustedState ? 'local_unlock_required' : phase;
   return {
-    phase: normalizedPhase,
+    phase,
     serverOrigin: typeof rawState.serverOrigin === 'string' ? rawState.serverOrigin : null,
     deploymentFingerprint:
       typeof rawState.deploymentFingerprint === 'string' ? rawState.deploymentFingerprint : null,
@@ -1574,16 +1583,15 @@ function sanitizePersistedPopupState(rawState, expectedTrustedSignature) {
   };
 }
 
-async function loadPersistedPopupStateSnapshot(expectedTrustedSignature) {
+async function loadPersistedPopupStateSnapshot(expectedTrustedSignature, expectedServerOrigin = null) {
   if (!chrome.storage?.session) {
     return null;
   }
   try {
     const stored = await chrome.storage.session.get(POPUP_LAST_STATE_STORAGE_KEY);
     const rawState = stored?.[POPUP_LAST_STATE_STORAGE_KEY] ?? null;
-    const parsed = sanitizePersistedPopupState(rawState, expectedTrustedSignature);
-    const hasExpectedSignature =
-      typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
+    const parsed = sanitizePersistedPopupState(rawState, expectedTrustedSignature, expectedServerOrigin);
+    const hasExpectedSignature = typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
     if (!parsed && rawState && hasExpectedSignature) {
       await chrome.storage.session.remove(POPUP_LAST_STATE_STORAGE_KEY).catch(() => {});
     }
@@ -1593,23 +1601,39 @@ async function loadPersistedPopupStateSnapshot(expectedTrustedSignature) {
   }
 }
 
-function sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature) {
+function sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature, expectedServerOrigin = null) {
   if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) {
+    return null;
+  }
+  const hasExpectedTrustedSignature =
+    typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
+  if (!hasExpectedTrustedSignature) {
     return null;
   }
   const updatedAt = Number(rawState.updatedAt);
   const withinConfidenceWindow =
     Number.isFinite(updatedAt) && Date.now() - updatedAt <= POPUP_STABLE_SNAPSHOT_CONFIDENCE_MS;
   const payloadTrustedSignature = resolveTrustedIdentitySignatureFromPersistedPayload(rawState);
-  if (typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0) {
-    if (
-      !payloadTrustedSignature ||
-      (payloadTrustedSignature !== expectedTrustedSignature &&
-        !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
-    ) {
-      return null;
-    }
-  } else if (!payloadTrustedSignature || !withinConfidenceWindow) {
+  if (
+    !payloadTrustedSignature ||
+    (payloadTrustedSignature !== expectedTrustedSignature &&
+      !isTrustedIdentitySoftMatch(payloadTrustedSignature, expectedTrustedSignature))
+  ) {
+    return null;
+  }
+  const payloadServerOrigin =
+    typeof rawState.serverOrigin === 'string' && rawState.serverOrigin.trim().length > 0
+      ? rawState.serverOrigin.trim()
+      : null;
+  if (
+    typeof expectedServerOrigin === 'string' &&
+    expectedServerOrigin.trim().length > 0 &&
+    payloadServerOrigin &&
+    payloadServerOrigin !== expectedServerOrigin.trim()
+  ) {
+    return null;
+  }
+  if (!withinConfidenceWindow) {
     return null;
   }
   const rawItems = Array.isArray(rawState.items) ? rawState.items : [];
@@ -1628,26 +1652,39 @@ function sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature) 
   };
 }
 
-async function loadPersistedReadyListSnapshot(expectedTrustedSignature) {
+async function loadPersistedReadyListSnapshot(expectedTrustedSignature, expectedServerOrigin = null) {
   if (!chrome.storage?.session) {
     return false;
   }
   try {
     const stored = await chrome.storage.session.get(POPUP_LAST_READY_LIST_STORAGE_KEY);
     const rawState = stored?.[POPUP_LAST_READY_LIST_STORAGE_KEY] ?? null;
-    const parsed = sanitizePersistedReadyListSnapshot(rawState, expectedTrustedSignature);
-    const hasExpectedSignature =
-      typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
+    const parsed = sanitizePersistedReadyListSnapshot(
+      rawState,
+      expectedTrustedSignature,
+      expectedServerOrigin,
+    );
+    const hasExpectedSignature = typeof expectedTrustedSignature === 'string' && expectedTrustedSignature.length > 0;
     if (!parsed) {
       if (rawState && hasExpectedSignature) {
         await chrome.storage.session.remove(POPUP_LAST_READY_LIST_STORAGE_KEY).catch(() => {});
       }
       lastReadyListSnapshot = [];
       lastReadyListPageSnapshot = { url: '', eligible: false };
+      setLocalSearchBaseItems([]);
       return false;
     }
     lastReadyListSnapshot = parsed.items;
     lastReadyListPageSnapshot = parsed.page;
+    if (elements.searchInput.value.trim().length === 0) {
+      setLocalSearchBaseItems(parsed.items, {
+        scopeKey: JSON.stringify({
+          pageUrl: parsed.page.url,
+          typeFilter: activeTypeFilter,
+          suggestedOnly,
+        }),
+      });
+    }
     return true;
   } catch {
     // Ignore popup list snapshot load failures.
@@ -1667,6 +1704,7 @@ function persistReadyListSnapshot(items, page, stateSnapshot = currentState) {
     items: items.slice(0, 400),
     pageUrl: typeof page?.url === 'string' ? page.url : '',
     pageEligible: page?.eligible === true,
+    serverOrigin: typeof stateSnapshot?.serverOrigin === 'string' ? stateSnapshot.serverOrigin : null,
     trustedIdentitySignature: snapshotTrustedSignature,
     updatedAt: Date.now(),
   };
@@ -1732,7 +1770,9 @@ function persistPopupStateSnapshot(snapshot) {
 async function buildInitialStateSnapshot(options = {}) {
   const expectedTrustedSignature =
     typeof options.expectedTrustedSignature === 'string' ? options.expectedTrustedSignature : null;
-  const persisted = await loadPersistedPopupStateSnapshot(expectedTrustedSignature);
+  const expectedServerOrigin =
+    typeof options.trustedRecord?.serverOrigin === 'string' ? options.trustedRecord.serverOrigin : null;
+  const persisted = await loadPersistedPopupStateSnapshot(expectedTrustedSignature, expectedServerOrigin);
   if (persisted) {
     return persisted;
   }
@@ -1891,20 +1931,134 @@ function applySortMode(mode) {
   renderCredentialList(currentItems);
 }
 
-async function refreshCredentialListForCurrentQuery() {
-  const response = await sendBackgroundCommand({
-    type: 'vaultlite.list_credentials',
+function buildCurrentListScopeKey() {
+  return JSON.stringify({
+    pageUrl: activePageUrl,
+    typeFilter: activeTypeFilter,
+    suggestedOnly,
+  });
+}
+
+function setLocalSearchBaseItems(items, options = {}) {
+  const scopeKey = typeof options.scopeKey === 'string' ? options.scopeKey : buildCurrentListScopeKey();
+  localSearchBaseItems = Array.isArray(items) ? items.slice() : [];
+  localSearchBaseScopeKey = scopeKey;
+}
+
+function resolveLocalSearchBaseItems() {
+  const scopeKey = buildCurrentListScopeKey();
+  if (localSearchBaseScopeKey === scopeKey && Array.isArray(localSearchBaseItems) && localSearchBaseItems.length > 0) {
+    return localSearchBaseItems;
+  }
+  if (Array.isArray(currentItems) && currentItems.length > 0) {
+    return currentItems;
+  }
+  if (Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0) {
+    return filterPopupItemsLocally({
+      items: lastReadyListSnapshot,
+      query: '',
+      typeFilter: activeTypeFilter,
+      suggestedOnly,
+    });
+  }
+  return Array.isArray(currentItems) ? currentItems : [];
+}
+
+function applyLocalCredentialListForCurrentQuery() {
+  const sourceItems = resolveLocalSearchBaseItems();
+  const nextItems = filterPopupItemsLocally({
+    items: sourceItems,
     query: elements.searchInput.value,
     typeFilter: activeTypeFilter,
     suggestedOnly,
-    pageUrl: activePageUrl,
   });
+  renderCredentialList(nextItems, { preserveSelectionOnEmpty: true });
+}
+
+function updateFolderStateSnapshotFromResponse(response) {
+  if (!response || typeof response !== 'object') {
+    return;
+  }
+  folderStateSnapshot = {
+    folders: Array.isArray(response.folders) ? response.folders : [],
+    assignments: Array.isArray(response.assignments) ? response.assignments : [],
+    etag: typeof response.etag === 'string' ? response.etag : null,
+  };
+}
+
+async function requestPopupSnapshot(options = {}) {
+  return sendBackgroundCommand({
+    type: 'vaultlite.get_popup_snapshot',
+    query: options.query ?? elements.searchInput.value,
+    typeFilter: options.typeFilter ?? activeTypeFilter,
+    suggestedOnly: options.suggestedOnly ?? suggestedOnly,
+    pageUrl: typeof options.pageUrl === 'string' ? options.pageUrl : activePageUrl,
+    selectedItemId:
+      typeof options.selectedItemId === 'string'
+        ? options.selectedItemId
+        : typeof selectedItemId === 'string'
+          ? selectedItemId
+          : '',
+  });
+}
+
+function schedulePopupReconcile(domains, options = {}) {
+  if (resolveEffectivePopupPhase(currentState) !== 'ready') {
+    return;
+  }
+  const domainList = Array.isArray(domains) ? domains.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
+  if (domainList.length === 0) {
+    return;
+  }
+  void sendBackgroundCommand({
+    type: 'vaultlite.schedule_popup_reconcile',
+    domains: domainList,
+    selectedItemId:
+      typeof options.selectedItemId === 'string'
+        ? options.selectedItemId
+        : typeof selectedItemId === 'string'
+          ? selectedItemId
+          : '',
+  }).catch(() => {
+    // Best effort only.
+  });
+}
+
+function schedulePopupReconcileAfterFirstPaint(domains, options = {}) {
+  const enqueue = () => {
+    window.setTimeout(() => {
+      schedulePopupReconcile(domains, options);
+    }, 0);
+  };
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => {
+      enqueue();
+    });
+    return;
+  }
+  enqueue();
+}
+
+async function refreshCredentialListForCurrentQuery() {
+  const visibleItemsBeforeRefresh = Array.isArray(currentItems) ? currentItems.slice() : [];
+  const response = await requestPopupSnapshot();
   if (!response.ok) {
     setAlert('warning', response.message || 'Could not refresh search results.');
     return;
   }
+  updateFolderStateSnapshotFromResponse(response);
+  if (
+    shouldPreserveVisibleListDuringWarmup({
+      cacheWarmupState: response.state?.cacheWarmupState ?? currentState?.cacheWarmupState,
+      incomingItems: response.items,
+      visibleItems: visibleItemsBeforeRefresh,
+    })
+  ) {
+    maybeScheduleWarmupListRefresh(response.state ?? currentState, 0);
+    return;
+  }
   renderState({
-    state: currentState,
+    state: response.state ?? currentState,
     page: response.page,
     items: response.items,
   });
@@ -1941,9 +2095,6 @@ function scheduleRealtimePopupRefresh(domains) {
     if (domainsToApply.includes('password_history')) {
       void syncPasswordGeneratorHistoryFromRemote({ force: true });
     }
-    if (domainsToApply.includes('folders')) {
-      void refreshFolderState({ force: true });
-    }
     if (domainsToApply.includes('attachments') && resolvePopupPhase(currentState) === 'ready') {
       void refreshDetailAttachments({
         force: true,
@@ -1951,7 +2102,12 @@ function scheduleRealtimePopupRefresh(domains) {
       });
     }
     const shouldRefreshList = domainsToApply.some(
-      (domain) => domain === 'vault' || domain === 'icons_manual' || domain === 'icons_state',
+      (domain) =>
+        domain === 'vault' ||
+        domain === 'icons_manual' ||
+        domain === 'icons_state' ||
+        domain === 'folders' ||
+        domain === 'popup_state',
     );
     const shouldRefreshHistory = domainsToApply.includes('vault_history');
     if (shouldRefreshHistory && resolvePopupPhase(currentState) === 'ready') {
@@ -1966,6 +2122,7 @@ function scheduleRealtimePopupRefresh(domains) {
     void refreshStateAndMaybeList({
       fetchList: true,
       showLoading: false,
+      scheduleReconcile: false,
     });
   }, REALTIME_POPUP_REFRESH_DEBOUNCE_MS);
 }
@@ -2827,15 +2984,16 @@ function syncDetailPanelStateForSelected() {
     detailHistoryView = 'list';
     detailHistorySummaryExpanded = false;
     detailHistoryRevealKeys.clear();
-    void refreshSelectedItemHistory({ force: false, silent: true });
+    void refreshSelectedItemHistory({ force: false, silent: true, awaitCompletion: false });
   }
   if (folderStateSnapshot.folders.length === 0 && folderStateSnapshot.assignments.length === 0) {
-    void refreshFolderState();
+    void refreshFolderState({ awaitCompletion: false });
   }
   if (detailAttachmentItemId !== selected.itemId) {
     void refreshDetailAttachments({
       force: false,
       silent: true,
+      awaitCompletion: false,
     });
   }
   renderDetailPanels();
@@ -3118,6 +3276,7 @@ function maybeScheduleWarmupListRefresh(nextState, visibleItemsCount = 0) {
     warmupListRefreshTimer = null;
     void refreshStateAndMaybeList({
       showLoading: false,
+      scheduleReconcile: true,
     });
   }, 450);
 }
@@ -3389,15 +3548,17 @@ function renderCredentialList(items, options = {}) {
           </button>
         `;
       } else if (quickAction?.type === 'fill') {
-        const disabledAttr = quickAction.disabled ? 'disabled' : '';
+        const disabledAttr = quickAction.disabled || pendingFillItemId === item.itemId ? 'disabled' : '';
+        const tooltip =
+          pendingFillItemId === item.itemId ? 'Filling credentials...' : quickAction.tooltip;
         sideAction = `
           <button
             type="button"
             class="vault-row-side-hit is-fill"
             data-row-action="quick-fill"
             data-item-id="${sanitizeText(item.itemId)}"
-            title="${sanitizeText(quickAction.tooltip)}"
-            aria-label="${sanitizeText(quickAction.tooltip)}"
+            title="${sanitizeText(tooltip)}"
+            aria-label="${sanitizeText(tooltip)}"
             ${disabledAttr}
           >
             Fill
@@ -3516,6 +3677,15 @@ function renderState(payload) {
   const filteredItems = Array.isArray(payload.items) ? enforceClientTypeFilter(payload.items) : null;
   if (filteredItems) {
     renderCredentialList(filteredItems);
+    if (effectivePhase === 'ready' && elements.searchInput.value.trim().length === 0) {
+      setLocalSearchBaseItems(filteredItems, {
+        scopeKey: JSON.stringify({
+          pageUrl: typeof payload.page?.url === 'string' ? payload.page.url : activePageUrl,
+          typeFilter: activeTypeFilter,
+          suggestedOnly,
+        }),
+      });
+    }
     if (effectivePhase === 'ready' && filteredItems.length > 0) {
       lastReadyListSnapshot = filteredItems.slice(0, 400);
       lastReadyListPageSnapshot = {
@@ -3588,8 +3758,7 @@ async function ensureServerOriginConfigured() {
 async function refreshStateAndMaybeList(options = {}) {
   const fetchList = options?.fetchList !== false;
   const showLoading = options?.showLoading !== false && fetchList;
-  const prefetchedState = options?.prefetchedState ?? null;
-  const forceActiveStateRefresh = options?.forceActiveStateRefresh === true;
+  const scheduleReconcileAfterRender = options?.scheduleReconcile !== false;
   const hasFallbackItems =
     (Array.isArray(currentItems) && currentItems.length > 0) ||
     (Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0);
@@ -3608,23 +3777,6 @@ async function refreshStateAndMaybeList(options = {}) {
       popupAutosizer?.schedule();
     }
   }
-
-  let stateResponse;
-  let localPage = { url: '', eligible: false };
-  const localPagePromise = (async () => {
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const activeTab = tabs[0] ?? null;
-      const activeUrl = typeof activeTab?.url === 'string' ? activeTab.url : '';
-      return {
-        url: activeUrl,
-        eligible: isPageUrlEligibleForFill(activeUrl),
-      };
-    } catch {
-      return { url: '', eligible: false };
-    }
-  })();
-  let preloadedListResponsePromise = null;
   const handleTransportFailure = (error) => {
     const errorKind = typeof error?.kind === 'string' ? error.kind : null;
     const errorCode = typeof error?.code === 'string' ? error.code : null;
@@ -3639,29 +3791,10 @@ async function refreshStateAndMaybeList(options = {}) {
     }
     return false;
   };
+
+  let snapshotResponse;
   try {
-    if (prefetchedState && typeof prefetchedState === 'object') {
-      stateResponse = ok({
-        state: prefetchedState,
-      });
-    } else {
-      if (fetchList && !forceActiveStateRefresh) {
-        localPage = await localPagePromise;
-        preloadedListResponsePromise = sendBackgroundCommand({
-          type: 'vaultlite.list_credentials',
-          query: elements.searchInput.value,
-          typeFilter: activeTypeFilter,
-          suggestedOnly,
-          pageUrl: localPage.url || activePageUrl,
-        })
-          .then((response) => ({ ok: true, response }))
-          .catch((error) => ({ ok: false, error }));
-      }
-      stateResponse = await sendBackgroundCommand({ type: 'vaultlite.get_state', passive: true });
-      if (stateResponse.ok && forceActiveStateRefresh) {
-        stateResponse = await sendBackgroundCommand({ type: 'vaultlite.get_state', passive: false });
-      }
-    }
+    snapshotResponse = await requestPopupSnapshot();
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to refresh extension state.';
     if (!handleTransportFailure(error)) {
@@ -3671,109 +3804,50 @@ async function refreshStateAndMaybeList(options = {}) {
     detailLoading = false;
     return;
   }
-  if (localPage.url === '' && localPage.eligible === false) {
-    localPage = await localPagePromise;
-  }
-  if (!stateResponse.ok) {
+  if (!snapshotResponse.ok) {
     clearWarmupListRefreshTimer();
     vaultLoading = false;
     detailLoading = false;
-    setAlert('danger', stateResponse.message || 'Failed to refresh extension state.');
+    setAlert('danger', snapshotResponse.message || 'Failed to refresh extension state.');
     return;
   }
-
-  if (resolvePopupPhase(stateResponse.state) === 'ready') {
-    if (!fetchList) {
-      const pageChanged = localPage.url !== activePageUrl || localPage.eligible !== activePageEligible;
-      renderState({
-        state: stateResponse.state,
-        page: localPage,
-      });
-      if (pageChanged && currentItems.length > 0) {
-        renderCredentialList(currentItems);
-      }
-      maybeScheduleWarmupListRefresh(stateResponse.state, currentItems.length);
-      return;
-    }
-    let listResponse;
-    if (preloadedListResponsePromise) {
-      const preloadedResult = await preloadedListResponsePromise;
-      if (!preloadedResult.ok) {
-        if (!handleTransportFailure(preloadedResult.error)) {
-          const message =
-            preloadedResult.error instanceof Error
-              ? preloadedResult.error.message
-              : 'Could not load vault.';
-          setAlert('danger', message);
-        }
-        vaultLoading = false;
-        detailLoading = false;
-        return;
-      }
-      listResponse = preloadedResult.response;
-    } else {
-      try {
-        listResponse = await sendBackgroundCommand({
-          type: 'vaultlite.list_credentials',
-          query: elements.searchInput.value,
-          typeFilter: activeTypeFilter,
-          suggestedOnly,
-          pageUrl: localPage.url || activePageUrl,
-        });
-      } catch (error) {
-        if (!handleTransportFailure(error)) {
-          const message = error instanceof Error ? error.message : 'Could not load vault.';
-          setAlert('danger', message);
-        }
-        vaultLoading = false;
-        detailLoading = false;
-        return;
-      }
-    }
-
-    if (!listResponse.ok) {
-      if (shouldForceStateRefreshAfterError(listResponse.code)) {
-        const refreshedStateResponse = await sendBackgroundCommand({
-          type: 'vaultlite.get_state',
-          passive: false,
-        });
-        vaultLoading = false;
-        detailLoading = false;
-        listErrorMessage = '';
-        if (refreshedStateResponse.ok) {
-          renderState({
-            state: refreshedStateResponse.state,
-            page: localPage,
-            items: [],
-          });
-          maybeScheduleWarmupListRefresh(refreshedStateResponse.state, 0);
-        } else {
-          renderState({ state: stateResponse.state, page: {}, items: [] });
-          setAlert('danger', refreshedStateResponse.message || 'Failed to refresh extension state.');
-        }
-        return;
-      }
-      clearWarmupListRefreshTimer();
-      vaultLoading = false;
-      detailLoading = false;
-      listErrorMessage = 'Could not load vault.';
-      renderState({ state: stateResponse.state, page: {}, items: [] });
-      setAlert('danger', listResponse.message || 'Could not load vault.');
-      return;
-    }
-
+  updateFolderStateSnapshotFromResponse(snapshotResponse);
+  const stateSnapshot = snapshotResponse.state ?? currentState;
+  const pageSnapshot = snapshotResponse.page ?? {};
+  if (resolvePopupPhase(stateSnapshot) === 'ready') {
     vaultLoading = false;
     detailLoading = false;
     listErrorMessage = '';
+    if (
+      fetchList &&
+      shouldPreserveVisibleListDuringWarmup({
+        cacheWarmupState: stateSnapshot?.cacheWarmupState,
+        incomingItems: snapshotResponse.items,
+        visibleItems: currentItems,
+      })
+    ) {
+      renderState({
+        state: stateSnapshot,
+        page: pageSnapshot,
+      });
+      maybeScheduleWarmupListRefresh(stateSnapshot, 0);
+      if (scheduleReconcileAfterRender) {
+        schedulePopupReconcile(['session', 'vault', 'folders', 'icons']);
+      }
+      return;
+    }
     renderState({
-      state: stateResponse.state,
-      page: listResponse.page ?? localPage,
-      items: listResponse.items,
+      state: stateSnapshot,
+      page: pageSnapshot,
+      items: fetchList ? snapshotResponse.items : undefined,
     });
     maybeScheduleWarmupListRefresh(
-      stateResponse.state,
-      Array.isArray(listResponse.items) ? listResponse.items.length : 0,
+      stateSnapshot,
+      fetchList && Array.isArray(snapshotResponse.items) ? snapshotResponse.items.length : currentItems.length,
     );
+    if (scheduleReconcileAfterRender) {
+      schedulePopupReconcile(['session', 'vault', 'folders', 'icons']);
+    }
     return;
   }
 
@@ -3781,8 +3855,8 @@ async function refreshStateAndMaybeList(options = {}) {
   vaultLoading = false;
   detailLoading = false;
   renderState({
-    state: stateResponse.state,
-    page: localPage,
+    state: stateSnapshot,
+    page: pageSnapshot,
     items: [],
   });
 }
@@ -3918,6 +3992,9 @@ async function cancelLinkPairing() {
 }
 
 async function handleUnlock() {
+  if (elements.unlockBtn.dataset.loading === 'true') {
+    return;
+  }
   clearUnlockPasswordError();
   const password = elements.unlockPasswordInput.value;
   if (!password) {
@@ -3928,17 +4005,33 @@ async function handleUnlock() {
   const unlockIcon = elements.unlockBtn.querySelector('.material-symbols-rounded');
   const previousIcon = unlockIcon?.textContent ?? 'arrow_forward';
   elements.unlockBtn.dataset.loading = 'true';
+  elements.unlockBtn.disabled = true;
   if (unlockIcon) {
     unlockIcon.textContent = 'progress_activity';
   }
   elements.unlockPasswordInput.disabled = true;
-  const response = await sendBackgroundCommand({
-    type: 'vaultlite.unlock_local',
-    password,
-  });
+  let response;
+  try {
+    response = await sendBackgroundCommand({
+      type: 'vaultlite.unlock_local',
+      password,
+      pageUrl: activePageUrl,
+    });
+  } catch (error) {
+    delete elements.unlockBtn.dataset.loading;
+    elements.unlockBtn.disabled = false;
+    if (unlockIcon) {
+      unlockIcon.textContent = previousIcon;
+    }
+    elements.unlockPasswordInput.disabled = false;
+    setAlert('danger', error instanceof Error ? error.message : 'Unlock failed.');
+    elements.unlockPasswordInput.focus({ preventScroll: true });
+    return;
+  }
 
   if (!response.ok) {
     delete elements.unlockBtn.dataset.loading;
+    elements.unlockBtn.disabled = false;
     if (unlockIcon) {
       unlockIcon.textContent = previousIcon;
     }
@@ -3959,6 +4052,7 @@ async function handleUnlock() {
   clearUnlockPasswordError();
   setUnlockPasswordVisibility(false);
   delete elements.unlockBtn.dataset.loading;
+  elements.unlockBtn.disabled = false;
   if (unlockIcon) {
     unlockIcon.textContent = previousIcon;
   }
@@ -3976,30 +4070,35 @@ async function handleUnlock() {
       (!Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0) &&
       unlockTrustedSignature
     ) {
-      await loadPersistedReadyListSnapshot(unlockTrustedSignature);
+      await loadPersistedReadyListSnapshot(
+        unlockTrustedSignature,
+        typeof unlockedState?.serverOrigin === 'string' ? unlockedState.serverOrigin : null,
+      );
     }
-    const hasRenderableItems = Array.isArray(currentItems) && currentItems.length > 0;
-    const fallbackItems =
-      hasRenderableItems || !Array.isArray(lastReadyListSnapshot) || lastReadyListSnapshot.length === 0
-        ? currentItems
-        : lastReadyListSnapshot;
-    const hasFallbackItems = Array.isArray(fallbackItems) && fallbackItems.length > 0;
-    vaultLoading = !hasFallbackItems;
+    updateFolderStateSnapshotFromResponse(response);
+    const fallbackUnlockItems =
+      Array.isArray(lastReadyListSnapshot) && lastReadyListSnapshot.length > 0
+        ? lastReadyListSnapshot
+        : Array.isArray(currentItems) && currentItems.length > 0
+          ? currentItems
+          : [];
+    const unlockItems =
+      Array.isArray(response.items) && response.items.length > 0 ? response.items : fallbackUnlockItems;
+    const unlockPage = response.page ?? {
+      url: activePageUrl || lastReadyListPageSnapshot.url || '',
+      eligible: activePageEligible || lastReadyListPageSnapshot.eligible === true,
+    };
+    const hasRenderableItems = unlockItems.length > 0;
+    vaultLoading = !hasRenderableItems;
     detailLoading = false;
     listErrorMessage = '';
     renderState({
       state: unlockedState,
-      page: {
-        url: activePageUrl || lastReadyListPageSnapshot.url || '',
-        eligible: activePageEligible || lastReadyListPageSnapshot.eligible === true,
-      },
-      items: hasFallbackItems ? fallbackItems : [],
+      page: unlockPage,
+      items: unlockItems,
     });
-    maybeScheduleWarmupListRefresh(unlockedState, hasFallbackItems ? fallbackItems.length : 0);
-    void refreshStateAndMaybeList({
-      showLoading: false,
-      prefetchedState: unlockedState,
-    });
+    maybeScheduleWarmupListRefresh(unlockedState, unlockItems.length);
+    schedulePopupReconcileAfterFirstPaint(['session', 'vault', 'folders', 'icons']);
     return;
   }
   await refreshStateAndMaybeList();
@@ -4145,10 +4244,17 @@ async function lockExtension() {
 }
 
 async function triggerFill(itemId) {
+  if (pendingFillItemId === itemId) {
+    return;
+  }
+  pendingFillItemId = itemId;
+  renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
   const response = await sendBackgroundCommand({
     type: 'vaultlite.fill_credential',
     itemId,
   });
+  pendingFillItemId = null;
+  renderCredentialList(currentItems, { preserveSelectionOnEmpty: true });
   if (!response.ok) {
     setAlert('danger', response.message || 'Manual fill failed.');
     return;
@@ -4450,6 +4556,7 @@ async function refreshSelectedItemHistory(options = {}) {
     itemId: selected.itemId,
     force: forceRefresh,
     limit: 40,
+    awaitCompletion: options.awaitCompletion !== false,
   });
   detailHistoryLoading = false;
   if (!response?.ok) {
@@ -4469,6 +4576,7 @@ async function refreshFolderState(options = {}) {
     type: 'vaultlite.list_folders_state',
     force: options.force === true,
     revalidate: options.revalidate === true,
+    awaitCompletion: options.awaitCompletion !== false,
   });
   if (!response?.ok) {
     return;
@@ -4530,7 +4638,7 @@ function openDetailCreatePanel(itemType = 'login') {
   setDetailEditError('');
   closeDetailMenu();
   elements.detailTitle.textContent = detailCreateDraft.title || 'New item';
-  void refreshFolderState({ revalidate: true });
+  void refreshFolderState({ revalidate: true, awaitCompletion: false });
   renderCredentialDetails();
   persistPopupUiState();
 }
@@ -4882,6 +4990,7 @@ function wireEvents() {
       }
       selectedItemId = null;
       persistPopupUiState();
+      applyLocalCredentialListForCurrentQuery();
       void refreshStateAndMaybeList();
     },
   });
@@ -4923,7 +5032,7 @@ function wireEvents() {
     void runAction(startLinkPairing);
   });
   elements.unlockBtn.addEventListener('click', () => {
-    void runAction(handleUnlock);
+    void handleUnlock();
   });
   elements.unlockRevealBtn.addEventListener('click', () => {
     setUnlockPasswordVisibility(!unlockPasswordRevealed);
@@ -4932,7 +5041,7 @@ function wireEvents() {
   elements.unlockPasswordInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      void runAction(handleUnlock);
+      void handleUnlock();
     }
   });
   elements.openApprovalBtn.addEventListener('click', () => {
@@ -4948,7 +5057,7 @@ function wireEvents() {
     void runAction(cancelLinkPairing);
   });
   elements.lockBtn.addEventListener('click', () => {
-    void runAction(lockExtension);
+    void lockExtension();
   });
   elements.passwordGeneratorBtn.addEventListener('click', (event) => {
     event.preventDefault();
@@ -5059,6 +5168,7 @@ function wireEvents() {
   elements.searchInput.addEventListener('input', () => {
     persistPopupUiState();
     updateSearchClearVisibility();
+    applyLocalCredentialListForCurrentQuery();
     scheduleSearchRefresh(120);
   });
 
@@ -5070,6 +5180,7 @@ function wireEvents() {
     elements.searchInput.focus();
     persistPopupUiState();
     updateSearchClearVisibility();
+    applyLocalCredentialListForCurrentQuery();
     scheduleSearchRefresh(0);
   });
 
@@ -5089,7 +5200,7 @@ function wireEvents() {
         if (actionButton instanceof HTMLElement) {
           actionButton.blur();
         }
-        void runAction(async () => openCredentialUrl(actionItemId, { closePopup: true }));
+        void openCredentialUrl(actionItemId, { closePopup: true });
         return;
       }
       if (action === 'quick-fill') {
@@ -5098,7 +5209,7 @@ function wireEvents() {
         if (actionButton instanceof HTMLElement) {
           actionButton.blur();
         }
-        void runAction(async () => triggerFill(actionItemId));
+        void triggerFill(actionItemId);
         return;
       }
       if (action === 'restore-item') {
@@ -5145,7 +5256,7 @@ function wireEvents() {
       const hasUrl = Boolean(toNavigableUrl(item?.firstUrl ?? ''));
       if (hasUrl) {
         event.preventDefault();
-        void runAction(async () => openCredentialUrl(itemId, { closePopup: true }));
+        void openCredentialUrl(itemId, { closePopup: true });
       }
       return;
     }
@@ -5170,12 +5281,14 @@ function wireEvents() {
       elements.searchInput.value = '';
       persistPopupUiState();
       updateSearchClearVisibility();
-      void refreshStateAndMaybeList();
+      applyLocalCredentialListForCurrentQuery();
+      scheduleSearchRefresh(0);
       return;
     }
     if (action === 'show-all') {
       suggestedOnly = false;
       persistPopupUiState();
+      applyLocalCredentialListForCurrentQuery();
       void refreshStateAndMaybeList();
       return;
     }
@@ -5622,6 +5735,7 @@ function wireEvents() {
   window.addEventListener('focus', () => {
     if (resolveEffectivePopupPhase(currentState) === 'ready' && !inFlight) {
       scheduleReadySearchFocus();
+      schedulePopupReconcile(['session', 'vault', 'folders', 'icons']);
     }
   });
 
@@ -5797,6 +5911,7 @@ function scheduleRefresh() {
     void refreshStateAndMaybeList({
       fetchList: false,
       showLoading: false,
+      scheduleReconcile: true,
     });
   }, refreshIntervalMs);
 }
@@ -5842,7 +5957,10 @@ popupAutosizer = createPopupAutosizer({
 void (async () => {
   await loadPersistedPopupUiState();
   const trustedRecord = await loadTrustedIdentitySignatureFromLocal();
-  await loadPersistedReadyListSnapshot(trustedIdentitySignature);
+  await loadPersistedReadyListSnapshot(
+    trustedIdentitySignature,
+    typeof trustedRecord?.serverOrigin === 'string' ? trustedRecord.serverOrigin : null,
+  );
   popupUiStateHydrated = true;
   const initialState = await buildInitialStateSnapshot({
     expectedTrustedSignature: trustedIdentitySignature,
@@ -5870,7 +5988,11 @@ void (async () => {
     items: startupItems,
   });
   await loadPasswordGeneratorHistory();
-  await refreshStateAndMaybeList();
-  void refreshFolderState({ revalidate: true });
+  await refreshStateAndMaybeList({
+    scheduleReconcile: false,
+  });
+  if (resolveEffectivePopupPhase(currentState) === 'ready') {
+    schedulePopupReconcileAfterFirstPaint(['session', 'vault', 'folders', 'icons']);
+  }
   scheduleRefresh();
 })();
