@@ -6339,6 +6339,7 @@ function isRetryableOpenAndFillResult(result) {
   return (
     result === 'manual_fill_unavailable' ||
     result === 'page_changed_try_again' ||
+    result === 'step_transition_try_again' ||
     result === 'unsupported_form' ||
     result === 'no_eligible_fields'
   );

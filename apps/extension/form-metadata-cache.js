@@ -66,13 +66,15 @@ function recordsEquivalent(left, right) {
   );
 }
 
-function normalizeRecord(record) {
+function normalizeComparableRecord(record, input = {}) {
   const canonicalOrigin = canonicalizeFormMetadataOrigin(record?.origin);
   if (!canonicalOrigin) {
     return null;
   }
+  const requireMetadataId = input?.requireMetadataId === true;
+  const metadataId =
+    typeof record?.metadataId === 'string' && record.metadataId.length > 0 ? record.metadataId : null;
   if (
-    typeof record?.metadataId !== 'string' ||
     typeof record?.formFingerprint !== 'string' ||
     typeof record?.fieldFingerprint !== 'string' ||
     typeof record?.fieldRole !== 'string' ||
@@ -80,7 +82,7 @@ function normalizeRecord(record) {
     typeof record?.frameScope !== 'string' ||
     typeof record?.confidence !== 'string' ||
     typeof record?.selectorStatus !== 'string' ||
-    record.metadataId.length === 0 ||
+    (requireMetadataId && metadataId === null) ||
     record.formFingerprint.length === 0 ||
     record.fieldFingerprint.length === 0 ||
     record.fieldRole.length === 0 ||
@@ -92,7 +94,7 @@ function normalizeRecord(record) {
     return null;
   }
   return {
-    metadataId: record.metadataId,
+    metadataId,
     ownerUserId: typeof record?.ownerUserId === 'string' && record.ownerUserId.length > 0 ? record.ownerUserId : null,
     itemId: typeof record?.itemId === 'string' && record.itemId.length > 0 ? record.itemId : null,
     origin: canonicalOrigin,
@@ -130,6 +132,18 @@ function normalizeRecord(record) {
         ? record.lastConfirmedAt
         : null,
   };
+}
+
+function normalizeRecord(record) {
+  return normalizeComparableRecord(record, {
+    requireMetadataId: true,
+  });
+}
+
+function normalizeUpsertCandidateRecord(record) {
+  return normalizeComparableRecord(record, {
+    requireMetadataId: false,
+  });
 }
 
 export function normalizeFormMetadataCache(raw) {
@@ -393,7 +407,7 @@ export function findCachedFormMetadataRecord(cacheInput, input = {}) {
 }
 
 export function shouldUpsertFormMetadataRecord(cacheInput, recordInput) {
-  const candidate = normalizeRecord(recordInput);
+  const candidate = normalizeUpsertCandidateRecord(recordInput);
   if (!candidate) {
     return false;
   }

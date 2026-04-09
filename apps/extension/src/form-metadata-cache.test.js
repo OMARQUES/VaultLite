@@ -40,6 +40,17 @@ function makeRecord(overrides = {}) {
   };
 }
 
+function makeCandidate(overrides = {}) {
+  const record = makeRecord(overrides);
+  delete record.metadataId;
+  delete record.ownerUserId;
+  delete record.sourceDeviceId;
+  delete record.createdAt;
+  delete record.updatedAt;
+  delete record.lastConfirmedAt;
+  return record;
+}
+
 describe('form metadata cache helpers', () => {
   test('replaces queried origins, filters retired records, and sorts by usefulness', () => {
     const cache = createEmptyFormMetadataCache();
@@ -195,6 +206,42 @@ describe('form metadata cache helpers', () => {
     ).toBe(false);
   });
 
+  test('treats a new valid observation without metadataId as upsertable and still suppresses identical persisted matches', () => {
+    expect(shouldUpsertFormMetadataRecord(createEmptyFormMetadataCache(), makeCandidate())).toBe(true);
+
+    const cache = upsertFormMetadataRecordInCache(createEmptyFormMetadataCache(), makeRecord(), {
+      identityKey: 'deployment:user_1:device_1',
+      syncedAt: 100,
+    });
+
+    expect(shouldUpsertFormMetadataRecord(cache, makeCandidate())).toBe(false);
+  });
+
+  test('allows promoting an existing record when the candidate observation has no metadataId yet', () => {
+    const cache = upsertFormMetadataRecordInCache(
+      createEmptyFormMetadataCache(),
+      makeRecord({
+        itemId: 'item_1',
+        confidence: 'filled',
+      }),
+      {
+        identityKey: 'deployment:user_1:device_1',
+        syncedAt: 100,
+      },
+    );
+
+    expect(
+      shouldUpsertFormMetadataRecord(
+        cache,
+        makeCandidate({
+          itemId: 'item_1',
+          confidence: 'submitted_confirmed',
+          lastConfirmedAt: '2026-04-01T12:15:00.000Z',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   test('still allows same-confidence selector changes and selector status transitions', () => {
     const cache = upsertFormMetadataRecordInCache(
       createEmptyFormMetadataCache(),
@@ -239,5 +286,30 @@ describe('form metadata cache helpers', () => {
         itemId: 'item_1',
       })?.selectorCss,
     ).toBe('#email');
+  });
+
+  test('allows selector corrections from a candidate observation without metadataId', () => {
+    const cache = upsertFormMetadataRecordInCache(
+      createEmptyFormMetadataCache(),
+      makeRecord({
+        itemId: 'item_1',
+        confidence: 'filled',
+      }),
+      {
+        identityKey: 'deployment:user_1:device_1',
+        syncedAt: 100,
+      },
+    );
+
+    expect(
+      shouldUpsertFormMetadataRecord(
+        cache,
+        makeCandidate({
+          itemId: 'item_1',
+          confidence: 'filled',
+          selectorCss: 'input[name="email"]',
+        }),
+      ),
+    ).toBe(true);
   });
 });

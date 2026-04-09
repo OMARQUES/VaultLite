@@ -121,12 +121,12 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 
 ## Current Focus
 
-Active phase: `Phase 12 - Final Hardening and Release Readiness`
-Active card: `P12-C01 - Threat-model review update`
+Active phase: `Phase 13 - Intelligent Assist and Contextual Autofill`
+Active card: `P13-C04 - Inline field suggestion anchor (content-script)`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P11` extension baseline has been stabilized in repo with LTS pairing, unlock/session continuity, bridge hardening, and manual-icon flows; execution focus is now release hardening and threat-model reconciliation.
-Suggested immediate sequence: `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -> `P12-C06` -> `P12-C07` -> `P12-C08` -> `P12-C03`.
-Post-Phase-12 queued sequence: `P13-C01` -> `P13-C02` -> `P13-C03` -> `P13-C04` -> `P13-C05` -> `P13-C06` -> `P13-C07` -> `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11`.
+Reason: `P13-C03` foi fechado com evidência de runtime real: cache local populado, `form-metadata/query` + `upsert` no servidor, persistência em D1 e melhoria validada em fluxos reais de login em etapas como Kabum; por decisão de execução, o próximo passo lógico é seguir a trilha de assist/autofill inline.
+Suggested immediate sequence: `P13-C04` -> `P13-C05` -> `P13-C06` -> `P13-C07`.
+Post-Phase-13 queued sequence: `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11` -> `P13-C12` -> `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -> `P12-C06` -> `P12-C07` -> `P12-C08` -> `P12-C03`.
 ## Index of Cards
 
 - `GG-01` Threat model and architectural gate — `done`
@@ -243,7 +243,7 @@ Post-Phase-12 queued sequence: `P13-C01` -> `P13-C02` -> `P13-C03` -> `P13-C04` 
 - `P12-C08` Release go/no-go checklist — `not_started`
 - `P13-C01` Extension item edit parity — `not_started`
 - `P13-C02` Item change history with field-level diff visibility — `not_started`
-- `P13-C03` Form metadata capture and sync contracts — `not_started`
+- `P13-C03` Form metadata capture and sync contracts — `done`
 - `P13-C04` Inline field suggestion anchor (content-script) — `not_started`
 - `P13-C05` Inline mini-search and ranked credential suggestion tray — `not_started`
 - `P13-C06` Save login and update password post-submit prompts — `not_started`
@@ -2671,7 +2671,7 @@ Suggested next action: definir contrato de evento de histórico em `packages/con
 Card ID: `P13-C03`
 Title: `Form metadata capture and sync contracts`
 Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
-Status: `in_progress`
+Status: `done`
 Priority: `P0`
 Objective: Capturar e sincronizar metadados de formulário para melhorar preenchimentos futuros.
 Description: Salvar fingerprint/seletores/roles por origem e item, atualizar metadados quando o site mudar, e sincronizar entre dispositivos por realtime.
@@ -2684,9 +2684,9 @@ Deliverables: contrato e pipeline de metadados de formulário sincronizado.
 Required tests: API/extension tests para criação, atualização por mudança de layout e propagação realtime sem loop.
 Acceptance criteria: metadados úteis são reutilizados entre sessões/dispositivos e atualizados quando detecção confirmar novo layout.
 Risks / cautions: ruído de metadados pode degradar ranking se confiança não for bem tratada.
-Notes for Codex/dev: atualizar metadados somente com sinais fortes de sucesso de preenchimento.
-Evidence required to mark done: testes de captura/sync e inspeção de payload sem dados sensíveis desnecessários.
-Suggested next action: implementar tipos `form_fingerprint` e `field_role` nos contratos.
+Notes for Codex/dev: fechado com captura por sinais fortes apenas; sem persistência de valores digitados; suporte validado para login clássico, login em etapas com identificador bloqueado e fase 1 com modal/dialog.
+Evidence required to mark done: contratos, migration e storage em produção local; `query` + `upsert` observados em runtime; D1 com registros persistidos; cache local reutilizando records; payloads inspecionados sem dados sensíveis.
+Suggested next action: iniciar `P13-C04` reutilizando o detector/metadata do content-script como base para ancoragem inline.
 
 ### P13-C04 - Inline field suggestion anchor (content-script)
 Card ID: `P13-C04`

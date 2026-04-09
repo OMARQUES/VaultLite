@@ -17,5 +17,6 @@ describe('open and fill flow wiring', () => {
     expect(source).toContain('chrome.tabs.onRemoved.addListener(');
     expect(source).toContain('async function fillCredentialInTabInternal(');
     expect(source).toContain('lastAttemptAt');
+    expect(source).toContain("result === 'step_transition_try_again'");
   });
 });

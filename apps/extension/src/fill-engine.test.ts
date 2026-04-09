@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  detectBestFillContext,
   buildFieldFingerprint,
   buildFormFingerprint,
   buildFormMetadataObservation,
@@ -13,7 +14,7 @@ import {
 } from './fill-engine';
 
 describe('fill-engine helpers', () => {
-  test('fills username and password in a simple form', () => {
+  test('fills username and password in a simple form', async () => {
     document.body.innerHTML = `
       <form>
         <input id="u" type="email" autocomplete="email" />
@@ -21,7 +22,7 @@ describe('fill-engine helpers', () => {
       </form>
     `;
 
-    const result = fillUsernamePassword({
+    const result = await fillUsernamePassword({
       document,
       credential: {
         username: 'alice@example.com',
@@ -35,7 +36,7 @@ describe('fill-engine helpers', () => {
     expect((document.getElementById('p') as HTMLInputElement).value).toBe('S3cret!');
   });
 
-  test('rejects ambiguous forms with multiple visible current-password fields', () => {
+  test('rejects ambiguous forms with multiple visible current-password fields', async () => {
     document.body.innerHTML = `
       <form>
         <input type="text" />
@@ -44,7 +45,7 @@ describe('fill-engine helpers', () => {
       </form>
     `;
 
-    const result = fillUsernamePassword({
+    const result = await fillUsernamePassword({
       document,
       credential: {
         username: 'alice',
@@ -56,7 +57,7 @@ describe('fill-engine helpers', () => {
     expect(result).toBe('unsupported_form');
   });
 
-  test('prefers current-password when multiple password fields exist', () => {
+  test('prefers current-password when multiple password fields exist', async () => {
     document.body.innerHTML = `
       <form>
         <input id="user" type="text" autocomplete="username" />
@@ -65,7 +66,7 @@ describe('fill-engine helpers', () => {
       </form>
     `;
 
-    const result = fillUsernamePassword({
+    const result = await fillUsernamePassword({
       document,
       credential: {
         username: 'alice@example.com',
@@ -80,7 +81,7 @@ describe('fill-engine helpers', () => {
     expect((document.getElementById('currentPass') as HTMLInputElement).value).toBe('S3cret!');
   });
 
-  test('avoids filling generic search field when a login identifier field exists', () => {
+  test('avoids filling generic search field when a login identifier field exists', async () => {
     document.body.innerHTML = `
       <form>
         <input id="search" type="text" name="search" />
@@ -89,7 +90,7 @@ describe('fill-engine helpers', () => {
       </form>
     `;
 
-    const result = fillUsernamePassword({
+    const result = await fillUsernamePassword({
       document,
       credential: {
         username: 'alice@example.com',
@@ -104,10 +105,10 @@ describe('fill-engine helpers', () => {
     expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
   });
 
-  test('returns no-op on non top-level context', () => {
+  test('returns no-op on non top-level context', async () => {
     document.body.innerHTML = '<input type="password" />';
 
-    const result = fillUsernamePassword({
+    const result = await fillUsernamePassword({
       document,
       credential: {
         username: 'alice',
@@ -243,5 +244,318 @@ describe('fill-engine helpers', () => {
     });
     expect(passwordObservation?.selectorFallbacks.length).toBeLessThanOrEqual(5);
     expect(passwordObservation?.selectorCss.length).toBeGreaterThan(0);
+  });
+
+  test('detects password step when identifier is disabled in the same form', () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" autocomplete="current-pasword" />
+      </form>
+    `;
+
+    const context = detectBestFillContext({
+      document,
+      frameScope: 'top',
+    });
+
+    expect(context?.mode).toBe('password_step');
+    expect(context?.usernameField?.id).toBe('login');
+    expect(context?.passwordField?.id).toBe('password');
+  });
+
+  test('detects password step when identifier is readonly in the same form', () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login" type="email" name="login" value="alice@example.com" readonly />
+        <input id="password" type="password" name="password" />
+      </form>
+    `;
+
+    const context = detectBestFillContext({
+      document,
+      frameScope: 'top',
+    });
+
+    expect(context?.mode).toBe('password_step');
+    expect(context?.usernameField?.id).toBe('login');
+    expect(context?.passwordField?.id).toBe('password');
+  });
+
+  test('detects identifier step and auto-advances before filling password', async () => {
+    document.body.innerHTML = `
+      <form id="step-login">
+        <input id="login" type="text" name="login" autocomplete="current-login" />
+        <button id="continue" type="submit">Continuar</button>
+      </form>
+    `;
+
+    const form = document.getElementById('step-login') as HTMLFormElement;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      form.innerHTML = `
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" autocomplete="current-pasword" />
+        <button id="submit" type="submit">Entrar</button>
+      `;
+    });
+
+    const context = detectBestFillContext({
+      document,
+      frameScope: 'top',
+    });
+    expect(context?.mode).toBe('identifier_step');
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('login') as HTMLInputElement).value).toBe('alice@example.com');
+    expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
+  });
+
+  test('returns step transition retry when identifier step does not reveal password in time', async () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login" type="text" name="login" />
+        <button type="submit">Continuar</button>
+      </form>
+    `;
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('step_transition_try_again');
+  });
+
+  test('waits for identifier-step submitter that is enabled after blur before advancing', async () => {
+    document.body.innerHTML = `
+      <form id="step-login">
+        <input id="login" type="text" name="login" autocomplete="current-login" />
+        <button id="continue" type="submit" disabled>Entrar</button>
+      </form>
+    `;
+
+    const form = document.getElementById('step-login') as HTMLFormElement;
+    const login = document.getElementById('login') as HTMLInputElement;
+    const continueButton = document.getElementById('continue') as HTMLButtonElement;
+
+    login.addEventListener('blur', () => {
+      continueButton.disabled = false;
+    });
+
+    form.requestSubmit = ((submitter?: HTMLElement) => {
+      if (!(submitter instanceof HTMLButtonElement) || submitter.disabled) {
+        return;
+      }
+      form.innerHTML = `
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" />
+        <button id="submit" type="submit">Entrar</button>
+      `;
+    }) as typeof form.requestSubmit;
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
+  });
+
+  test('waits briefly for controlled identifier-step submitter to enable after input', async () => {
+    document.body.innerHTML = `
+      <form id="step-login">
+        <input id="login" type="text" name="login" autocomplete="current-login" />
+        <button id="continue" type="submit" disabled>Entrar</button>
+      </form>
+    `;
+
+    const form = document.getElementById('step-login') as HTMLFormElement;
+    const login = document.getElementById('login') as HTMLInputElement;
+    const continueButton = document.getElementById('continue') as HTMLButtonElement;
+
+    login.addEventListener('input', () => {
+      setTimeout(() => {
+        continueButton.disabled = false;
+      }, 10);
+    });
+
+    form.requestSubmit = ((submitter?: HTMLElement) => {
+      if (!(submitter instanceof HTMLButtonElement) || submitter.disabled) {
+        return;
+      }
+      form.innerHTML = `
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" />
+        <button id="submit" type="submit">Entrar</button>
+      `;
+    }) as typeof form.requestSubmit;
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
+  });
+
+  test('prefers identifier step inside an open dialog over competing background inputs', async () => {
+    document.body.innerHTML = `
+      <form id="background-form">
+        <input id="background-email" type="email" name="email" placeholder="E-mail ou usuário" />
+        <button type="submit">Enviar</button>
+      </form>
+      <div role="dialog" aria-modal="true">
+        <form id="modal-form">
+          <input id="modal-login" type="text" name="login" autocomplete="current-login" />
+          <button id="modal-continue" type="submit" disabled>Entrar</button>
+        </form>
+      </div>
+    `;
+
+    const modalForm = document.getElementById('modal-form') as HTMLFormElement;
+    const modalLogin = document.getElementById('modal-login') as HTMLInputElement;
+    const modalContinue = document.getElementById('modal-continue') as HTMLButtonElement;
+
+    modalLogin.addEventListener('keyup', () => {
+      modalContinue.disabled = false;
+    });
+
+    modalForm.requestSubmit = ((submitter?: HTMLElement) => {
+      if (!(submitter instanceof HTMLButtonElement) || submitter.disabled) {
+        return;
+      }
+      modalForm.innerHTML = `
+        <input id="modal-login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="modal-password" type="password" name="password" />
+        <button type="submit">Continuar</button>
+      `;
+    }) as typeof modalForm.requestSubmit;
+
+    const context = detectBestFillContext({
+      document,
+      frameScope: 'top',
+    });
+
+    expect(context?.mode).toBe('identifier_step');
+    expect(context?.usernameField?.id).toBe('modal-login');
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('background-email') as HTMLInputElement).value).toBe('');
+    expect((document.getElementById('modal-password') as HTMLInputElement).value).toBe('S3cret!');
+  });
+
+  test('waits for identifier-step submitter that enables on keyup listeners', async () => {
+    document.body.innerHTML = `
+      <form id="step-login">
+        <input id="login" type="text" name="login" autocomplete="current-login" />
+        <button id="continue" type="submit" disabled>Entrar</button>
+      </form>
+    `;
+
+    const form = document.getElementById('step-login') as HTMLFormElement;
+    const login = document.getElementById('login') as HTMLInputElement;
+    const continueButton = document.getElementById('continue') as HTMLButtonElement;
+
+    login.addEventListener('keyup', () => {
+      continueButton.disabled = false;
+    });
+
+    form.requestSubmit = ((submitter?: HTMLElement) => {
+      if (!(submitter instanceof HTMLButtonElement) || submitter.disabled) {
+        return;
+      }
+      form.innerHTML = `
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" />
+        <button id="submit" type="submit">Entrar</button>
+      `;
+    }) as typeof form.requestSubmit;
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
+  });
+
+  test('waits long enough for delayed identifier-step submitter enablement', async () => {
+    document.body.innerHTML = `
+      <form id="step-login">
+        <input id="login" type="text" name="login" autocomplete="current-login" />
+        <button id="continue" type="submit" disabled>Entrar</button>
+      </form>
+    `;
+
+    const form = document.getElementById('step-login') as HTMLFormElement;
+    const login = document.getElementById('login') as HTMLInputElement;
+    const continueButton = document.getElementById('continue') as HTMLButtonElement;
+
+    login.addEventListener('input', () => {
+      setTimeout(() => {
+        continueButton.disabled = false;
+      }, 700);
+    });
+
+    form.requestSubmit = ((submitter?: HTMLElement) => {
+      if (!(submitter instanceof HTMLButtonElement) || submitter.disabled) {
+        return;
+      }
+      form.innerHTML = `
+        <input id="login" type="text" name="login" value="alice@example.com" disabled />
+        <input id="password" type="password" name="password" />
+        <button id="submit" type="submit">Entrar</button>
+      `;
+    }) as typeof form.requestSubmit;
+
+    const result = await fillUsernamePassword({
+      document,
+      credential: {
+        username: 'alice@example.com',
+        password: 'S3cret!',
+      },
+      topLevel: true,
+    });
+
+    expect(result).toBe('filled');
+    expect((document.getElementById('password') as HTMLInputElement).value).toBe('S3cret!');
   });
 });

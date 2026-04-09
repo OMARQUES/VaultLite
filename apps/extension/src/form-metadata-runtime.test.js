@@ -11,7 +11,12 @@ describe('form metadata runtime integration', () => {
     expect(source).toContain("const CONTENT_RUNTIME_KEY = '__vaultliteContentRuntimeV2';");
     expect(source).toContain("frameScope: accumulator.length === 0 ? 'top' : 'same_origin_iframe'");
     expect(source).toContain("type: 'vaultlite.form_metadata_submit_signal'");
-    expect(source).toContain('const heuristicObservations = matchedRecords.length > 0 ? [] : [');
+    expect(source).toContain('function buildObservationEntries(contexts = []) {');
+    expect(source).toContain('observationEntries: buildObservationEntries(filledContexts),');
+    expect(source).toContain("mode: 'identifier_step'");
+    expect(source).toContain("mode: 'password_step'");
+    expect(source).toContain('requestSubmit(');
+    expect(source).toContain("result: 'step_transition_try_again'");
   });
 
   test('background consumes fill telemetry and content-script submit signals', () => {
@@ -22,5 +27,8 @@ describe('form metadata runtime integration', () => {
     expect(source).toContain("case 'vaultlite.form_metadata_submit_signal':");
     expect(source).toContain("return handleFormMetadataSubmitSignalInternal(command, sender);");
     expect(source).toContain('if (!shouldUpsertFormMetadataRecord(formMetadataCache, candidate)) {');
+    expect(source).toContain('for (const rawObservation of fillObservations) {');
+    expect(source).toContain('await upsertFormMetadataInternal(normalized);');
+    expect(source).toContain('fillObservations: Array.isArray(input?.observations) ? input.observations : [],');
   });
 });

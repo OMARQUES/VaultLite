@@ -2,7 +2,8 @@ export type ManualFillResult =
   | 'filled'
   | 'unsupported_form'
   | 'no_eligible_fields'
-  | 'manual_fill_unavailable';
+  | 'manual_fill_unavailable'
+  | 'step_transition_try_again';
 
 export type FormMetadataFieldRole =
   | 'username'
@@ -31,9 +32,23 @@ export interface DetectedLoginFormContext {
   frameScope: FormMetadataFrameScope;
   formElement: HTMLFormElement | null;
   orderedFields: HTMLInputElement[];
+  mode: 'full_login';
   usernameField: HTMLInputElement;
   usernameRole: 'username' | 'email';
   passwordField: HTMLInputElement;
+  submitter: HTMLElement | null;
+}
+
+export interface DetectedFillContext {
+  document: Document;
+  frameScope: FormMetadataFrameScope;
+  formElement: HTMLFormElement | null;
+  orderedFields: HTMLInputElement[];
+  mode: 'full_login' | 'identifier_step' | 'password_step';
+  usernameField: HTMLInputElement | null;
+  usernameRole: 'username' | 'email' | null;
+  passwordField: HTMLInputElement | null;
+  submitter: HTMLElement | null;
 }
 
 export interface FormMetadataObservation {
@@ -67,8 +82,8 @@ const OTP_PATTERN =
 const TEXT_NORMALIZATION_PATTERN = /[\s\p{P}\p{S}]+/gu;
 const MAX_NORMALIZED_TEXT_LENGTH = 120;
 
-function isVisibleAndEnabled(input: HTMLInputElement): boolean {
-  if (input.disabled || input.type === 'hidden') {
+function isVisibleInput(input: HTMLInputElement): boolean {
+  if (input.type === 'hidden') {
     return false;
   }
   const style = globalThis.getComputedStyle ? globalThis.getComputedStyle(input) : null;
@@ -76,6 +91,58 @@ function isVisibleAndEnabled(input: HTMLInputElement): boolean {
     return false;
   }
   return true;
+}
+
+function isVisibleAndEnabled(input: HTMLInputElement): boolean {
+  return isVisibleInput(input) && !input.disabled;
+}
+
+function isWritableInput(input: HTMLInputElement): boolean {
+  return isVisibleInput(input) && !input.disabled && !input.readOnly;
+}
+
+function hasNonEmptyValue(input: HTMLInputElement): boolean {
+  return typeof input.value === 'string' && input.value.trim().length > 0;
+}
+
+function isVisibleElement(element: Element | null): element is HTMLElement {
+  if (!(element instanceof HTMLElement)) {
+    return false;
+  }
+  const style = globalThis.getComputedStyle ? globalThis.getComputedStyle(element) : null;
+  if (style && (style.display === 'none' || style.visibility === 'hidden')) {
+    return false;
+  }
+  return true;
+}
+
+function findPreferredFieldRoot(document: Document): ParentNode {
+  const dialogCandidates = Array.from(
+    document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]'),
+  ).filter((candidate): candidate is HTMLElement => isVisibleElement(candidate));
+  for (let index = dialogCandidates.length - 1; index >= 0; index -= 1) {
+    const candidate = dialogCandidates[index];
+    if (candidate.querySelector('input')) {
+      return candidate;
+    }
+  }
+  return document;
+}
+
+function queryScopedInputs(
+  document: Document,
+  predicate: (field: HTMLInputElement) => boolean,
+): HTMLInputElement[] {
+  const preferredRoot = findPreferredFieldRoot(document);
+  const preferredInputs = Array.from(preferredRoot.querySelectorAll('input')).filter(
+    (field): field is HTMLInputElement => field instanceof HTMLInputElement && predicate(field),
+  );
+  if (preferredInputs.length > 0) {
+    return preferredInputs;
+  }
+  return Array.from(document.querySelectorAll('input')).filter(
+    (field): field is HTMLInputElement => field instanceof HTMLInputElement && predicate(field),
+  );
 }
 
 function escapeCssIdentifier(value: string): string {
@@ -226,11 +293,25 @@ export function inferFieldRole(
 }
 
 function isEligibleUsernameInput(input: HTMLInputElement): boolean {
-  if (!isVisibleAndEnabled(input) || normalizeInputType(input) === 'password') {
+  if (!isWritableInput(input) || normalizeInputType(input) === 'password') {
     return false;
   }
   const normalizedType = normalizeInputType(input);
   return normalizedType === 'text' || normalizedType === 'email' || normalizedType === 'tel';
+}
+
+function isContextualUsernameAnchor(input: HTMLInputElement): boolean {
+  if (!isVisibleInput(input) || normalizeInputType(input) === 'password') {
+    return false;
+  }
+  const normalizedType = normalizeInputType(input);
+  if (normalizedType !== 'text' && normalizedType !== 'email' && normalizedType !== 'tel') {
+    return false;
+  }
+  if (!input.disabled && !input.readOnly) {
+    return isEligibleUsernameInput(input);
+  }
+  return hasNonEmptyValue(input);
 }
 
 function scoreUsernameField(
@@ -325,6 +406,104 @@ function pickUsernameField(
     return null;
   }
   return scored[0].candidate;
+}
+
+function pickContextualUsernameField(
+  passwordField: HTMLInputElement,
+  orderedFields: HTMLInputElement[],
+): HTMLInputElement | null {
+  const inSameForm = orderedFields.filter((input) => input.form === passwordField.form);
+  const searchPool = inSameForm.length > 0 ? inSameForm : orderedFields;
+  const usernameCandidates = searchPool.filter(isContextualUsernameAnchor);
+  if (usernameCandidates.length === 0) {
+    return null;
+  }
+  const byAutocomplete = usernameCandidates.find((input) => {
+    const autocompleteToken = readAccessibleAutocompleteToken(input);
+    return autocompleteToken === 'username' || autocompleteToken === 'email';
+  });
+  if (byAutocomplete) {
+    return byAutocomplete;
+  }
+  const scored = usernameCandidates
+    .map((candidate) => {
+      let score = scoreUsernameField(candidate, passwordField, searchPool);
+      if ((candidate.disabled || candidate.readOnly) && hasNonEmptyValue(candidate)) {
+        score += 80;
+      }
+      return {
+        candidate,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+  if (scored.length === 0 || scored[0].score < 0) {
+    return null;
+  }
+  return scored[0].candidate;
+}
+
+function pickIdentifierField(orderedFields: HTMLInputElement[]): HTMLInputElement | null {
+  const usernameCandidates = orderedFields.filter(isEligibleUsernameInput);
+  if (usernameCandidates.length === 0) {
+    return null;
+  }
+  const byAutocomplete = usernameCandidates.find((input) => {
+    const autocompleteToken = readAccessibleAutocompleteToken(input);
+    return autocompleteToken === 'username' || autocompleteToken === 'email';
+  });
+  if (byAutocomplete) {
+    return byAutocomplete;
+  }
+  const scored = usernameCandidates
+    .map((candidate, index) => {
+      const hint = inputHint(candidate);
+      let score = 0;
+      if (normalizeInputType(candidate) === 'email') {
+        score += 25;
+      }
+      if (USERNAME_HINT_PATTERN.test(hint)) {
+        score += 50;
+      }
+      if (USERNAME_NEGATIVE_PATTERN.test(hint)) {
+        score -= 90;
+      }
+      score += Math.max(0, 20 - index);
+      return {
+        candidate,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+  if (scored.length === 0 || scored[0].score < 0) {
+    return null;
+  }
+  return scored[0].candidate;
+}
+
+function findFormSubmitter(formElement: HTMLFormElement | null): HTMLElement | null {
+  if (!(formElement instanceof HTMLFormElement)) {
+    return null;
+  }
+  const candidates = Array.from(
+    formElement.querySelectorAll('button, input[type="submit"], input[type="image"]'),
+  ).filter((candidate) => isVisibleElement(candidate));
+  for (const candidate of candidates) {
+    if (candidate instanceof HTMLButtonElement) {
+      const type = (candidate.getAttribute('type') ?? 'submit').trim().toLowerCase();
+      if (type === 'submit') {
+        return candidate;
+      }
+      continue;
+    }
+    if (candidate instanceof HTMLInputElement) {
+      const type = normalizeInputType(candidate);
+      if (type === 'submit' || type === 'image') {
+        return candidate;
+      }
+    }
+  }
+  return null;
 }
 
 function structuralSegmentForField(input: HTMLInputElement): string {
@@ -512,9 +691,93 @@ export function buildFormMetadataObservation(input: {
 }
 
 function setInputValue(input: HTMLInputElement, value: string): void {
-  input.value = value;
+  if (typeof input.focus === 'function' && input.ownerDocument.activeElement !== input) {
+    try {
+      input.focus();
+    } catch {
+      // Ignore focus failures on detached/inert nodes.
+    }
+  }
+  if (typeof globalThis.InputEvent === 'function') {
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
+  }
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    globalThis.HTMLInputElement?.prototype ?? HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  if (typeof valueSetter === 'function') {
+    valueSetter.call(input, value);
+  } else {
+    input.value = value;
+  }
   input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function commitIdentifierField(input: HTMLInputElement): void {
+  if (typeof input.focus === 'function' && input.ownerDocument.activeElement !== input) {
+    try {
+      input.focus();
+    } catch {
+      // Ignore focus failures on detached/inert nodes.
+    }
+  }
+  input.dispatchEvent(new Event('blur'));
+  input.dispatchEvent(new Event('focusout', { bubbles: true }));
+}
+
+function isReadySubmitter(candidate: HTMLElement | null): candidate is HTMLButtonElement | HTMLInputElement {
+  if (candidate instanceof HTMLButtonElement) {
+    return !candidate.disabled && candidate.getAttribute('aria-disabled') !== 'true';
+  }
+  if (candidate instanceof HTMLInputElement) {
+    const type = normalizeInputType(candidate);
+    return (
+      !candidate.disabled &&
+      candidate.getAttribute('aria-disabled') !== 'true' &&
+      (type === 'submit' || type === 'image')
+    );
+  }
+  return false;
+}
+
+async function waitForReadyIdentifierSubmitter(context: DetectedFillContext, timeoutMs = 1_200): Promise<HTMLElement | null> {
+  const current = findFormSubmitter(context.formElement) ?? context.submitter;
+  if (isReadySubmitter(current)) {
+    return current;
+  }
+  const formElement = context.formElement;
+  if (!(formElement instanceof HTMLFormElement)) {
+    return current;
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: HTMLElement | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(value);
+    };
+    const check = () => {
+      const next = findFormSubmitter(formElement) ?? context.submitter;
+      if (isReadySubmitter(next)) {
+        settle(next);
+      }
+    };
+    const observer = new MutationObserver(check);
+    observer.observe(formElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'aria-disabled', 'class', 'style'],
+    });
+    const timeoutId = setTimeout(() => settle(findFormSubmitter(formElement) ?? context.submitter), timeoutMs);
+    check();
+  });
 }
 
 export function detectFormContext(input: {
@@ -522,9 +785,7 @@ export function detectFormContext(input: {
   frameScope?: FormMetadataFrameScope;
   activeElement?: Element | null;
 }): DetectedLoginFormContext | null {
-  const orderedFields = Array.from(input.document.querySelectorAll('input')).filter(
-    (field): field is HTMLInputElement => field instanceof HTMLInputElement && isVisibleAndEnabled(field),
-  );
+  const orderedFields = queryScopedInputs(input.document, (field) => isWritableInput(field));
   const passwordFields = orderedFields.filter(
     (field) =>
       normalizeInputType(field) === 'password' &&
@@ -548,32 +809,234 @@ export function detectFormContext(input: {
     frameScope: input.frameScope ?? 'top',
     formElement: passwordField.form ?? usernameField.form ?? null,
     orderedFields,
+    mode: 'full_login',
     usernameField,
     usernameRole: usernameRole === 'email' ? 'email' : 'username',
     passwordField,
+    submitter: findFormSubmitter(passwordField.form ?? usernameField.form ?? null),
   };
 }
 
-export function fillUsernamePassword(input: {
+function detectPasswordStepContext(input: {
+  document: Document;
+  frameScope?: FormMetadataFrameScope;
+  activeElement?: Element | null;
+}): DetectedFillContext | null {
+  const orderedFields = queryScopedInputs(input.document, (field) => isVisibleInput(field));
+  const writablePasswordFields = orderedFields.filter(
+    (field) => isWritableInput(field) && normalizeInputType(field) === 'password' && inferFieldRole(field, { orderedFields }) === 'password_current',
+  );
+  const passwordField = choosePasswordField(writablePasswordFields, input.activeElement ?? input.document.activeElement);
+  if (!passwordField) {
+    return null;
+  }
+  const usernameField = pickContextualUsernameField(passwordField, orderedFields);
+  if (!usernameField) {
+    return null;
+  }
+  if (isWritableInput(usernameField)) {
+    return null;
+  }
+  const usernameRole = inferFieldRole(usernameField, { orderedFields });
+  return {
+    document: input.document,
+    frameScope: input.frameScope ?? 'top',
+    formElement: passwordField.form ?? usernameField.form ?? null,
+    orderedFields,
+    mode: 'password_step',
+    usernameField,
+    usernameRole: usernameRole === 'email' ? 'email' : 'username',
+    passwordField,
+    submitter: findFormSubmitter(passwordField.form ?? usernameField.form ?? null),
+  };
+}
+
+function detectIdentifierStepContext(input: {
+  document: Document;
+  frameScope?: FormMetadataFrameScope;
+}): DetectedFillContext | null {
+  const orderedFields = queryScopedInputs(input.document, (field) => isWritableInput(field));
+  const passwordFields = orderedFields.filter(
+    (field) => normalizeInputType(field) === 'password' && inferFieldRole(field, { orderedFields }) === 'password_current',
+  );
+  if (passwordFields.length > 0) {
+    return null;
+  }
+  const usernameField = pickIdentifierField(orderedFields);
+  if (!usernameField) {
+    return null;
+  }
+  const formElement = usernameField.form ?? null;
+  const submitter = findFormSubmitter(formElement);
+  if (!(formElement instanceof HTMLFormElement) && !submitter) {
+    return null;
+  }
+  const usernameRole = inferFieldRole(usernameField, { orderedFields });
+  return {
+    document: input.document,
+    frameScope: input.frameScope ?? 'top',
+    formElement,
+    orderedFields,
+    mode: 'identifier_step',
+    usernameField,
+    usernameRole: usernameRole === 'email' ? 'email' : 'username',
+    passwordField: null,
+    submitter,
+  };
+}
+
+export function detectBestFillContext(input: {
+  document: Document;
+  frameScope?: FormMetadataFrameScope;
+  activeElement?: Element | null;
+}): DetectedFillContext | null {
+  return (
+    detectFormContext(input) ??
+    detectPasswordStepContext(input) ??
+    detectIdentifierStepContext(input) ??
+    null
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function advanceIdentifierStep(context: DetectedFillContext): Promise<boolean> {
+  if (!(context.usernameField instanceof HTMLInputElement)) {
+    return false;
+  }
+  commitIdentifierField(context.usernameField);
+  await Promise.resolve();
+  await delay(0);
+  const formElement = context.formElement;
+  const submitter = await waitForReadyIdentifierSubmitter(context);
+  try {
+    if (formElement && typeof formElement.requestSubmit === 'function') {
+      if (isReadySubmitter(submitter)) {
+        formElement.requestSubmit(submitter);
+        return true;
+      }
+      if (!submitter) {
+        formElement.requestSubmit();
+        return true;
+      }
+      return false;
+    }
+  } catch {
+    // Fall through to click.
+  }
+  if (isReadySubmitter(submitter)) {
+    submitter.click();
+    return true;
+  }
+  return false;
+}
+
+async function waitForPasswordCapableContext(input: {
+  document: Document;
+  frameScope?: FormMetadataFrameScope;
+  timeoutMs: number;
+}): Promise<DetectedFillContext | null> {
+  const immediate = detectBestFillContext({
+    document: input.document,
+    frameScope: input.frameScope,
+    activeElement: input.document.activeElement,
+  });
+  if (immediate && immediate.mode !== 'identifier_step') {
+    return immediate;
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: DetectedFillContext | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(value);
+    };
+    const check = () => {
+      const next = detectBestFillContext({
+        document: input.document,
+        frameScope: input.frameScope,
+        activeElement: input.document.activeElement,
+      });
+      if (next && next.mode !== 'identifier_step') {
+        settle(next);
+      }
+    };
+    const observer = new MutationObserver(check);
+    observer.observe(input.document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'readonly', 'type', 'value', 'class', 'style', 'aria-hidden'],
+    });
+    const timeoutId = setTimeout(() => settle(null), input.timeoutMs);
+    check();
+  });
+}
+
+export async function fillUsernamePassword(input: {
   document: Document;
   credential: ManualFillCredential;
   topLevel: boolean;
-}): ManualFillResult {
+}): Promise<ManualFillResult> {
   if (!input.topLevel) {
     return 'manual_fill_unavailable';
   }
-  const context = detectFormContext({
+  const context = detectBestFillContext({
     document: input.document,
     frameScope: 'top',
     activeElement: input.document.activeElement,
   });
   if (!context) {
     const passwordFields = Array.from(input.document.querySelectorAll('input[type="password"]')).filter(
-      (field): field is HTMLInputElement => field instanceof HTMLInputElement && isVisibleAndEnabled(field),
+      (field): field is HTMLInputElement => field instanceof HTMLInputElement && isVisibleInput(field),
     );
     return passwordFields.length === 0 ? 'no_eligible_fields' : 'unsupported_form';
   }
-  setInputValue(context.usernameField, input.credential.username);
+  if (context.mode === 'identifier_step') {
+    if (!context.usernameField || !isWritableInput(context.usernameField)) {
+      return 'unsupported_form';
+    }
+    setInputValue(context.usernameField, input.credential.username);
+    const advanced = await advanceIdentifierStep(context);
+    if (!advanced) {
+      return 'unsupported_form';
+    }
+    const nextContext = await waitForPasswordCapableContext({
+      document: input.document,
+      frameScope: context.frameScope,
+      timeoutMs: 3_000,
+    });
+    if (!nextContext || !nextContext.passwordField) {
+      return 'step_transition_try_again';
+    }
+    if (nextContext.mode === 'full_login' && nextContext.usernameField && isWritableInput(nextContext.usernameField)) {
+      setInputValue(nextContext.usernameField, input.credential.username);
+    }
+    if (!isWritableInput(nextContext.passwordField)) {
+      return 'unsupported_form';
+    }
+    setInputValue(nextContext.passwordField, input.credential.password);
+    return 'filled';
+  }
+  if (context.mode === 'full_login') {
+    if (!context.usernameField || !context.passwordField) {
+      return 'unsupported_form';
+    }
+    setInputValue(context.usernameField, input.credential.username);
+    setInputValue(context.passwordField, input.credential.password);
+    return 'filled';
+  }
+  if (!context.passwordField || !isWritableInput(context.passwordField)) {
+    return 'unsupported_form';
+  }
   setInputValue(context.passwordField, input.credential.password);
   return 'filled';
 }
