@@ -75,6 +75,7 @@ const MEMORY_IDLE_LOCK_DEFAULT_MS = 5 * 60 * 1000;
 const MEMORY_IDLE_LOCK_MIN_MS = 30 * 1000;
 const MEMORY_IDLE_LOCK_MAX_MS = 24 * 60 * 60 * 1000;
 const AUTO_PAIR_BRIDGE_SCRIPT_ID = 'vaultlite-auto-pair-bridge-v1';
+const INLINE_ASSIST_SCRIPT_ID = 'vaultlite-inline-assist-v1';
 const EXTENSION_LINK_FALLBACK_INTERVAL_SECONDS = 5;
 const EXTENSION_LINK_MAX_INTERVAL_SECONDS = 30;
 const EXTENSION_LINK_MIN_INTERVAL_SECONDS = 1;
@@ -127,6 +128,7 @@ const REALTIME_FORM_METADATA_RESYNC_DEBOUNCE_MS = 1_500;
 const OPEN_AND_FILL_JOB_TTL_MS = 90_000;
 const OPEN_AND_FILL_RETRY_DELAYS_MS = [250, 750, 1_500];
 const SITE_AUTOMATION_PERMISSION_ORIGINS = ['https://*/*'];
+const INLINE_ASSIST_LOCAL_MATCH_PATTERNS = ['http://localhost/*', 'http://127.0.0.1/*', 'http://[::1]/*'];
 const ITEM_ATTACHMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const VAULT_ITEM_HISTORY_PAGE_SIZE = 50;
 const LOCAL_VAULT_CACHE_DEPLOYMENT_FINGERPRINT_FALLBACK = 'unknown';
@@ -3026,6 +3028,11 @@ async function resetTrustedStateInternal() {
   } catch {
     // Fail closed without blocking trusted-state reset.
   }
+  try {
+    await reconcileInlineAssistScript();
+  } catch {
+    // Fail closed without blocking trusted-state reset.
+  }
 }
 
 async function ensureServerHostPermission(serverOrigin) {
@@ -3177,6 +3184,47 @@ async function reconcileAutoPairBridgeScript() {
   ]);
 
   await injectBridgeIntoActiveSettingsTab(expectedWebOrigin);
+}
+
+async function reconcileInlineAssistScript() {
+  if (
+    !chrome.scripting?.getRegisteredContentScripts ||
+    !chrome.scripting?.registerContentScripts ||
+    !chrome.scripting?.unregisterContentScripts
+  ) {
+    return;
+  }
+
+  const registeredScripts = await chrome.scripting.getRegisteredContentScripts({
+    ids: [INLINE_ASSIST_SCRIPT_ID],
+  });
+  if (registeredScripts.length > 0) {
+    await chrome.scripting.unregisterContentScripts({
+      ids: [INLINE_ASSIST_SCRIPT_ID],
+    });
+  }
+
+  const matches = [...INLINE_ASSIST_LOCAL_MATCH_PATTERNS];
+  if (siteAutomationPermissionGranted) {
+    matches.push(...SITE_AUTOMATION_PERMISSION_ORIGINS);
+  }
+  const uniqueMatches = Array.from(new Set(matches));
+  if (uniqueMatches.length === 0) {
+    return;
+  }
+
+  await chrome.scripting.registerContentScripts([
+    {
+      id: INLINE_ASSIST_SCRIPT_ID,
+      matches: uniqueMatches,
+      js: ['content-script.js'],
+      runAt: 'document_end',
+      allFrames: false,
+      matchOriginAsFallback: false,
+      persistAcrossSessions: false,
+      world: 'ISOLATED',
+    },
+  ]);
 }
 
 function isAllowedSettingsSenderUrl(rawUrl, expectedOrigin) {
@@ -3371,6 +3419,11 @@ async function setServerUrlInternal(rawServerUrl) {
   } catch {
     bridgeUnavailable = true;
     return fail('bridge_registration_failed', 'Could not configure extension auto connect bridge.');
+  }
+  try {
+    await reconcileInlineAssistScript();
+  } catch {
+    // Fail closed for inline assist registration; pairing state remains usable.
   }
 
   return ok({ state: snapshotForUi() });
@@ -4392,6 +4445,239 @@ function resolveLoginRowActionForPage(input = {}) {
     return 'open-and-fill';
   }
   return 'open-url';
+}
+
+function listInlineAssistLoginCandidates() {
+  if (credentialsCache.credentials.length > 0) {
+    return credentialsCache.credentials
+      .filter((credential) => credential?.itemType === 'login')
+      .map((credential) => ({
+        itemId: credential.itemId,
+        itemType: 'login',
+        title: credential.title,
+        subtitle: buildItemSubtitle(credential),
+        urls: Array.isArray(credential.urls) ? credential.urls : [],
+      }));
+  }
+  const items = Array.isArray(sessionListProjectionCache.items) ? sessionListProjectionCache.items : [];
+  return items
+    .filter((entry) => entry?.itemType === 'login')
+    .map((entry) => ({
+      itemId: typeof entry?.itemId === 'string' ? entry.itemId : '',
+      itemType: 'login',
+      title: typeof entry?.title === 'string' ? entry.title : 'Untitled item',
+      subtitle: typeof entry?.subtitle === 'string' ? entry.subtitle : '—',
+      urls: Array.isArray(entry?.urls) ? entry.urls : [],
+    }))
+    .filter((entry) => entry.itemId.length > 0);
+}
+
+function normalizeInlineAssistTarget(rawTarget) {
+  if (!rawTarget || typeof rawTarget !== 'object') {
+    return null;
+  }
+  if (
+    typeof rawTarget.contextGroupKey !== 'string' ||
+    rawTarget.contextGroupKey.length === 0 ||
+    typeof rawTarget.formFingerprint !== 'string' ||
+    rawTarget.formFingerprint.length === 0 ||
+    typeof rawTarget.fieldFingerprint !== 'string' ||
+    rawTarget.fieldFingerprint.length === 0 ||
+    (rawTarget.frameScope !== 'top' && rawTarget.frameScope !== 'same_origin_iframe') ||
+    (rawTarget.mode !== 'full_login' && rawTarget.mode !== 'identifier_step' && rawTarget.mode !== 'password_step') ||
+    (rawTarget.fieldRole !== 'username' && rawTarget.fieldRole !== 'email' && rawTarget.fieldRole !== 'password_current')
+  ) {
+    return null;
+  }
+  return {
+    contextGroupKey: rawTarget.contextGroupKey,
+    frameScope: rawTarget.frameScope,
+    mode: rawTarget.mode,
+    fieldRole: rawTarget.fieldRole,
+    formFingerprint: rawTarget.formFingerprint,
+    fieldFingerprint: rawTarget.fieldFingerprint,
+  };
+}
+
+function inlineAssistMetadataMatchKind(target, itemId, pageOrigin, records) {
+  const relevantRecords = (Array.isArray(records) ? records : []).filter(
+    (record) =>
+      record &&
+      record.selectorStatus === 'active' &&
+      record.itemId === itemId &&
+      record.origin === pageOrigin &&
+      record.formFingerprint === target.formFingerprint &&
+      record.fieldFingerprint === target.fieldFingerprint &&
+      record.fieldRole === target.fieldRole,
+  );
+  if (relevantRecords.some((record) => record.confidence === 'submitted_confirmed' || record.confidence === 'user_corrected')) {
+    return 'metadata_confirmed';
+  }
+  if (relevantRecords.some((record) => record.confidence === 'filled' || record.confidence === 'heuristic')) {
+    return 'metadata_heuristic';
+  }
+  return 'none';
+}
+
+function inlineAssistMatchRank(matchKind) {
+  switch (matchKind) {
+    case 'metadata_confirmed':
+      return 4;
+    case 'exact_origin':
+      return 3;
+    case 'domain_match':
+      return 2;
+    case 'metadata_heuristic':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function resolveInlineAssistFillMode(pageUrl, candidateUrls) {
+  if (isPageUrlEligibleForFill(pageUrl) && isCredentialAllowedForSite(pageUrl, candidateUrls)) {
+    return 'fill';
+  }
+  if (siteAutomationPermissionGranted) {
+    return 'open-and-fill';
+  }
+  return candidateUrls.length > 0 ? 'open-url' : null;
+}
+
+async function inlineAssistPrefetchInternal(input = {}) {
+  const readyError = await ensureReadyState({
+    allowOffline: true,
+  });
+  const rawTargets = Array.isArray(input.targets) ? input.targets : [];
+  const targets = Array.from(
+    new Map(
+      rawTargets
+        .map((rawTarget) => normalizeInlineAssistTarget(rawTarget))
+        .filter(Boolean)
+        .map((target) => [`${target.contextGroupKey}::${target.fieldRole}`, target]),
+    ).values(),
+  );
+  if (targets.length === 0) {
+    return ok({
+      groups: {},
+    });
+  }
+  if (readyError) {
+    return ok({
+      groups: Object.fromEntries(
+        targets.map((target) => [
+          target.contextGroupKey,
+          {
+            status: 'unsupported',
+            bestItemId: null,
+            bestTitle: null,
+            bestSubtitle: null,
+            matchKind: 'none',
+            candidateCount: 0,
+            fillMode: null,
+          },
+        ]),
+      ),
+    });
+  }
+
+  await ensurePopupSnapshotLocalCaches({
+    skipCredentialHydration: false,
+    skipProjectionHydration: false,
+  });
+  const pageUrl = typeof input.pageUrl === 'string' ? input.pageUrl : '';
+  let pageOrigin = null;
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch {
+    pageOrigin = null;
+  }
+  const metadataResponse = pageOrigin
+    ? await queryFormMetadataInternal({
+        origins: [pageOrigin],
+        awaitCompletion: false,
+      })
+    : ok({ records: [] });
+  const metadataRecords = Array.isArray(metadataResponse?.records) ? metadataResponse.records : [];
+  const candidates = listInlineAssistLoginCandidates();
+
+  const groups = {};
+  for (const target of targets) {
+    const rankedCandidates = candidates
+      .map((candidate) => {
+        const metadataMatchKind = inlineAssistMetadataMatchKind(target, candidate.itemId, pageOrigin, metadataRecords);
+        const exactOrigin = isCredentialAllowedForSite(pageUrl, candidate.urls);
+        const domainScore = scoreDomainMatch(pageUrl, candidate.urls);
+        const matchKind =
+          metadataMatchKind === 'metadata_confirmed'
+            ? 'metadata_confirmed'
+            : exactOrigin
+              ? 'exact_origin'
+              : domainScore > 0
+                ? 'domain_match'
+                : metadataMatchKind === 'metadata_heuristic'
+                  ? 'metadata_heuristic'
+                  : 'none';
+        return {
+          ...candidate,
+          exactOrigin,
+          domainScore,
+          matchKind,
+        };
+      })
+      .filter((candidate) => candidate.matchKind !== 'none');
+
+    if (rankedCandidates.length === 0) {
+      groups[target.contextGroupKey] = {
+        status: 'no_match',
+        bestItemId: null,
+        bestTitle: null,
+        bestSubtitle: null,
+        matchKind: 'none',
+        candidateCount: 0,
+        fillMode: null,
+      };
+      continue;
+    }
+
+    rankedCandidates.sort((left, right) => {
+      const rankDelta = inlineAssistMatchRank(right.matchKind) - inlineAssistMatchRank(left.matchKind);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      const exactDelta = Number(right.exactOrigin) - Number(left.exactOrigin);
+      if (exactDelta !== 0) {
+        return exactDelta;
+      }
+      if (right.domainScore !== left.domainScore) {
+        return right.domainScore - left.domainScore;
+      }
+      return left.title.localeCompare(right.title);
+    });
+
+    const bestCandidate = rankedCandidates[0];
+    groups[target.contextGroupKey] = {
+      status: 'ready',
+      bestItemId: bestCandidate.itemId,
+      bestTitle: bestCandidate.title,
+      bestSubtitle: bestCandidate.subtitle,
+      matchKind: bestCandidate.matchKind,
+      candidateCount: rankedCandidates.length,
+      fillMode: resolveInlineAssistFillMode(pageUrl, bestCandidate.urls),
+    };
+  }
+
+  return ok({ groups });
+}
+
+async function inlineAssistActivateInternal(input = {}) {
+  const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
+  if (!itemId) {
+    return fail('invalid_input', 'Inline assist target is invalid.');
+  }
+  return dispatchLoginRowActionInternal({
+    itemId,
+  });
 }
 
 function buildItemSubtitle(credential) {
@@ -6104,6 +6390,31 @@ function resolveCredentialLaunchUrl(targetCredential, preferredUrl = null) {
   return null;
 }
 
+async function probeContentScriptInTab(tabId) {
+  if (!chrome.tabs?.sendMessage) {
+    return false;
+  }
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'vaultlite.runtime_probe',
+    });
+    return response?.ok === true && response?.runtime === 'content_script';
+  } catch {
+    return false;
+  }
+}
+
+async function ensureContentScriptReadyInTab(tabId) {
+  if (await probeContentScriptInTab(tabId)) {
+    return true;
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    files: ['content-script.js'],
+  });
+  return probeContentScriptInTab(tabId);
+}
+
 async function fillCredentialInTabInternal(input = {}) {
   const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
   const tabId = Number(input?.tabId);
@@ -6150,10 +6461,10 @@ async function fillCredentialInTabInternal(input = {}) {
       ? selectFillCandidateFormMetadataRecords(formMetadataResponse.records)
       : [];
 
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: false },
-      files: ['content-script.js'],
-    });
+    const contentScriptReady = await ensureContentScriptReadyInTab(tabId);
+    if (!contentScriptReady) {
+      return ok({ result: 'manual_fill_unavailable' });
+    }
 
     const recheckedTab = await chrome.tabs.get(tabId);
     if (!recheckedTab || recheckedTab.url !== tabUrl) {
@@ -9142,6 +9453,7 @@ async function initializeBackgroundRuntimeCore() {
     .catch(() => {
       bridgeUnavailable = true;
     });
+  void reconcileInlineAssistScript().catch(() => {});
   if (!state.serverOrigin) {
     setPhase('pairing_required', null);
     return;
@@ -9389,6 +9701,13 @@ async function handleCommand(command, senderContext, sender) {
       }
       return markFormMetadataSuspectInternal(command);
     }
+    case 'vaultlite.inline_assist_prefetch': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'inline_assist:prefetch');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return inlineAssistPrefetchInternal(command);
+    }
     case 'vaultlite.list_item_attachments': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
       if (capabilityError) {
@@ -9416,6 +9735,13 @@ async function handleCommand(command, senderContext, sender) {
         return capabilityError;
       }
       return dispatchLoginRowActionInternal(command);
+    }
+    case 'vaultlite.inline_assist_activate': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'inline_assist:activate');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return inlineAssistActivateInternal(command);
     }
     case 'vaultlite.open_and_fill_credential': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'fill:dispatch');
@@ -9575,6 +9901,28 @@ chrome.tabs.onActivated.addListener(() => {
 if (chrome.windows?.onFocusChanged) {
   chrome.windows.onFocusChanged.addListener(() => {
     schedulePopupRealtimeNotification(['popup_state']);
+  });
+}
+
+if (chrome.permissions?.onAdded) {
+  chrome.permissions.onAdded.addListener(() => {
+    void refreshSiteAutomationPermissionState()
+      .then(() => reconcileInlineAssistScript())
+      .then(() => {
+        schedulePopupRealtimeNotification(['popup_state']);
+      })
+      .catch(() => {});
+  });
+}
+
+if (chrome.permissions?.onRemoved) {
+  chrome.permissions.onRemoved.addListener(() => {
+    void refreshSiteAutomationPermissionState()
+      .then(() => reconcileInlineAssistScript())
+      .then(() => {
+        schedulePopupRealtimeNotification(['popup_state']);
+      })
+      .catch(() => {});
   });
 }
 

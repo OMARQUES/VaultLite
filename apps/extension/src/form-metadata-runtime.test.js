@@ -11,6 +11,7 @@ describe('form metadata runtime integration', () => {
     expect(source).toContain("const CONTENT_RUNTIME_KEY = '__vaultliteContentRuntimeV2';");
     expect(source).toContain("frameScope: accumulator.length === 0 ? 'top' : 'same_origin_iframe'");
     expect(source).toContain("type: 'vaultlite.form_metadata_submit_signal'");
+    expect(source).toContain("message.type === 'vaultlite.runtime_probe'");
     expect(source).toContain('function buildObservationEntries(contexts = []) {');
     expect(source).toContain('observationEntries: buildObservationEntries(filledContexts),');
     expect(source).toContain("mode: 'identifier_step'");
@@ -22,6 +23,8 @@ describe('form metadata runtime integration', () => {
   test('background consumes fill telemetry and content-script submit signals', () => {
     const source = readFileSync(backgroundPath, 'utf8');
     expect(source).toContain("type: 'vaultlite.fill'");
+    expect(source).toContain("type: 'vaultlite.runtime_probe'");
+    expect(source).toContain('async function ensureContentScriptReadyInTab(');
     expect(source).toContain('formMetadataRecords: fillMetadataRecords');
     expect(source).toContain('applyFormMetadataTelemetryInternal({');
     expect(source).toContain("case 'vaultlite.form_metadata_submit_signal':");

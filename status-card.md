@@ -122,9 +122,9 @@ Suggested next action: Start `P0-C01`, then `P0-C02`, then `P0-C03`.
 ## Current Focus
 
 Active phase: `Phase 13 - Intelligent Assist and Contextual Autofill`
-Active card: `P13-C04 - Inline field suggestion anchor (content-script)`
+Active card: `P13-C05 - Inline mini-search and ranked credential suggestion tray`
 Global gates still blocking sensitive implementation: `none`
-Reason: `P13-C03` foi fechado com evidência de runtime real: cache local populado, `form-metadata/query` + `upsert` no servidor, persistência em D1 e melhoria validada em fluxos reais de login em etapas como Kabum; por decisão de execução, o próximo passo lógico é seguir a trilha de assist/autofill inline.
+Reason: `P13-C04` já está implementado em base utilizável e permanece em `review_needed` enquanto os hard cases de heurística continuam sendo refinados; a pesquisa externa foi incorporada como backlog explícito para evolução futura do detector, e o próximo passo de produto agora é a tray inline de busca e sugestão contextual do `P13-C05`.
 Suggested immediate sequence: `P13-C04` -> `P13-C05` -> `P13-C06` -> `P13-C07`.
 Post-Phase-13 queued sequence: `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11` -> `P13-C12` -> `P12-C01` -> `P12-C04` -> `P12-C05` -> `P12-C02` -> `P12-C06` -> `P12-C07` -> `P12-C08` -> `P12-C03`.
 ## Index of Cards
@@ -244,7 +244,7 @@ Post-Phase-13 queued sequence: `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11` 
 - `P13-C01` Extension item edit parity — `not_started`
 - `P13-C02` Item change history with field-level diff visibility — `not_started`
 - `P13-C03` Form metadata capture and sync contracts — `done`
-- `P13-C04` Inline field suggestion anchor (content-script) — `not_started`
+- `P13-C04` Inline field suggestion anchor (content-script) — `review_needed`
 - `P13-C05` Inline mini-search and ranked credential suggestion tray — `not_started`
 - `P13-C06` Save login and update password post-submit prompts — `not_started`
 - `P13-C07` Heuristic autofill engine v1 (same-origin iframe) — `not_started`
@@ -2459,7 +2459,7 @@ Suggested next action: start `P12-C01`.
 Card ID: `P12-C01`
 Title: `Threat-model review update`
 Phase/Epic: `Phase 12 - Final Hardening and Release Readiness`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P0`
 Objective: Revisit and update the threat model after implementation maturity.
 Description: Review the implemented system against the original threat model and record deltas, residual risks, and mitigations.
@@ -2692,22 +2692,23 @@ Suggested next action: iniciar `P13-C04` reutilizando o detector/metadata do con
 Card ID: `P13-C04`
 Title: `Inline field suggestion anchor (content-script)`
 Phase/Epic: `Phase 13 - Intelligent Assist and Contextual Autofill`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P1`
 Objective: Exibir ícone inline em campos de login para iniciar sugestão contextual sem abrir popup.
-Description: Detectar campos de autenticação no content-script e ancorar affordance visual consistente com ação de sugestão.
+Description: Detectar campos de autenticação no content-script desde o carregamento da página e em mutações relevantes, ancorando affordance visual consistente com ação de sugestão contextual sem depender de foco para iniciar o scan.
 Motivation: Reduzir atrito de uso e aproximar UX esperada de gerenciadores líderes.
-Scope includes: detecção de campo; ícone inline; acionamento por foco/click; integração com background para ranking.
+Implementation snapshot: o content-script agora escaneia a página no boot e em mutações, renderiza anchors inline isolados em `Shadow DOM`, faz prefetch local-first via background, suporta login clássico e em etapas, modais/dialogs, open shadow roots, `same-origin iframe`, fluxos com passkey/challenge tardio como Google, e handshake de runtime para evitar reinjeção duplicada.
+Scope includes: detecção de campo por contexto; scan eager por load/mutation; ícone inline; ativação explícita por clique; integração com background para ranking; isolamento visual robusto em páginas de terceiros.
 Out of scope: preenchimento automático sem confirmação.
 Dependencies: `P13-C03`; `P11-C03`.
 Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/bridge-content-script.js`; `apps/extension/src/fill-engine.ts`.
 Deliverables: affordance inline funcional em campos suportados.
-Required tests: `apps/extension/src/fill-engine.test.ts` e testes de DOM fixture para foco/click.
+Required tests: `apps/extension/src/fill-engine.test.ts` e testes de DOM fixture para load/mutation/click em página clássica, login em etapas, modal/dialog, shadow DOM e cenário sem campos elegíveis.
 Acceptance criteria: ícone aparece em campos compatíveis e abre fluxo de sugestão sem causar regressão em páginas não suportadas.
 Risks / cautions: interferir com UI de terceiros se injeção não for isolada.
-Notes for Codex/dev: manter estilos isolados e fail-safe em páginas incompatíveis.
-Evidence required to mark done: capturas/fixtures de campo suportado + testes automatizados.
-Suggested next action: habilitar ancoragem apenas em inputs com confiança mínima de login.
+Notes for Codex/dev: manter estilos isolados e fail-safe em páginas incompatíveis. Melhorias futuras já planejadas a partir da pesquisa: alinhar parsing de `autocomplete` mais de perto ao Chromium, evoluir o detector para state machine explícita de auth (`identifier`, `passkey`, `selection`, `password`, `otp`), introduzir pequeno registry de quirks por site e formalizar um modelo de `page details`/grupos de campos ao estilo das arquiteturas maduras de password managers.
+Evidence required to mark done: capturas/fixtures de campo suportado + testes automatizados + smoke manual em página clássica, login em etapas e cenário sem campos elegíveis.
+Suggested next action: manter `P13-C04` em observação com smoke contínuo em hard cases e seguir para `P13-C05`, reutilizando os contratos `inline_assist_prefetch` e `inline_assist_activate` já estabelecidos.
 
 ### P13-C05 - Inline mini-search and ranked credential suggestion tray
 Card ID: `P13-C05`
@@ -2718,7 +2719,7 @@ Priority: `P1`
 Objective: Permitir busca rápida no vault e seleção de credencial diretamente abaixo do campo.
 Description: Renderizar mini-lista inline com sugestões ranqueadas e busca local rápida quando não houver match forte.
 Motivation: Evitar abrir popup e acelerar preenchimento em contexto de login.
-Scope includes: ranking por domínio/subdomínio/PSL + favorito + último uso + similaridade de username; busca inline; ação de fill.
+Scope includes: tray inline ancorada ao campo; ranking por origem/metadado/domínio e busca local rápida; ação de fill/open-and-fill a partir da própria tray; fallback útil mesmo sem match forte.
 Out of scope: ranking por telemetria remota.
 Dependencies: `P13-C04`; `P11-C02`; `P7-C04`.
 Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/popup-view-model.js`.
@@ -2726,9 +2727,9 @@ Deliverables: mini-lista inline com seleção de credencial e preenchimento.
 Required tests: testes de ranking e busca inline cobrindo baixa confiança e fallback manual.
 Acceptance criteria: com ou sem match forte, usuário consegue selecionar credencial e preencher sem abrir popup.
 Risks / cautions: ranking ruim pode aumentar falso positivo de preenchimento.
-Notes for Codex/dev: baixa confiança deve continuar mostrando sugestões, mas sem autofill silencioso.
+Notes for Codex/dev: reaproveitar o pipeline inline já presente no `P13-C04`; o `content-script` não deve rankear nem descriptografar sozinho. Baixa confiança deve continuar mostrando sugestões, mas sem autofill silencioso.
 Evidence required to mark done: testes de ranking e demo manual em domínios sem match exato.
-Suggested next action: implementar função de score determinística com pesos versionados.
+Suggested next action: implementar função de score determinística com pesos versionados e uma shell de tray ancorada, curta e keyboard-friendly.
 
 ### P13-C06 - Save login and update password post-submit prompts
 Card ID: `P13-C06`
@@ -2904,6 +2905,7 @@ Suggested next action: registrar ADR curto de permissões e riscos antes de coda
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-04-09: `P13-C04` permanece em `review_needed`, mas a base inline já está ativa o suficiente para destravar `P13-C05`. A pesquisa externa sobre Chromium, Bitwarden, 1Password e Password Manager Resources foi convertida em backlog explícito para evolução futura do detector: parsing de `autocomplete` mais alinhado ao Chromium, state machine de auth por estágio, pequeno registry de quirks por site e modelo formal de `page details`/grupos de campos. Isso melhora a trilha futura sem ampliar o escopo imediato do card.
 - 2026-03-30: Added `Phase 13 - Intelligent Assist and Contextual Autofill` with card IDs `P13-C01` to `P13-C12`, explicit dependencies, and V1/V2 scope boundaries (same-origin iframe in V1, cross-origin iframe deferred). This phase is queued after Phase 12 and does not change the current release-hardening focus.
 - 2026-03-23: Synced status-card with repository state and moved execution focus to Phase 12. `P11-C01`, `P11-C02`, and `P11-C03` are now `done` based on implemented LTS-only extension pairing, unlock/session continuity with backend-mediated unlock grants, strict bridge hardening, listing/fill stabilization, and green automated suites in `@vaultlite/extension` and `@vaultlite/api` extension auth coverage.
 - 2026-03-23: Extension and web manual-icon flows now operate on shared server-side overrides with popup detail-icon editing and robust sync behavior (queued retries, non-retriable 4xx drop, and cross-surface refresh triggers), reducing extension/web icon drift during normal use.

@@ -43,7 +43,13 @@ const CONTEXT_CAPABILITIES = {
     'unlock:local',
     'state:write',
   ]),
-  content_script: new Set(['fill:execute', 'bridge:auto_pair', 'form_metadata:signal']),
+  content_script: new Set([
+    'fill:execute',
+    'bridge:auto_pair',
+    'form_metadata:signal',
+    'inline_assist:prefetch',
+    'inline_assist:activate',
+  ]),
 };
 
 export function contextHasCapability(context, capability) {

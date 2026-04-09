@@ -51,6 +51,17 @@ export interface DetectedFillContext {
   submitter: HTMLElement | null;
 }
 
+export interface InlineAssistTarget {
+  fieldElement: HTMLInputElement;
+  fieldRole: 'username' | 'email' | 'password_current';
+  mode: DetectedFillContext['mode'];
+  frameScope: FormMetadataFrameScope;
+  formFingerprint: string;
+  fieldFingerprint: string;
+  confidence: 'high';
+  contextGroupKey: string;
+}
+
 export interface FormMetadataObservation {
   itemId: string | null;
   origin: string;
@@ -73,6 +84,10 @@ export interface FormMetadataObservation {
 const USERNAME_HINT_PATTERN =
   /\b(user(name)?|email|e-mail|login|cpf|cnpj|conta|account|documento|identifica[cç][aã]o)\b/i;
 const USERNAME_NEGATIVE_PATTERN = /\b(search|busca|query|coupon|cupom|promo|newsletter)\b/i;
+const SUBMITTER_POSITIVE_PATTERN =
+  /\b(next|continue|continuar|entrar|login|log\s*in|sign\s*in|submit|prosseguir|avancar|avan[cç]ar)\b/i;
+const SUBMITTER_NEGATIVE_PATTERN =
+  /\b(cancel|close|fechar|back|voltar|forgot|esqueci|register|cadastro|sign\s*up|google|apple|facebook|github|microsoft|sso|social)\b/i;
 const PASSWORD_NEW_PATTERN =
   /\b(new|novo|nova|create|criar|choose|defina|definir|set|setup)\b/i;
 const PASSWORD_CONFIRM_PATTERN =
@@ -81,9 +96,57 @@ const OTP_PATTERN =
   /\b(otp|2fa|mfa|token|one[-\s_]?time|verification|codigo|c[oó]digo|passcode)\b/i;
 const TEXT_NORMALIZATION_PATTERN = /[\s\p{P}\p{S}]+/gu;
 const MAX_NORMALIZED_TEXT_LENGTH = 120;
+const DEFAULT_PASSWORD_TRANSITION_TIMEOUT_MS = 3_000;
+const CHALLENGE_PASSWORD_TRANSITION_TIMEOUT_MS = 12_000;
+const PASSWORD_TRANSITION_POLL_INTERVAL_MS = 250;
+
+function hasStronglyHiddenAncestor(element: Element): boolean {
+  return Boolean(element.closest('[hidden], [inert], [data-is-visible="false"]'));
+}
+
+function isAriaHiddenVisibilityException(element: HTMLElement, ariaHiddenAncestor: Element): boolean {
+  const activeElement = element.ownerDocument?.activeElement;
+  if (activeElement instanceof Element && ariaHiddenAncestor.contains(activeElement)) {
+    return true;
+  }
+  if (element.tabIndex >= 0) {
+    return true;
+  }
+  if (element instanceof HTMLInputElement) {
+    return element.type !== 'hidden' && !element.disabled && element.tabIndex !== -1;
+  }
+  if (element instanceof HTMLButtonElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+    return !element.disabled;
+  }
+  if (element instanceof HTMLAnchorElement) {
+    return element.hasAttribute('href');
+  }
+  return element.getAttribute('contenteditable') === 'true';
+}
+
+function isSemanticallyHidden(element: Element | null): boolean {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+  if (hasStronglyHiddenAncestor(element)) {
+    return true;
+  }
+  const ariaHiddenAncestor = element.closest('[aria-hidden="true"]');
+  if (!ariaHiddenAncestor) {
+    return false;
+  }
+  const visibilityTarget = element instanceof HTMLElement ? element : ariaHiddenAncestor;
+  if (visibilityTarget instanceof HTMLElement && isAriaHiddenVisibilityException(visibilityTarget, ariaHiddenAncestor)) {
+    return false;
+  }
+  return true;
+}
 
 function isVisibleInput(input: HTMLInputElement): boolean {
   if (input.type === 'hidden') {
+    return false;
+  }
+  if (isSemanticallyHidden(input) || isSemanticallyHidden(semanticHostForInput(input))) {
     return false;
   }
   const style = globalThis.getComputedStyle ? globalThis.getComputedStyle(input) : null;
@@ -109,11 +172,122 @@ function isVisibleElement(element: Element | null): element is HTMLElement {
   if (!(element instanceof HTMLElement)) {
     return false;
   }
+  if (isSemanticallyHidden(element)) {
+    return false;
+  }
   const style = globalThis.getComputedStyle ? globalThis.getComputedStyle(element) : null;
   if (style && (style.display === 'none' || style.visibility === 'hidden')) {
     return false;
   }
   return true;
+}
+
+type QueryableRoot = Document | Element | ShadowRoot;
+
+function rootSearchBase(root: QueryableRoot): Element | ShadowRoot | null {
+  if (root instanceof Document) {
+    return root.documentElement ?? root.body;
+  }
+  return root;
+}
+
+function collectQueryableRoots(root: QueryableRoot): QueryableRoot[] {
+  const roots: QueryableRoot[] = [root];
+  const seen = new Set<Node>([root]);
+  for (let index = 0; index < roots.length; index += 1) {
+    const current = roots[index];
+    const base = rootSearchBase(current);
+    if (!base) {
+      continue;
+    }
+    const elements = Array.from(base.querySelectorAll('*'));
+    for (const element of elements) {
+      if (!(element instanceof HTMLElement) || !(element.shadowRoot instanceof ShadowRoot)) {
+        continue;
+      }
+      if (seen.has(element.shadowRoot)) {
+        continue;
+      }
+      seen.add(element.shadowRoot);
+      roots.push(element.shadowRoot);
+    }
+  }
+  return roots;
+}
+
+function isChallengeFlowDocument(document: Document): boolean {
+  const href = document.defaultView?.location?.href ?? '';
+  if (/accounts\.google\.com/i.test(href) || /\/challenge\//i.test(href)) {
+    return true;
+  }
+  const pageText = normalizeObservedText(document.body?.textContent ?? '') ?? '';
+  if (pageText.includes('passkey') || pageText.includes('try another way') || pageText.includes('use your phone')) {
+    return true;
+  }
+  return queryDeepElements(
+    document,
+    'input',
+    (element): element is HTMLInputElement =>
+      element instanceof HTMLInputElement &&
+      ((readSemanticAttribute(element, 'autocomplete') ?? '').toLowerCase().includes('webauthn')),
+  ).length > 0;
+}
+
+function resolvePasswordTransitionTimeout(document: Document, requestedTimeoutMs: number): number {
+  if (isChallengeFlowDocument(document)) {
+    return Math.max(requestedTimeoutMs, CHALLENGE_PASSWORD_TRANSITION_TIMEOUT_MS);
+  }
+  return requestedTimeoutMs;
+}
+
+function queryDeepElements<T extends Element>(
+  root: QueryableRoot,
+  selector: string,
+  predicate: (element: Element) => element is T,
+): T[] {
+  const matches: T[] = [];
+  const seen = new Set<Element>();
+  for (const searchRoot of collectQueryableRoots(root)) {
+    const base = rootSearchBase(searchRoot);
+    if (!base) {
+      continue;
+    }
+    const elements = Array.from(base.querySelectorAll(selector));
+    for (const element of elements) {
+      if (seen.has(element) || !predicate(element)) {
+        continue;
+      }
+      seen.add(element);
+      matches.push(element);
+    }
+  }
+  return matches;
+}
+
+function semanticHostForInput(input: HTMLInputElement): HTMLElement | null {
+  const rootNode = input.getRootNode();
+  return rootNode instanceof ShadowRoot && rootNode.host instanceof HTMLElement ? rootNode.host : null;
+}
+
+function semanticOwnerElement(input: HTMLInputElement): HTMLElement {
+  return semanticHostForInput(input) ?? input;
+}
+
+function readSemanticAttribute(input: HTMLInputElement, attribute: string): string | null {
+  const directValue = input.getAttribute(attribute)?.trim();
+  if (directValue) {
+    return directValue;
+  }
+  const hostValue = semanticHostForInput(input)?.getAttribute(attribute)?.trim();
+  return hostValue?.length ? hostValue : null;
+}
+
+function logicalFormOwner(input: HTMLInputElement): HTMLFormElement | null {
+  const directForm = input.form;
+  if (directForm instanceof HTMLFormElement) {
+    return directForm;
+  }
+  return semanticOwnerElement(input).closest('form');
 }
 
 function findPreferredFieldRoot(document: Document): ParentNode {
@@ -122,7 +296,7 @@ function findPreferredFieldRoot(document: Document): ParentNode {
   ).filter((candidate): candidate is HTMLElement => isVisibleElement(candidate));
   for (let index = dialogCandidates.length - 1; index >= 0; index -= 1) {
     const candidate = dialogCandidates[index];
-    if (candidate.querySelector('input')) {
+    if (queryDeepElements(candidate, 'input', (field): field is HTMLInputElement => field instanceof HTMLInputElement).length > 0) {
       return candidate;
     }
   }
@@ -134,13 +308,15 @@ function queryScopedInputs(
   predicate: (field: HTMLInputElement) => boolean,
 ): HTMLInputElement[] {
   const preferredRoot = findPreferredFieldRoot(document);
-  const preferredInputs = Array.from(preferredRoot.querySelectorAll('input')).filter(
+  const preferredInputs = queryDeepElements(
+    preferredRoot as QueryableRoot,
+    'input',
     (field): field is HTMLInputElement => field instanceof HTMLInputElement && predicate(field),
   );
   if (preferredInputs.length > 0) {
     return preferredInputs;
   }
-  return Array.from(document.querySelectorAll('input')).filter(
+  return queryDeepElements(document, 'input',
     (field): field is HTMLInputElement => field instanceof HTMLInputElement && predicate(field),
   );
 }
@@ -167,11 +343,23 @@ function uniqueStrings(values: string[]): string[] {
 
 function inputHint(input: HTMLInputElement): string {
   return [
-    input.getAttribute('name') ?? '',
-    input.id ?? '',
-    input.getAttribute('placeholder') ?? '',
-    input.getAttribute('aria-label') ?? '',
-    input.getAttribute('autocomplete') ?? '',
+    readSemanticAttribute(input, 'name') ?? '',
+    readSemanticAttribute(input, 'id') ?? input.id ?? semanticHostForInput(input)?.id ?? '',
+    readSemanticAttribute(input, 'placeholder') ?? '',
+    readSemanticAttribute(input, 'aria-label') ?? '',
+    readSemanticAttribute(input, 'autocomplete') ?? '',
+    readAssociatedLabelText(input) ?? '',
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function structuralTextSignals(input: HTMLInputElement): string {
+  return [
+    readSemanticAttribute(input, 'name') ?? '',
+    readSemanticAttribute(input, 'id') ?? input.id ?? semanticHostForInput(input)?.id ?? '',
+    readSemanticAttribute(input, 'placeholder') ?? '',
+    readSemanticAttribute(input, 'aria-label') ?? '',
     readAssociatedLabelText(input) ?? '',
   ]
     .join(' ')
@@ -179,7 +367,7 @@ function inputHint(input: HTMLInputElement): string {
 }
 
 function readAccessibleAutocompleteToken(input: HTMLInputElement): string | null {
-  const rawToken = (input.getAttribute('autocomplete') ?? '').trim().toLowerCase();
+  const rawToken = (readSemanticAttribute(input, 'autocomplete') ?? '').trim().toLowerCase();
   if (!rawToken) {
     return null;
   }
@@ -191,7 +379,7 @@ function readAccessibleAutocompleteToken(input: HTMLInputElement): string | null
 }
 
 function normalizeInputType(input: HTMLInputElement): string {
-  return (input.getAttribute('type') ?? input.type ?? 'text').trim().toLowerCase() || 'text';
+  return (readSemanticAttribute(input, 'type') ?? input.type ?? 'text').trim().toLowerCase() || 'text';
 }
 
 function normalizeObservedText(value: string | null | undefined): string | null {
@@ -208,6 +396,7 @@ function normalizeObservedText(value: string | null | undefined): string | null 
 }
 
 export function readAssociatedLabelText(input: HTMLInputElement): string | null {
+  const semanticHost = semanticHostForInput(input);
   const labels = Array.from(input.labels ?? []).map((label) => label.textContent ?? '');
   const ariaLabelledBy = (input.getAttribute('aria-labelledby') ?? '')
     .split(/\s+/u)
@@ -216,7 +405,16 @@ export function readAssociatedLabelText(input: HTMLInputElement): string | null 
     .map((token) => input.ownerDocument.getElementById(token)?.textContent ?? '');
   const inlineLabel = input.closest('label')?.textContent ?? '';
   const ariaLabel = input.getAttribute('aria-label') ?? '';
-  const text = [...labels, ...ariaLabelledBy, inlineLabel, ariaLabel]
+  const hostAriaLabelledBy = semanticHost
+    ? (semanticHost.getAttribute('aria-labelledby') ?? '')
+        .split(/\s+/u)
+        .map((token) => token.trim())
+        .filter((token) => token.length > 0)
+        .map((token) => input.ownerDocument.getElementById(token)?.textContent ?? '')
+    : [];
+  const hostLabel = semanticHost?.querySelector('[slot="label"]')?.textContent ?? '';
+  const hostAriaLabel = semanticHost?.getAttribute('aria-label') ?? '';
+  const text = [...labels, ...ariaLabelledBy, inlineLabel, ariaLabel, ...hostAriaLabelledBy, hostLabel, hostAriaLabel]
     .map((value) => value.trim())
     .find((value) => value.length > 0);
   return text?.length ? text : null;
@@ -314,6 +512,65 @@ function isContextualUsernameAnchor(input: HTMLInputElement): boolean {
   return hasNonEmptyValue(input);
 }
 
+function isHiddenUsernameStateField(input: HTMLInputElement): boolean {
+  if (isVisibleInput(input) || normalizeInputType(input) === 'password') {
+    return false;
+  }
+  const normalizedType = normalizeInputType(input);
+  if (normalizedType !== 'text' && normalizedType !== 'email' && normalizedType !== 'tel' && normalizedType !== 'hidden') {
+    return false;
+  }
+  if (!hasNonEmptyValue(input)) {
+    return false;
+  }
+  const autocompleteToken = readAccessibleAutocompleteToken(input);
+  if (autocompleteToken === 'one-time-code') {
+    return false;
+  }
+  const hint = inputHint(input);
+  if (USERNAME_NEGATIVE_PATTERN.test(hint)) {
+    return false;
+  }
+  return autocompleteToken === 'username' || autocompleteToken === 'email' || normalizedType === 'email' || USERNAME_HINT_PATTERN.test(hint);
+}
+
+function contextualFieldSearchPool(
+  passwordField: HTMLInputElement,
+  candidates: HTMLInputElement[],
+): HTMLInputElement[] {
+  const inSameForm = candidates.filter((input) => input.form === passwordField.form);
+  const passwordForm = logicalFormOwner(passwordField);
+  const inSameLogicalForm = candidates.filter((input) => logicalFormOwner(input) === passwordForm);
+  return inSameLogicalForm.length > 0 ? inSameLogicalForm : inSameForm.length > 0 ? inSameForm : candidates;
+}
+
+function hasVisibleIdentifierEcho(
+  passwordField: HTMLInputElement,
+  candidateValue: string,
+): boolean {
+  const normalizedValue = normalizeObservedText(candidateValue);
+  if (!normalizedValue) {
+    return false;
+  }
+  const owner = semanticOwnerElement(passwordField);
+  let depth = 0;
+  for (let current: HTMLElement | null = owner; current && depth < 8; current = current.parentElement, depth += 1) {
+    if (!isVisibleElement(current)) {
+      continue;
+    }
+    const containerText = normalizeObservedText(
+      [
+        current.getAttribute('aria-label') ?? '',
+        current.textContent ?? '',
+      ].join(' '),
+    );
+    if (containerText?.includes(normalizedValue)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function scoreUsernameField(
   input: HTMLInputElement,
   passwordField: HTMLInputElement,
@@ -382,8 +639,7 @@ function pickUsernameField(
   passwordField: HTMLInputElement,
   orderedFields: HTMLInputElement[],
 ): HTMLInputElement | null {
-  const inSameForm = orderedFields.filter((input) => input.form === passwordField.form);
-  const searchPool = inSameForm.length > 0 ? inSameForm : orderedFields;
+  const searchPool = contextualFieldSearchPool(passwordField, orderedFields);
   const usernameCandidates = searchPool.filter(isEligibleUsernameInput);
   if (usernameCandidates.length === 0) {
     return null;
@@ -412,8 +668,7 @@ function pickContextualUsernameField(
   passwordField: HTMLInputElement,
   orderedFields: HTMLInputElement[],
 ): HTMLInputElement | null {
-  const inSameForm = orderedFields.filter((input) => input.form === passwordField.form);
-  const searchPool = inSameForm.length > 0 ? inSameForm : orderedFields;
+  const searchPool = contextualFieldSearchPool(passwordField, orderedFields);
   const usernameCandidates = searchPool.filter(isContextualUsernameAnchor);
   if (usernameCandidates.length === 0) {
     return null;
@@ -438,6 +693,43 @@ function pickContextualUsernameField(
     })
     .sort((left, right) => right.score - left.score);
   if (scored.length === 0 || scored[0].score < 0) {
+    return null;
+  }
+  return scored[0].candidate;
+}
+
+function pickHiddenUsernameStateField(
+  passwordField: HTMLInputElement,
+  visibleOrderedFields: HTMLInputElement[],
+  allInputs: HTMLInputElement[],
+): HTMLInputElement | null {
+  const searchPool = contextualFieldSearchPool(passwordField, allInputs);
+  const usernameCandidates = searchPool.filter(
+    (candidate) => candidate !== passwordField && isHiddenUsernameStateField(candidate),
+  );
+  if (usernameCandidates.length === 0) {
+    return null;
+  }
+  const passwordForm = logicalFormOwner(passwordField);
+  const scored = usernameCandidates
+    .map((candidate) => {
+      let score = scoreUsernameField(candidate, passwordField, visibleOrderedFields);
+      if (normalizeInputType(candidate) === 'email') {
+        score += 25;
+      }
+      if (logicalFormOwner(candidate) && logicalFormOwner(candidate) === passwordForm) {
+        score += 40;
+      }
+      if (hasVisibleIdentifierEcho(passwordField, candidate.value)) {
+        score += 160;
+      }
+      return {
+        candidate,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+  if (scored.length === 0 || scored[0].score < 120) {
     return null;
   }
   return scored[0].candidate;
@@ -481,6 +773,39 @@ function pickIdentifierField(orderedFields: HTMLInputElement[]): HTMLInputElemen
   return scored[0].candidate;
 }
 
+function inferPasswordRoleForLoginContext(
+  field: HTMLInputElement,
+  orderedFields: HTMLInputElement[],
+): FormMetadataFieldRole {
+  const inferredRole = inferFieldRole(field, { orderedFields });
+  if (inferredRole !== 'password_new') {
+    return inferredRole;
+  }
+
+  const searchPool = orderedFields.filter((candidate) => candidate.form === field.form);
+  const fieldForm = logicalFormOwner(field);
+  const logicalSearchPool = orderedFields.filter((candidate) => logicalFormOwner(candidate) === fieldForm);
+  const effectivePool = logicalSearchPool.length > 0 ? logicalSearchPool : searchPool.length > 0 ? searchPool : orderedFields;
+  const writablePasswordFields = effectivePool.filter(
+    (candidate) => candidate !== field && isWritableInput(candidate) && normalizeInputType(candidate) === 'password',
+  );
+  if (writablePasswordFields.length > 0) {
+    return inferredRole;
+  }
+
+  const semanticSignals = structuralTextSignals(field);
+  if (PASSWORD_NEW_PATTERN.test(semanticSignals) || PASSWORD_CONFIRM_PATTERN.test(semanticSignals) || OTP_PATTERN.test(semanticSignals)) {
+    return inferredRole;
+  }
+
+  const hasUsernameCandidate = effectivePool.some((candidate) => candidate !== field && isEligibleUsernameInput(candidate));
+  if (!hasUsernameCandidate) {
+    return inferredRole;
+  }
+
+  return 'password_current';
+}
+
 function findFormSubmitter(formElement: HTMLFormElement | null): HTMLElement | null {
   if (!(formElement instanceof HTMLFormElement)) {
     return null;
@@ -506,10 +831,99 @@ function findFormSubmitter(formElement: HTMLFormElement | null): HTMLElement | n
   return null;
 }
 
+function submitterHint(element: HTMLElement): string {
+  const textValue = element instanceof HTMLInputElement ? element.value : element.textContent ?? '';
+  return [
+    element.getAttribute('aria-label') ?? '',
+    textValue,
+    element.getAttribute('name') ?? '',
+    element.id ?? '',
+    element.className ?? '',
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function isSubmitterElement(element: Element): element is HTMLButtonElement | HTMLInputElement {
+  if (element instanceof HTMLButtonElement) {
+    return true;
+  }
+  if (element instanceof HTMLInputElement) {
+    const type = normalizeInputType(element);
+    return type === 'submit' || type === 'image' || type === 'button';
+  }
+  return false;
+}
+
+function scoreContextualSubmitter(
+  candidate: HTMLButtonElement | HTMLInputElement,
+  field: HTMLInputElement,
+): number {
+  if (!isVisibleElement(candidate)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  let score = 0;
+  const hint = submitterHint(candidate);
+  if (SUBMITTER_POSITIVE_PATTERN.test(hint)) {
+    score += 90;
+  }
+  if (SUBMITTER_NEGATIVE_PATTERN.test(hint)) {
+    score -= 140;
+  }
+  const fieldForm = logicalFormOwner(field);
+  if (fieldForm && candidate.closest('form') === fieldForm) {
+    score += 60;
+  }
+  const owner = semanticOwnerElement(field);
+  const dialogContainer = owner.closest('[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]');
+  if (dialogContainer && dialogContainer.contains(candidate)) {
+    score += 45;
+  }
+  if (candidate.disabled || candidate.getAttribute('aria-disabled') === 'true') {
+    score += 5;
+  }
+  return score;
+}
+
+function findContextualSubmitter(field: HTMLInputElement): HTMLElement | null {
+  const directFormSubmitter = findFormSubmitter(logicalFormOwner(field));
+  if (directFormSubmitter) {
+    return directFormSubmitter;
+  }
+  const owner = semanticOwnerElement(field);
+  const candidatesByAncestor: Array<HTMLButtonElement | HTMLInputElement> = [];
+  const searchedAncestors = new Set<HTMLElement>();
+  for (let current: HTMLElement | null = owner; current; current = current.parentElement) {
+    if (!isVisibleElement(current) || searchedAncestors.has(current)) {
+      continue;
+    }
+    searchedAncestors.add(current);
+    const localCandidates = queryDeepElements(
+      current,
+      'button, input[type="submit"], input[type="image"], input[type="button"]',
+      (element): element is HTMLButtonElement | HTMLInputElement => isSubmitterElement(element),
+    );
+    if (localCandidates.length === 0) {
+      continue;
+    }
+    candidatesByAncestor.push(...localCandidates);
+  }
+  const scored = Array.from(new Set(candidatesByAncestor))
+    .map((candidate) => ({
+      candidate,
+      score: scoreContextualSubmitter(candidate, field),
+    }))
+    .sort((left, right) => right.score - left.score);
+  if (scored.length === 0 || scored[0].score < 40) {
+    return null;
+  }
+  return scored[0].candidate;
+}
+
 function structuralSegmentForField(input: HTMLInputElement): string {
   const autocompleteToken = readAccessibleAutocompleteToken(input) ?? '';
-  const fieldName = input.getAttribute('name') ?? '';
-  const fieldId = input.id ?? '';
+  const fieldName = readSemanticAttribute(input, 'name') ?? '';
+  const fieldId = input.id || semanticHostForInput(input)?.id || '';
   const normalizedType = normalizeInputType(input);
   const role = inferFieldRole(input);
   return [role, normalizedType, autocompleteToken, fieldName, fieldId].join(':');
@@ -530,9 +944,9 @@ function uniqueSelector(document: Document, selector: string): string | null {
   return null;
 }
 
-function buildStructuralSelector(input: HTMLInputElement): string {
+function buildStructuralSelector(element: Element): string {
   const segments: string[] = [];
-  let current: Element | null = input;
+  let current: Element | null = element;
   let depth = 0;
   while (current && depth < 4 && current instanceof HTMLElement) {
     const tag = current.tagName.toLowerCase();
@@ -558,22 +972,26 @@ function buildStructuralSelector(input: HTMLInputElement): string {
 
 export function buildStableSelector(input: HTMLInputElement): string | null {
   const document = input.ownerDocument;
+  const selectorTarget = semanticOwnerElement(input);
+  const selectorTag = selectorTarget.tagName.toLowerCase();
   const candidates = uniqueStrings([
-    input.id ? `#${escapeCssIdentifier(input.id)}` : '',
+    selectorTarget.id ? `#${escapeCssIdentifier(selectorTarget.id)}` : '',
     (() => {
-      const name = input.getAttribute('name');
-      return name ? `input[name="${escapeCssIdentifier(name)}"]` : '';
+      const name = readSemanticAttribute(input, 'name');
+      return name ? `${selectorTag}[name="${escapeCssIdentifier(name)}"]` : '';
     })(),
     (() => {
       const token = readAccessibleAutocompleteToken(input);
-      return token ? `input[autocomplete="${escapeCssIdentifier(token)}"]` : '';
+      return token ? `${selectorTag}[autocomplete="${escapeCssIdentifier(token)}"]` : '';
     })(),
     (() => {
-      const name = input.getAttribute('name');
+      const name = readSemanticAttribute(input, 'name');
       const type = normalizeInputType(input);
-      return name ? `input[type="${escapeCssIdentifier(type)}"][name="${escapeCssIdentifier(name)}"]` : '';
+      return name
+        ? `${selectorTag}[type="${escapeCssIdentifier(type)}"][name="${escapeCssIdentifier(name)}"]`
+        : '';
     })(),
-    buildStructuralSelector(input),
+    buildStructuralSelector(selectorTarget),
   ]);
 
   for (const candidate of candidates) {
@@ -587,21 +1005,23 @@ export function buildStableSelector(input: HTMLInputElement): string | null {
 
 export function buildSelectorFallbacks(input: HTMLInputElement): string[] {
   const document = input.ownerDocument;
+  const selectorTarget = semanticOwnerElement(input);
+  const selectorTag = selectorTarget.tagName.toLowerCase();
   const candidates = uniqueStrings([
     buildStableSelector(input) ?? '',
     (() => {
-      const name = input.getAttribute('name');
-      return name ? `input[name="${escapeCssIdentifier(name)}"]` : '';
+      const name = readSemanticAttribute(input, 'name');
+      return name ? `${selectorTag}[name="${escapeCssIdentifier(name)}"]` : '';
     })(),
     (() => {
       const token = readAccessibleAutocompleteToken(input);
-      return token ? `input[autocomplete="${escapeCssIdentifier(token)}"]` : '';
+      return token ? `${selectorTag}[autocomplete="${escapeCssIdentifier(token)}"]` : '';
     })(),
     (() => {
       const type = normalizeInputType(input);
-      return `input[type="${escapeCssIdentifier(type)}"]`;
+      return `${selectorTag}[type="${escapeCssIdentifier(type)}"]`;
     })(),
-    buildStructuralSelector(input),
+    buildStructuralSelector(selectorTarget),
   ]);
   return candidates
     .map((candidate) => uniqueSelector(document, candidate) ?? candidate)
@@ -640,8 +1060,8 @@ export function buildFieldFingerprint(input: {
     input.inferredRole ?? inferFieldRole(input.field, { orderedFields: input.orderedFields }),
     normalizeInputType(input.field),
     readAccessibleAutocompleteToken(input.field) ?? '',
-    input.field.getAttribute('name') ?? '',
-    input.field.id ?? '',
+    readSemanticAttribute(input.field, 'name') ?? '',
+    input.field.id || semanticHostForInput(input.field)?.id || '',
     labelText,
     placeholderText,
     String(index),
@@ -681,8 +1101,8 @@ export function buildFormMetadataObservation(input: {
     selectorFallbacks,
     autocompleteToken: readAccessibleAutocompleteToken(input.field),
     inputType: normalizeInputType(input.field),
-    fieldName: input.field.getAttribute('name')?.trim() || null,
-    fieldId: input.field.id?.trim() || null,
+      fieldName: readSemanticAttribute(input.field, 'name')?.trim() || null,
+      fieldId: (input.field.id || semanticHostForInput(input.field)?.id || '').trim() || null,
     labelTextNormalized: normalizeObservedText(readAssociatedLabelText(input.field)),
     placeholderNormalized: normalizeObservedText(input.field.getAttribute('placeholder')),
     confidence: input.confidence,
@@ -789,10 +1209,7 @@ export function detectFormContext(input: {
   const passwordFields = orderedFields.filter(
     (field) =>
       normalizeInputType(field) === 'password' &&
-      inferFieldRole(field, {
-        orderedFields,
-        activeElement: input.activeElement ?? input.document.activeElement,
-      }) === 'password_current',
+      inferPasswordRoleForLoginContext(field, orderedFields) === 'password_current',
   );
 
   const passwordField = choosePasswordField(passwordFields, input.activeElement ?? input.document.activeElement);
@@ -807,13 +1224,13 @@ export function detectFormContext(input: {
   return {
     document: input.document,
     frameScope: input.frameScope ?? 'top',
-    formElement: passwordField.form ?? usernameField.form ?? null,
+    formElement: logicalFormOwner(passwordField) ?? logicalFormOwner(usernameField) ?? null,
     orderedFields,
     mode: 'full_login',
     usernameField,
     usernameRole: usernameRole === 'email' ? 'email' : 'username',
     passwordField,
-    submitter: findFormSubmitter(passwordField.form ?? usernameField.form ?? null),
+    submitter: findContextualSubmitter(passwordField) ?? findContextualSubmitter(usernameField),
   };
 }
 
@@ -823,14 +1240,20 @@ function detectPasswordStepContext(input: {
   activeElement?: Element | null;
 }): DetectedFillContext | null {
   const orderedFields = queryScopedInputs(input.document, (field) => isVisibleInput(field));
+  const allInputs = queryScopedInputs(input.document, () => true);
   const writablePasswordFields = orderedFields.filter(
-    (field) => isWritableInput(field) && normalizeInputType(field) === 'password' && inferFieldRole(field, { orderedFields }) === 'password_current',
+    (field) =>
+      isWritableInput(field) &&
+      normalizeInputType(field) === 'password' &&
+      inferPasswordRoleForLoginContext(field, orderedFields) === 'password_current',
   );
   const passwordField = choosePasswordField(writablePasswordFields, input.activeElement ?? input.document.activeElement);
   if (!passwordField) {
     return null;
   }
-  const usernameField = pickContextualUsernameField(passwordField, orderedFields);
+  const usernameField =
+    pickContextualUsernameField(passwordField, orderedFields) ??
+    pickHiddenUsernameStateField(passwordField, orderedFields, allInputs);
   if (!usernameField) {
     return null;
   }
@@ -841,13 +1264,13 @@ function detectPasswordStepContext(input: {
   return {
     document: input.document,
     frameScope: input.frameScope ?? 'top',
-    formElement: passwordField.form ?? usernameField.form ?? null,
+    formElement: logicalFormOwner(passwordField) ?? logicalFormOwner(usernameField) ?? null,
     orderedFields,
     mode: 'password_step',
     usernameField,
     usernameRole: usernameRole === 'email' ? 'email' : 'username',
     passwordField,
-    submitter: findFormSubmitter(passwordField.form ?? usernameField.form ?? null),
+    submitter: findContextualSubmitter(passwordField) ?? findContextualSubmitter(usernameField),
   };
 }
 
@@ -857,7 +1280,7 @@ function detectIdentifierStepContext(input: {
 }): DetectedFillContext | null {
   const orderedFields = queryScopedInputs(input.document, (field) => isWritableInput(field));
   const passwordFields = orderedFields.filter(
-    (field) => normalizeInputType(field) === 'password' && inferFieldRole(field, { orderedFields }) === 'password_current',
+    (field) => normalizeInputType(field) === 'password' && inferPasswordRoleForLoginContext(field, orderedFields) === 'password_current',
   );
   if (passwordFields.length > 0) {
     return null;
@@ -866,9 +1289,9 @@ function detectIdentifierStepContext(input: {
   if (!usernameField) {
     return null;
   }
-  const formElement = usernameField.form ?? null;
-  const submitter = findFormSubmitter(formElement);
-  if (!(formElement instanceof HTMLFormElement) && !submitter) {
+  const formElement = logicalFormOwner(usernameField) ?? null;
+  const submitter = findContextualSubmitter(usernameField);
+  if (!submitter) {
     return null;
   }
   const usernameRole = inferFieldRole(usernameField, { orderedFields });
@@ -896,6 +1319,76 @@ export function detectBestFillContext(input: {
     detectIdentifierStepContext(input) ??
     null
   );
+}
+
+function toInlineAssistFieldRole(input: {
+  context: DetectedFillContext;
+  field: HTMLInputElement;
+}): InlineAssistTarget['fieldRole'] | null {
+  if (input.context.mode === 'full_login' && input.context.usernameField === input.field) {
+    return input.context.usernameRole === 'email' ? 'email' : 'username';
+  }
+  if (input.context.mode === 'identifier_step' && input.context.usernameField === input.field) {
+    return input.context.usernameRole === 'email' ? 'email' : 'username';
+  }
+  if (input.context.passwordField === input.field) {
+    return 'password_current';
+  }
+  return null;
+}
+
+function buildInlineAssistTargetsForContext(context: DetectedFillContext): InlineAssistTarget[] {
+  const candidateFields =
+    context.mode === 'full_login'
+      ? [context.usernameField, context.passwordField]
+      : context.mode === 'identifier_step'
+        ? [context.usernameField]
+        : [context.passwordField];
+  const formFingerprint = buildFormFingerprint({
+    orderedFields: context.orderedFields,
+    formElement: context.formElement,
+  });
+  const contextGroupKey = `${context.frameScope}::${context.mode}::${formFingerprint}`;
+  const targets: InlineAssistTarget[] = [];
+  for (const field of candidateFields) {
+    if (!(field instanceof HTMLInputElement) || !isVisibleInput(field)) {
+      continue;
+    }
+    const fieldRole = toInlineAssistFieldRole({
+      context,
+      field,
+    });
+    if (!fieldRole) {
+      continue;
+    }
+    targets.push({
+      fieldElement: field,
+      fieldRole,
+      mode: context.mode,
+      frameScope: context.frameScope,
+      formFingerprint,
+      fieldFingerprint: buildFieldFingerprint({
+        field,
+        orderedFields: context.orderedFields,
+        inferredRole: fieldRole,
+      }),
+      confidence: 'high',
+      contextGroupKey,
+    });
+  }
+  return targets;
+}
+
+export function detectInlineAssistTargets(input: {
+  document: Document;
+  frameScope?: FormMetadataFrameScope;
+  activeElement?: Element | null;
+}): InlineAssistTarget[] {
+  const context = detectBestFillContext(input);
+  if (!context) {
+    return [];
+  }
+  return buildInlineAssistTargetsForContext(context);
 }
 
 function delay(ms: number): Promise<void> {
@@ -940,6 +1433,7 @@ async function waitForPasswordCapableContext(input: {
   frameScope?: FormMetadataFrameScope;
   timeoutMs: number;
 }): Promise<DetectedFillContext | null> {
+  const effectiveTimeoutMs = resolvePasswordTransitionTimeout(input.document, input.timeoutMs);
   const immediate = detectBestFillContext({
     document: input.document,
     frameScope: input.frameScope,
@@ -956,6 +1450,7 @@ async function waitForPasswordCapableContext(input: {
       }
       settled = true;
       observer.disconnect();
+      clearInterval(pollIntervalId);
       clearTimeout(timeoutId);
       resolve(value);
     };
@@ -976,7 +1471,8 @@ async function waitForPasswordCapableContext(input: {
       attributes: true,
       attributeFilter: ['disabled', 'readonly', 'type', 'value', 'class', 'style', 'aria-hidden'],
     });
-    const timeoutId = setTimeout(() => settle(null), input.timeoutMs);
+    const pollIntervalId = setInterval(check, PASSWORD_TRANSITION_POLL_INTERVAL_MS);
+    const timeoutId = setTimeout(() => settle(null), effectiveTimeoutMs);
     check();
   });
 }
@@ -1012,7 +1508,7 @@ export async function fillUsernamePassword(input: {
     const nextContext = await waitForPasswordCapableContext({
       document: input.document,
       frameScope: context.frameScope,
-      timeoutMs: 3_000,
+      timeoutMs: DEFAULT_PASSWORD_TRANSITION_TIMEOUT_MS,
     });
     if (!nextContext || !nextContext.passwordField) {
       return 'step_transition_try_again';
