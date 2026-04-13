@@ -4388,15 +4388,10 @@ function projectCredentialForPopup(credential, pageUrl) {
   const domainScore = credential.itemType === 'login' ? scoreDomainMatch(pageUrl, candidateUrls) : 0;
   const firstUrl = candidateUrls.length > 0 ? candidateUrls[0] : '';
   let urlHostSummary = credential.itemType === 'login' ? 'No URL' : credential.itemType;
-  let manualIconDataUrl = null;
   for (const rawUrl of candidateUrls) {
     try {
       const host = new URL(rawUrl).hostname;
       urlHostSummary = host;
-      const safeHost = sanitizeIconHost(host);
-      if (safeHost && manualIconMap[safeHost]) {
-        manualIconDataUrl = manualIconMap[safeHost];
-      }
       break;
     } catch {
       // Ignore malformed URL and keep searching.
@@ -4419,7 +4414,7 @@ function projectCredentialForPopup(credential, pageUrl) {
     searchText: buildItemSearchText(credential),
     firstUrl,
     payload: toStoredVaultPayload(credential.itemType, credential),
-    faviconCandidates: manualIconDataUrl ? [manualIconDataUrl] : [],
+    faviconCandidates: collectFaviconCandidatesForLoginUrls(candidateUrls, credential.faviconCandidates),
     urlHostSummary,
     matchFlags: {
       exactOrigin,
@@ -4457,6 +4452,7 @@ function listInlineAssistLoginCandidates() {
         title: credential.title,
         subtitle: buildItemSubtitle(credential),
         urls: Array.isArray(credential.urls) ? credential.urls : [],
+        faviconCandidates: collectFaviconCandidatesForLoginUrls(credential.urls, credential.faviconCandidates),
       }));
   }
   const items = Array.isArray(sessionListProjectionCache.items) ? sessionListProjectionCache.items : [];
@@ -4468,6 +4464,7 @@ function listInlineAssistLoginCandidates() {
       title: typeof entry?.title === 'string' ? entry.title : 'Untitled item',
       subtitle: typeof entry?.subtitle === 'string' ? entry.subtitle : '—',
       urls: Array.isArray(entry?.urls) ? entry.urls : [],
+      faviconCandidates: collectFaviconCandidatesForLoginUrls(entry.urls, entry.faviconCandidates),
     }))
     .filter((entry) => entry.itemId.length > 0);
 }
@@ -4542,6 +4539,61 @@ function resolveInlineAssistFillMode(pageUrl, candidateUrls) {
     return 'open-and-fill';
   }
   return candidateUrls.length > 0 ? 'open-url' : null;
+}
+
+function shouldAutoOpenInlineAssist(matchKind) {
+  return matchKind === 'metadata_confirmed' || matchKind === 'exact_origin';
+}
+
+function buildInlineAssistCandidates(input) {
+  const candidates = listInlineAssistLoginCandidates();
+  return candidates
+    .map((candidate) => {
+      const metadataMatchKind = inlineAssistMetadataMatchKind(input.target, candidate.itemId, input.pageOrigin, input.metadataRecords);
+      const exactOrigin = isCredentialAllowedForSite(input.pageUrl, candidate.urls);
+      const domainScore = scoreDomainMatch(input.pageUrl, candidate.urls);
+      const matchKind =
+        metadataMatchKind === 'metadata_confirmed'
+          ? 'metadata_confirmed'
+          : exactOrigin
+            ? 'exact_origin'
+            : domainScore > 0
+              ? 'domain_match'
+              : metadataMatchKind === 'metadata_heuristic'
+                ? 'metadata_heuristic'
+                : 'none';
+      return {
+        ...candidate,
+        exactOrigin,
+        domainScore,
+        matchKind,
+        iconUrl:
+          Array.isArray(candidate.faviconCandidates) &&
+          typeof candidate.faviconCandidates[0] === 'string' &&
+          candidate.faviconCandidates[0].length > 0
+            ? candidate.faviconCandidates[0]
+            : null,
+        fillMode: resolveInlineAssistFillMode(input.pageUrl, candidate.urls),
+      };
+    })
+    .sort((left, right) => {
+      const rankDelta = inlineAssistMatchRank(right.matchKind) - inlineAssistMatchRank(left.matchKind);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      const exactDelta = Number(right.exactOrigin) - Number(left.exactOrigin);
+      if (exactDelta !== 0) {
+        return exactDelta;
+      }
+      if (right.domainScore !== left.domainScore) {
+        return right.domainScore - left.domainScore;
+      }
+      return left.title.localeCompare(right.title);
+    });
+}
+
+function rankInlineAssistCandidates(input) {
+  return buildInlineAssistCandidates(input).filter((candidate) => candidate.matchKind !== 'none');
 }
 
 async function inlineAssistPrefetchInternal(input = {}) {
@@ -4670,10 +4722,132 @@ async function inlineAssistPrefetchInternal(input = {}) {
   return ok({ groups });
 }
 
-async function inlineAssistActivateInternal(input = {}) {
+async function inlineAssistQueryInternal(input = {}) {
+  const readyError = await ensureReadyState({
+    allowOffline: true,
+  });
+  const target = normalizeInlineAssistTarget(input.target);
+  if (!target) {
+    return ok({
+      status: 'unsupported',
+      matchKind: 'none',
+      autoOpenEligible: false,
+      primary: null,
+      results: [],
+    });
+  }
+  if (readyError) {
+    return ok({
+      status: 'unsupported',
+      matchKind: 'none',
+      autoOpenEligible: false,
+      primary: null,
+      results: [],
+    });
+  }
+
+  await ensurePopupSnapshotLocalCaches({
+    skipCredentialHydration: false,
+    skipProjectionHydration: false,
+  });
+  const pageUrl = typeof input.pageUrl === 'string' ? input.pageUrl : '';
+  const limit = Math.max(1, Math.min(5, Number.isFinite(input.limit) ? Number(input.limit) : 5));
+  let pageOrigin = null;
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch {
+    pageOrigin = null;
+  }
+  const metadataResponse = pageOrigin
+    ? await queryFormMetadataInternal({
+        origins: [pageOrigin],
+        awaitCompletion: false,
+      })
+    : ok({ records: [] });
+  const metadataRecords = Array.isArray(metadataResponse?.records) ? metadataResponse.records : [];
+  const rankedCandidates = rankInlineAssistCandidates({
+    target,
+    pageUrl,
+    pageOrigin,
+    metadataRecords,
+  });
+
+  if (rankedCandidates.length === 0) {
+    return ok({
+      status: 'no_match',
+      matchKind: 'none',
+      autoOpenEligible: false,
+      primary: null,
+      results: [],
+    });
+  }
+  const filteredResults = rankedCandidates.slice(0, limit);
+  const primary = filteredResults[0];
+  return ok({
+    status: 'ready',
+    matchKind: primary.matchKind,
+    autoOpenEligible: shouldAutoOpenInlineAssist(primary.matchKind),
+    primary: {
+      itemId: primary.itemId,
+      title: primary.title,
+      subtitle: primary.subtitle,
+      matchKind: primary.matchKind,
+      fillMode: primary.fillMode,
+      exactOrigin: primary.exactOrigin,
+      domainScore: primary.domainScore,
+      iconUrl: typeof primary.iconUrl === 'string' && primary.iconUrl.length > 0 ? primary.iconUrl : null,
+    },
+    results: filteredResults.map((candidate) => ({
+      itemId: candidate.itemId,
+      title: candidate.title,
+      subtitle: candidate.subtitle,
+      matchKind: candidate.matchKind,
+      fillMode: candidate.fillMode,
+      exactOrigin: candidate.exactOrigin,
+      domainScore: candidate.domainScore,
+      iconUrl: typeof candidate.iconUrl === 'string' && candidate.iconUrl.length > 0 ? candidate.iconUrl : null,
+    })),
+  });
+}
+
+async function inlineAssistActivateInternal(input = {}, sender = null) {
   const itemId = typeof input?.itemId === 'string' ? input.itemId.trim() : '';
   if (!itemId) {
     return fail('invalid_input', 'Inline assist target is invalid.');
+  }
+  const senderTabId = Number(sender?.tab?.id);
+  const senderTabUrl = typeof sender?.tab?.url === 'string' ? sender.tab.url : '';
+  if (Number.isInteger(senderTabId) && senderTabId >= 0 && senderTabUrl) {
+    const cacheResult = await refreshCredentialCache({
+      awaitCompletion: false,
+      preferLocalCache: true,
+    });
+    if (!cacheResult.ok) {
+      return cacheResult;
+    }
+    armIdleLockTimer();
+    const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
+    if (!targetCredential) {
+      return fail('credential_not_found', 'Credential not found in extension cache.');
+    }
+    if (targetCredential.itemType !== 'login') {
+      return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
+    }
+    if (isPageUrlEligibleForFill(senderTabUrl) && isCredentialAllowedForSite(senderTabUrl, targetCredential.urls)) {
+      const fillResult = await fillCredentialInTabInternal({
+        itemId,
+        tabId: senderTabId,
+        tabUrl: senderTabUrl,
+        source: 'inline_assist',
+      });
+      if (fillResult?.ok) {
+        return ok({
+          result: fillResult.result,
+          uiAction: 'fill',
+        });
+      }
+      return fillResult;
+    }
   }
   return dispatchLoginRowActionInternal({
     itemId,
@@ -5502,6 +5676,32 @@ function mergeUniqueIconCandidates(candidates) {
   return unique;
 }
 
+function collectFaviconCandidatesForLoginUrls(urls, persistedCandidates) {
+  const safeUrls = Array.isArray(urls) ? urls : [];
+  const safePersistedCandidates = Array.isArray(persistedCandidates)
+    ? persistedCandidates.filter((candidate) => typeof candidate === 'string' && candidate.length > 0)
+    : [];
+  const cachedCandidates = [];
+  const manualCandidates = [];
+  const seenDomains = new Set();
+  for (const rawUrl of safeUrls) {
+    const safeDomain = normalizeIconDomainFromUrl(rawUrl);
+    if (!safeDomain || seenDomains.has(safeDomain)) {
+      continue;
+    }
+    seenDomains.add(safeDomain);
+    const cachedEntry = iconCacheEntryForDomain(safeDomain);
+    if (typeof cachedEntry?.dataUrl === 'string' && cachedEntry.dataUrl.length > 0) {
+      cachedCandidates.push(cachedEntry.dataUrl);
+    }
+    const manualIconDataUrl = typeof manualIconMap[safeDomain] === 'string' ? manualIconMap[safeDomain] : null;
+    if (manualIconDataUrl) {
+      manualCandidates.push(manualIconDataUrl);
+    }
+  }
+  return mergeUniqueIconCandidates([...cachedCandidates, ...manualCandidates, ...safePersistedCandidates]);
+}
+
 function applyCachedIconsToProjection(items) {
   return items.map((item) => {
     if (!item || item.itemType !== 'login') {
@@ -6217,18 +6417,6 @@ function projectCredentialIndexForPage(entry, pageUrl) {
   const urls = Array.isArray(entry?.urls) ? entry.urls : [];
   const exactOrigin = entry?.itemType === 'login' ? isCredentialAllowedForSite(pageUrl, urls) : false;
   const domainScore = entry?.itemType === 'login' ? scoreDomainMatch(pageUrl, urls) : 0;
-  let manualIconDataUrl = null;
-  for (const rawUrl of urls) {
-    try {
-      const safeHost = sanitizeIconHost(new URL(rawUrl).hostname);
-      if (safeHost && manualIconMap[safeHost]) {
-        manualIconDataUrl = manualIconMap[safeHost];
-      }
-      break;
-    } catch {
-      // Ignore malformed URL in projection cache.
-    }
-  }
   const firstUrl = typeof entry?.firstUrl === 'string' ? entry.firstUrl : '';
   const rowAction = resolveLoginRowActionForPage({
     itemType: entry?.itemType ?? 'login',
@@ -6245,7 +6433,7 @@ function projectCredentialIndexForPage(entry, pageUrl) {
     subtitle: entry?.subtitle ?? '—',
     searchText: entry?.searchText ?? entry?.title ?? '',
     firstUrl,
-    faviconCandidates: mergeUniqueIconCandidates([...(manualIconDataUrl ? [manualIconDataUrl] : [])]),
+    faviconCandidates: collectFaviconCandidatesForLoginUrls(urls, entry?.faviconCandidates),
     urlHostSummary: typeof entry?.urlHostSummary === 'string' ? entry.urlHostSummary : 'No URL',
     matchFlags: {
       exactOrigin,
@@ -9708,6 +9896,13 @@ async function handleCommand(command, senderContext, sender) {
       }
       return inlineAssistPrefetchInternal(command);
     }
+    case 'vaultlite.inline_assist_query': {
+      const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'inline_assist:query');
+      if (capabilityError) {
+        return capabilityError;
+      }
+      return inlineAssistQueryInternal(command);
+    }
     case 'vaultlite.list_item_attachments': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'state:read');
       if (capabilityError) {
@@ -9741,7 +9936,7 @@ async function handleCommand(command, senderContext, sender) {
       if (capabilityError) {
         return capabilityError;
       }
-      return inlineAssistActivateInternal(command);
+      return inlineAssistActivateInternal(command, sender);
     }
     case 'vaultlite.open_and_fill_credential': {
       const capabilityError = rejectWithCapabilityIfNeeded(senderContext, 'fill:dispatch');

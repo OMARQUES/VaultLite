@@ -29,6 +29,13 @@ const INLINE_ASSIST_DEBUG_HOSTS = new Set(['accounts.google.com']);
 const DEFAULT_PASSWORD_TRANSITION_TIMEOUT_MS = 3000;
 const CHALLENGE_PASSWORD_TRANSITION_TIMEOUT_MS = 12000;
 const PASSWORD_TRANSITION_POLL_INTERVAL_MS = 250;
+const INLINE_ASSIST_ANCHOR_BADGE_SIZE = 28;
+const INLINE_ASSIST_ANCHOR_CHEVRON_WIDTH = 14;
+const INLINE_ASSIST_ANCHOR_GAP = 4;
+const INLINE_ASSIST_ANCHOR_WIDTH =
+  INLINE_ASSIST_ANCHOR_BADGE_SIZE + INLINE_ASSIST_ANCHOR_CHEVRON_WIDTH + INLINE_ASSIST_ANCHOR_GAP;
+const INLINE_ASSIST_TRAY_WIDTH = 248;
+const INLINE_ASSIST_TRAY_ANIMATION_MS = 140;
 
 function hasStronglyHiddenAncestor(element) {
   return Boolean(element.closest('[hidden], [inert], [data-is-visible="false"]'));
@@ -190,17 +197,25 @@ function debugGroupsSummary(groups) {
 }
 
 function debugLog(event, details = {}) {
-  if (!isInlineAssistDebugEnabled()) {
-    return;
-  }
   if (event === 'google.stage.inferred') {
     console.log(`[vaultlite][content][${event}]`, details);
+    return;
+  }
+  if (event.startsWith('inline.icon.')) {
+    console.log(`[vaultlite][content][${event}]`, details);
+    return;
+  }
+  if (!isInlineAssistDebugEnabled()) {
     return;
   }
   console.debug(`[vaultlite][content][${event}]`, details);
 }
 
 function debugWarn(event, details = {}) {
+  if (event.startsWith('inline.icon.')) {
+    console.warn(`[vaultlite][content][${event}]`, details);
+    return;
+  }
   if (!isInlineAssistDebugEnabled()) {
     return;
   }
@@ -396,6 +411,10 @@ function rootSearchBase(root) {
   return root;
 }
 
+function isVaultLiteInlineElement(element) {
+  return element instanceof Element && element.closest?.('[data-vaultlite-inline-root="true"]') instanceof Element;
+}
+
 function collectQueryableRoots(root) {
   const roots = [root];
   const seen = new Set([root]);
@@ -407,6 +426,9 @@ function collectQueryableRoots(root) {
     }
     const elements = Array.from(base.querySelectorAll('*'));
     for (const element of elements) {
+      if (isVaultLiteInlineElement(element)) {
+        continue;
+      }
       if (!(element instanceof HTMLElement) || !(element.shadowRoot instanceof ShadowRoot)) {
         continue;
       }
@@ -1806,6 +1828,14 @@ function runtimeState() {
       inlineAssistDeferredScanTimer: null,
       inlineAssistModalSeenAt: new WeakMap(),
       inlineAssistContainerScrollHandlers: new WeakMap(),
+      inlineAssistActiveTrayContextKey: null,
+      inlineAssistActiveTrayTarget: null,
+      inlineAssistActiveTrayGeneration: 0,
+      inlineAssistActiveTrayDocument: null,
+      inlineAssistAutoOpenedStrongContexts: new Set(),
+      inlineAssistDismissedTrayContexts: new Set(),
+      inlineAssistGlobalListenersBound: false,
+      inlineAssistTrayCloseTimer: null,
     };
   }
   return globalThis[CONTENT_RUNTIME_KEY];
@@ -1881,50 +1911,196 @@ function inlineAssistRootForDocument(document, container = null) {
     :host {
       all: initial;
     }
+    :host,
+    .vaultlite-inline-layer {
+      --vl-border: #364154;
+      --vl-divider: rgba(255, 255, 255, 0.08);
+      --vl-text: #f4f7fb;
+      --vl-text-muted: #c8d1de;
+      --vl-primary: #2562ea;
+      --vl-primary-hover: #1f56d6;
+    }
     .vaultlite-inline-layer {
       position: fixed;
       inset: 0;
       pointer-events: none;
       z-index: 2147483646;
-      font-family: Inter, "Segoe UI", sans-serif;
+      font-family: "Manrope", "Segoe UI", sans-serif;
     }
     .vaultlite-inline-anchor {
       position: fixed;
-      width: 28px;
+      width: 46px;
       height: 28px;
-      border-radius: 999px;
-      border: 1px solid rgba(37, 98, 234, 0.68);
-      background: rgba(37, 98, 234, 0.96);
-      color: #ffffff;
-      font: 700 11px/1 Inter, "Segoe UI", sans-serif;
+      border: 0;
+      background: transparent;
+      color: #141a24;
+      font: 700 11px/1 "Manrope", "Segoe UI", sans-serif;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
+      gap: 4px;
+      padding: 0;
       pointer-events: auto;
       cursor: pointer;
-      box-shadow: 0 10px 22px rgba(18, 34, 74, 0.28);
-      transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease, opacity 120ms ease;
+      box-shadow: none;
+      transition: transform 120ms ease, opacity 120ms ease;
       opacity: 0.96;
+    }
+    .vaultlite-inline-anchor[data-inline-expanded="true"] {
+      color: #141a24;
     }
     .vaultlite-inline-anchor:hover,
     .vaultlite-inline-anchor:focus-visible {
       transform: translateY(-1px);
-      box-shadow: 0 12px 24px rgba(18, 34, 74, 0.32);
-      background: rgba(31, 86, 214, 0.98);
       outline: none;
+    }
+    .vaultlite-inline-anchor[data-inline-expanded="true"]:hover,
+    .vaultlite-inline-anchor[data-inline-expanded="true"]:focus-visible {
+      color: #141a24;
     }
     .vaultlite-inline-anchor[data-inline-state="probing"] {
       opacity: 0.78;
     }
     .vaultlite-inline-anchor[data-inline-state="no_match"] {
-      background: rgba(37, 98, 234, 0.16);
-      color: rgba(37, 98, 234, 0.98);
-      border-color: rgba(37, 98, 234, 0.46);
-      box-shadow: 0 8px 18px rgba(18, 34, 74, 0.18);
+      opacity: 0.84;
     }
     .vaultlite-inline-anchor:disabled {
       cursor: progress;
       opacity: 0.72;
+    }
+    .vaultlite-inline-anchor-badge {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(37, 98, 234, 0.96);
+      color: #ffffff;
+      font: 700 11px/1 "Manrope", "Segoe UI", sans-serif;
+      letter-spacing: -0.01em;
+      flex: 0 0 auto;
+    }
+    .vaultlite-inline-anchor-chevron {
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      color: #141a24;
+    }
+    .vaultlite-inline-tray {
+      position: fixed;
+      width: min(248px, calc(100vw - 24px));
+      border: 0;
+      background: transparent;
+      color: var(--vl-text);
+      box-shadow: none;
+      pointer-events: auto;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      opacity: 0;
+      transform: translateY(-4px) scale(0.985);
+      transition:
+        opacity 140ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .vaultlite-inline-tray[data-inline-open="false"] {
+      display: none;
+    }
+    .vaultlite-inline-tray[data-inline-open="true"] {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    .vaultlite-inline-tray[data-inline-open="closing"] {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.985);
+    }
+    .vaultlite-inline-tray[data-inline-scrollable="true"] {
+      max-height: 154px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      padding-right: 2px;
+    }
+    .vaultlite-inline-result-card,
+    .vaultlite-inline-result {
+      display: flex;
+      width: 100%;
+      text-align: left;
+      color: var(--vl-text);
+      padding: 5px 7px;
+      border: 1px solid color-mix(in srgb, var(--vl-border) 86%, transparent);
+      align-items: center;
+      gap: 6px;
+      border-radius: 9px;
+      cursor: pointer;
+      font: 600 10px/1 "Manrope", "Segoe UI", sans-serif;
+      background: #202328;
+    }
+    .vaultlite-inline-result-card:hover,
+    .vaultlite-inline-result-card:focus-visible,
+    .vaultlite-inline-result:hover,
+    .vaultlite-inline-result:focus-visible {
+      background: #25272c;
+      outline: none;
+    }
+    .vaultlite-inline-result-card:disabled,
+    .vaultlite-inline-result:disabled {
+      cursor: progress;
+      opacity: 0.72;
+    }
+    .vaultlite-inline-result-content {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      width: 100%;
+      min-width: 0;
+    }
+    .vaultlite-inline-result-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid var(--vl-border);
+      background: linear-gradient(180deg, #2c3748, #20293a);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: #d6e1f5;
+      flex: 0 0 auto;
+      overflow: hidden;
+      position: relative;
+      letter-spacing: -0.02em;
+    }
+    .vaultlite-inline-result-image {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+    .vaultlite-inline-result-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .vaultlite-inline-result-title {
+      font: 700 11px/1.15 "Manrope", "Segoe UI", sans-serif;
+      color: var(--vl-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .vaultlite-inline-result-subtitle {
+      font: 500 10px/1.15 "Manrope", "Segoe UI", sans-serif;
+      color: var(--vl-text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   `;
   const layer = document.createElement('div');
@@ -1936,6 +2112,7 @@ function inlineAssistRootForDocument(document, container = null) {
     host,
     shadowRoot,
     layer,
+    tray: null,
     container: parent,
     positionMode: parent !== document.body && parent !== document.documentElement ? 'container' : 'viewport',
   };
@@ -1955,6 +2132,9 @@ function disposeInlineAssistRoot(document) {
   } catch {
     // Best effort only.
   }
+  if (runtime.inlineAssistActiveTrayDocument === document) {
+    closeInlineAssistTray({ dismiss: false });
+  }
 }
 
 function ensureInlineAssistObservation(document) {
@@ -1966,7 +2146,25 @@ function ensureInlineAssistObservation(document) {
   if (!defaultView || !document.documentElement) {
     return;
   }
-  const schedule = () => {
+  const schedule = (event = null) => {
+    const target = event?.target;
+    if (
+      target instanceof Element &&
+      target.closest?.('[data-vaultlite-inline-root="true"]') instanceof Element
+    ) {
+      return;
+    }
+    if (typeof event?.composedPath === 'function') {
+      const path = event.composedPath();
+      const insideInlineAssist = path.some(
+        (entry) =>
+          entry instanceof Element &&
+          entry.closest?.('[data-vaultlite-inline-root="true"]') instanceof Element,
+      );
+      if (insideInlineAssist) {
+        return;
+      }
+    }
     scheduleInlineAssistScan();
   };
   const observer = new MutationObserver(schedule);
@@ -2011,10 +2209,11 @@ function setInlineAssistAnchorPosition(button, field, entry) {
     button.style.display = 'none';
     return;
   }
-  const buttonSize = 28;
+  const buttonHeight = 28;
+  const buttonWidth = INLINE_ASSIST_ANCHOR_WIDTH;
   const insideField = rect.width >= 148;
-  let top = rect.top + Math.max(0, (rect.height - buttonSize) / 2);
-  let left = insideField ? rect.right - buttonSize - 8 : rect.right + 8;
+  let top = rect.top + Math.max(0, (rect.height - buttonHeight) / 2);
+  let left = insideField ? rect.right - buttonWidth - 8 : rect.right + 8;
   if (entry?.positionMode === 'container' && entry.container instanceof HTMLElement) {
     const containerRect = entry.container.getBoundingClientRect();
     top -= containerRect.top;
@@ -2024,6 +2223,383 @@ function setInlineAssistAnchorPosition(button, field, entry) {
   button.style.display = 'inline-flex';
   button.style.top = `${Math.round(top)}px`;
   button.style.left = `${Math.round(left)}px`;
+}
+
+function shouldAutoOpenInlineAssist(matchKind) {
+  return matchKind === 'metadata_confirmed' || matchKind === 'exact_origin';
+}
+
+function setInlineAssistFloatingPosition(element, field, entry) {
+  if (!(element instanceof HTMLElement) || !(field instanceof HTMLInputElement)) {
+    return;
+  }
+  const rect = field.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    element.style.display = 'none';
+    return;
+  }
+  const trayWidth = INLINE_ASSIST_TRAY_WIDTH;
+  const viewportWidth = field.ownerDocument?.defaultView?.innerWidth ?? 1280;
+  const viewportHeight = field.ownerDocument?.defaultView?.innerHeight ?? 720;
+  let top = rect.bottom + 10;
+  let left = rect.right - Math.min(trayWidth, rect.width + 48);
+  const runtime = runtimeState();
+  const activeTarget = runtime.inlineAssistActiveTrayTarget;
+  if (activeTarget) {
+    const anchor = entry?.layer?.querySelector?.(
+      `[data-vaultlite-inline-anchor="true"][data-context-group-key="${escapeCssIdentifier(activeTarget.contextGroupKey)}"][data-field-fingerprint="${escapeCssIdentifier(activeTarget.fieldFingerprint)}"]`,
+    );
+    if (anchor instanceof HTMLElement) {
+      const anchorRect = anchor.getBoundingClientRect();
+      left = anchorRect.left + INLINE_ASSIST_ANCHOR_CHEVRON_WIDTH - trayWidth;
+      top = anchorRect.bottom + 8;
+    }
+  }
+  if (entry?.positionMode === 'container' && entry.container instanceof HTMLElement) {
+    const containerRect = entry.container.getBoundingClientRect();
+    top -= containerRect.top;
+    left -= containerRect.left;
+  }
+  const maxLeft = Math.max(8, viewportWidth - trayWidth - 8);
+  left = Math.max(8, Math.min(left, maxLeft));
+  if (entry?.positionMode !== 'container' && top + 260 > viewportHeight) {
+    top = Math.max(8, rect.top - 270);
+  }
+  element.style.display = 'flex';
+  element.style.top = `${Math.round(top)}px`;
+  element.style.left = `${Math.round(left)}px`;
+}
+
+function ensureInlineAssistTrayElement(entry, target) {
+  if (entry.tray instanceof HTMLElement) {
+    if (!entry.layer.contains(entry.tray)) {
+      entry.layer.appendChild(entry.tray);
+    }
+    setInlineAssistFloatingPosition(entry.tray, target.fieldElement, entry);
+    return entry.tray;
+  }
+  const tray = target.document.createElement('div');
+  tray.className = 'vaultlite-inline-tray';
+  tray.setAttribute('data-vaultlite-inline-tray', 'true');
+  tray.setAttribute('data-inline-open', 'false');
+  tray.addEventListener('mousedown', (event) => {
+    event.stopPropagation();
+  }, true);
+  tray.addEventListener('pointerdown', (event) => {
+    event.stopPropagation();
+  }, true);
+  entry.layer.appendChild(tray);
+  entry.tray = tray;
+  setInlineAssistFloatingPosition(tray, target.fieldElement, entry);
+  return tray;
+}
+
+function buildInlineAssistMonogram(label) {
+  const normalized = String(label ?? '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!normalized) {
+    return 'VL';
+  }
+  const words = normalized
+    .split(' ')
+    .map((part) => part.replace(/[^a-z0-9]/gi, ''))
+    .filter(Boolean);
+  if (words.length >= 2) {
+    return `${words[0][0] ?? ''}${words[1][0] ?? ''}`.toUpperCase();
+  }
+  const compact = words[0] ?? normalized.replace(/[^a-z0-9]/gi, '');
+  return compact.slice(0, 2).toUpperCase() || 'VL';
+}
+
+function renderInlineAssistResultIcon(iconContainer, result) {
+  if (!(iconContainer instanceof HTMLElement)) {
+    return;
+  }
+  const monogram = buildInlineAssistMonogram(result?.title);
+  iconContainer.replaceChildren();
+  const iconUrl = typeof result?.iconUrl === 'string' && result.iconUrl.length > 0 ? result.iconUrl : null;
+  if (!iconUrl) {
+    debugLog('inline.icon.missing', {
+      itemId: result?.itemId ?? null,
+      title: result?.title ?? null,
+      iconUrl: null,
+    });
+    iconContainer.textContent = monogram;
+    return;
+  }
+  debugLog('inline.icon.render', {
+    itemId: result?.itemId ?? null,
+    title: result?.title ?? null,
+    iconUrl,
+  });
+  const image = iconContainer.ownerDocument.createElement('img');
+  image.className = 'vaultlite-inline-result-image';
+  image.setAttribute('data-vaultlite-inline-result-image', 'true');
+  image.setAttribute('alt', '');
+  image.decoding = 'async';
+  image.src = iconUrl;
+  iconContainer.appendChild(image);
+  image.addEventListener(
+    'load',
+    () => {
+      debugLog('inline.icon.load', {
+        itemId: result?.itemId ?? null,
+        title: result?.title ?? null,
+        iconUrl,
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+      });
+    },
+    { once: true },
+  );
+  image.addEventListener(
+    'error',
+    () => {
+      debugWarn('inline.icon.error', {
+        itemId: result?.itemId ?? null,
+        title: result?.title ?? null,
+        iconUrl,
+      });
+      iconContainer.replaceChildren();
+      iconContainer.textContent = monogram;
+    },
+    { once: true },
+  );
+}
+
+function renderInlineAssistAnchorGlyph(button, expanded) {
+  if (!(button instanceof HTMLElement)) {
+    return;
+  }
+  button.replaceChildren();
+  button.setAttribute('data-inline-expanded', expanded ? 'true' : 'false');
+  const chevron = button.ownerDocument.createElement('span');
+  chevron.className = 'vaultlite-inline-anchor-chevron';
+  chevron.setAttribute('data-vaultlite-inline-anchor-chevron', 'true');
+  const chevronIcon = button.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  chevronIcon.setAttribute('viewBox', '0 0 16 16');
+  chevronIcon.setAttribute('width', '12');
+  chevronIcon.setAttribute('height', '12');
+  chevronIcon.setAttribute('aria-hidden', 'true');
+  chevronIcon.setAttribute('focusable', 'false');
+  const chevronPath = button.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'path');
+  chevronPath.setAttribute('d', expanded ? 'M3.5 6l4.5 4 4.5-4' : 'M3.5 10l4.5-4 4.5 4');
+  chevronPath.setAttribute('fill', 'none');
+  chevronPath.setAttribute('stroke', 'currentColor');
+  chevronPath.setAttribute('stroke-width', '1.8');
+  chevronPath.setAttribute('stroke-linecap', 'round');
+  chevronPath.setAttribute('stroke-linejoin', 'round');
+  chevronIcon.appendChild(chevronPath);
+  chevron.appendChild(chevronIcon);
+  button.appendChild(chevron);
+  const badge = button.ownerDocument.createElement('span');
+  badge.className = 'vaultlite-inline-anchor-badge';
+  badge.textContent = 'VL';
+  button.appendChild(badge);
+}
+
+function syncInlineAssistAnchorState() {
+  const runtime = runtimeState();
+  for (const entry of runtime.inlineAssistRoots.values()) {
+    if (!(entry?.layer instanceof HTMLElement)) {
+      continue;
+    }
+    const anchors = entry.layer.querySelectorAll('[data-vaultlite-inline-anchor="true"]');
+    for (const anchor of anchors) {
+      if (!(anchor instanceof HTMLElement)) {
+        continue;
+      }
+      const isExpanded =
+        runtime.inlineAssistActiveTrayContextKey === anchor.getAttribute('data-context-group-key') &&
+        runtime.inlineAssistActiveTrayTarget?.fieldFingerprint === anchor.getAttribute('data-field-fingerprint');
+      renderInlineAssistAnchorGlyph(anchor, isExpanded);
+    }
+  }
+}
+
+function closeInlineAssistTray(options = {}) {
+  const runtime = runtimeState();
+  if (runtime.inlineAssistTrayCloseTimer !== null) {
+    clearTimeout(runtime.inlineAssistTrayCloseTimer);
+    runtime.inlineAssistTrayCloseTimer = null;
+  }
+  if (options.dismiss && typeof runtime.inlineAssistActiveTrayContextKey === 'string' && runtime.inlineAssistActiveTrayContextKey.length > 0) {
+    runtime.inlineAssistDismissedTrayContexts.add(runtime.inlineAssistActiveTrayContextKey);
+  }
+  for (const entry of runtime.inlineAssistRoots.values()) {
+    if (entry?.tray instanceof HTMLElement) {
+      const tray = entry.tray;
+      tray.setAttribute('data-inline-open', 'closing');
+      runtime.inlineAssistTrayCloseTimer = setTimeout(() => {
+        try {
+          tray.remove();
+        } catch {
+          // Best effort only.
+        }
+        if (entry.tray === tray) {
+          entry.tray = null;
+        }
+      }, INLINE_ASSIST_TRAY_ANIMATION_MS);
+    }
+  }
+  runtime.inlineAssistActiveTrayContextKey = null;
+  runtime.inlineAssistActiveTrayTarget = null;
+  runtime.inlineAssistActiveTrayDocument = null;
+  runtime.inlineAssistActiveTrayGeneration += 1;
+  syncInlineAssistAnchorState();
+}
+
+function setInlineAssistActiveTray(target, options = {}) {
+  const runtime = runtimeState();
+  const nextContextKey = typeof target?.contextGroupKey === 'string' ? target.contextGroupKey : null;
+  if (!nextContextKey) {
+    closeInlineAssistTray({ dismiss: false });
+    return;
+  }
+  runtime.inlineAssistActiveTrayContextKey = nextContextKey;
+  runtime.inlineAssistActiveTrayTarget = target;
+  runtime.inlineAssistActiveTrayDocument = target.document;
+  runtime.inlineAssistActiveTrayGeneration += 1;
+  if (options.autoOpen === true) {
+    runtime.inlineAssistAutoOpenedStrongContexts.add(nextContextKey);
+  } else {
+    runtime.inlineAssistDismissedTrayContexts.delete(nextContextKey);
+  }
+  syncInlineAssistAnchorState();
+}
+
+function renderInlineAssistTrayState(entry, target, payload, options = {}) {
+  if (!entry || !target) {
+    return;
+  }
+  const tray = ensureInlineAssistTrayElement(entry, target);
+  tray.replaceChildren();
+  tray.setAttribute('data-inline-open', 'true');
+  const entries = [];
+  if (payload?.primary?.itemId) {
+    entries.push(payload.primary);
+  }
+  if (Array.isArray(payload?.results)) {
+    for (const result of payload.results) {
+      if (!result?.itemId || entries.some((entryItem) => entryItem?.itemId === result.itemId)) {
+        continue;
+      }
+      entries.push(result);
+    }
+  }
+  tray.setAttribute('data-inline-scrollable', entries.length > 3 ? 'true' : 'false');
+  for (const result of entries) {
+    const row = target.document.createElement('button');
+    row.type = 'button';
+    row.className = 'vaultlite-inline-result-card vaultlite-inline-result';
+    row.setAttribute('data-vaultlite-inline-result', 'true');
+    const rowContent = target.document.createElement('div');
+    rowContent.className = 'vaultlite-inline-result-content';
+    const rowIcon = target.document.createElement('span');
+    rowIcon.className = 'vaultlite-inline-result-icon';
+    rowIcon.setAttribute('data-vaultlite-inline-result-icon', 'true');
+    renderInlineAssistResultIcon(rowIcon, result);
+    const rowMain = target.document.createElement('div');
+    rowMain.className = 'vaultlite-inline-result-main';
+    const rowTitle = target.document.createElement('span');
+    rowTitle.className = 'vaultlite-inline-result-title';
+    rowTitle.textContent = result.title;
+    const rowSubtitle = target.document.createElement('span');
+    rowSubtitle.className = 'vaultlite-inline-result-subtitle';
+    rowSubtitle.textContent = result.subtitle;
+    rowMain.append(rowTitle, rowSubtitle);
+    rowContent.append(rowIcon, rowMain);
+    row.append(rowContent);
+    row.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void activateInlineAssistSelection(target, result, row);
+    });
+    tray.appendChild(row);
+  }
+}
+
+async function activateInlineAssistSelection(target, result, button) {
+  if (!result || typeof result.itemId !== 'string' || result.itemId.length === 0) {
+    return;
+  }
+  if (button instanceof HTMLButtonElement) {
+    button.disabled = true;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'vaultlite.inline_assist_activate',
+      itemId: result.itemId,
+      pageUrl: location.href,
+      contextGroupKey: target.contextGroupKey,
+      fieldRole: target.fieldRole,
+      mode: target.mode,
+      formFingerprint: target.formFingerprint,
+      fieldFingerprint: target.fieldFingerprint,
+    });
+    debugLog('inline.activate.response', {
+      target: debugTargetSummary(target),
+      response,
+    });
+    if (response?.ok === true) {
+      closeInlineAssistTray({ dismiss: false });
+      scheduleInlineAssistScan();
+    }
+  } catch (error) {
+    debugWarn('inline.activate.error', {
+      target: debugTargetSummary(target),
+      error: summarizeDebugError(error),
+    });
+  } finally {
+    if (button instanceof HTMLButtonElement) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function renderActiveInlineAssistTray(options = {}) {
+  const runtime = runtimeState();
+  const target = runtime.inlineAssistActiveTrayTarget;
+  if (!target || runtime.inlineAssistActiveTrayContextKey !== target.contextGroupKey) {
+    closeInlineAssistTray({ dismiss: false });
+    return;
+  }
+  const entry = inlineAssistRootForDocument(target.document, resolveInlineAssistContainer(target.document, [target]).container);
+  const trayGeneration = runtime.inlineAssistActiveTrayGeneration + 1;
+  runtime.inlineAssistActiveTrayGeneration = trayGeneration;
+  let response = null;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'vaultlite.inline_assist_query',
+      pageUrl: location.href,
+      target: {
+        contextGroupKey: target.contextGroupKey,
+      frameScope: target.frameScope,
+      mode: target.mode,
+      fieldRole: target.fieldRole,
+      formFingerprint: target.formFingerprint,
+      fieldFingerprint: target.fieldFingerprint,
+    },
+      limit: 5,
+    });
+  } catch (error) {
+    debugWarn('inline.query.error', {
+      target: debugTargetSummary(target),
+      error: summarizeDebugError(error),
+    });
+    response = null;
+  }
+  if (runtime.inlineAssistActiveTrayGeneration !== trayGeneration || runtime.inlineAssistActiveTrayContextKey !== target.contextGroupKey) {
+    return;
+  }
+  const results = Array.isArray(response?.results) ? response.results.filter((result) => result?.itemId) : [];
+  const hasPrimary = Boolean(response?.primary?.itemId);
+  if (response?.status !== 'ready' || (!hasPrimary && results.length === 0)) {
+    closeInlineAssistTray({ dismiss: false });
+    return;
+  }
+  renderInlineAssistTrayState(entry, target, response, {});
 }
 
 function buildInlineAssistAriaLabel(target, group) {
@@ -2038,53 +2614,43 @@ function buildInlineAssistAriaLabel(target, group) {
   return `Fill username${titleSuffix}`;
 }
 
-async function activateInlineAssistTarget(target, group, button) {
-  if (!group || typeof group.bestItemId !== 'string' || group.bestItemId.length === 0) {
-    debugWarn('inline.activate.skipped', {
-      target: debugTargetSummary(target),
-      group: debugGroupsSummary({ [target?.contextGroupKey ?? 'unknown']: group }),
-    });
+function openInlineAssistTrayFromAnchor(target, group, options = {}) {
+  debugLog('inline.tray.open', {
+    target: debugTargetSummary(target),
+    group: debugGroupsSummary({ [target?.contextGroupKey ?? 'unknown']: group }),
+    autoOpen: options.autoOpen === true,
+  });
+  const runtime = runtimeState();
+  if (
+    runtime.inlineAssistActiveTrayContextKey === target?.contextGroupKey &&
+    runtime.inlineAssistActiveTrayTarget &&
+    runtime.inlineAssistActiveTrayTarget.contextGroupKey === target.contextGroupKey &&
+    runtime.inlineAssistActiveTrayTarget.fieldFingerprint === target.fieldFingerprint
+  ) {
+    closeInlineAssistTray({ dismiss: true });
+    scheduleInlineAssistScan();
     return;
   }
-  button.disabled = true;
-  button.setAttribute('data-inline-state', 'busy');
-  try {
-    debugLog('inline.activate.start', {
-      target: debugTargetSummary(target),
-      group: debugGroupsSummary({ [target.contextGroupKey]: group }),
-    });
-    const response = await chrome.runtime.sendMessage({
-      type: 'vaultlite.inline_assist_activate',
-      itemId: group.bestItemId,
-      pageUrl: location.href,
-      contextGroupKey: target.contextGroupKey,
-      fieldRole: target.fieldRole,
-      mode: target.mode,
-      formFingerprint: target.formFingerprint,
-      fieldFingerprint: target.fieldFingerprint,
-    });
-    debugLog('inline.activate.response', {
-      target: debugTargetSummary(target),
-      response,
-    });
-  } catch (error) {
-    debugWarn('inline.activate.error', {
-      target: debugTargetSummary(target),
-      error: summarizeDebugError(error),
-    });
-  } finally {
-    button.disabled = false;
-    button.setAttribute('data-inline-state', group.status);
-  }
+  setInlineAssistActiveTray(target, {
+    autoOpen: options.autoOpen === true,
+  });
+  void renderActiveInlineAssistTray({});
 }
 
 function renderInlineAssistTargets(targets, groups) {
   const activeDocuments = new Set(targets.map((target) => target.document));
   const runtime = runtimeState();
+  const availableTargetsByContext = new Map(targets.map((target) => [target.contextGroupKey, target]));
   for (const [document] of runtime.inlineAssistRoots.entries()) {
     if (!activeDocuments.has(document)) {
       disposeInlineAssistRoot(document);
     }
+  }
+  if (
+    runtime.inlineAssistActiveTrayContextKey &&
+    !availableTargetsByContext.has(runtime.inlineAssistActiveTrayContextKey)
+  ) {
+    closeInlineAssistTray({ dismiss: false });
   }
   const groupedTargetsByDocument = new Map();
   for (const target of targets) {
@@ -2113,14 +2679,19 @@ function renderInlineAssistTargets(targets, groups) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'vaultlite-inline-anchor';
-      button.textContent = 'VL';
       button.setAttribute('data-vaultlite-inline-anchor', 'true');
       button.setAttribute('data-inline-state', group.status);
       button.setAttribute('data-field-role', target.fieldRole);
+      button.setAttribute('data-context-group-key', target.contextGroupKey);
+      button.setAttribute('data-field-fingerprint', target.fieldFingerprint);
+      const isExpanded =
+        runtime.inlineAssistActiveTrayContextKey === target.contextGroupKey &&
+        runtime.inlineAssistActiveTrayTarget?.fieldFingerprint === target.fieldFingerprint;
+      renderInlineAssistAnchorGlyph(button, isExpanded);
       button.setAttribute('aria-label', buildInlineAssistAriaLabel(target, group));
       button.title =
         group.status === 'ready' && group.bestTitle
-          ? `${group.fillMode === 'open-and-fill' ? 'Open & Fill' : 'Fill'} ${group.bestTitle}`
+          ? `VaultLite • ${group.bestTitle}`
           : 'VaultLite assist';
       const stopAnchorEvent = (event) => {
         event.stopPropagation();
@@ -2128,17 +2699,53 @@ function renderInlineAssistTargets(targets, groups) {
       button.addEventListener('pointerdown', stopAnchorEvent, true);
       button.addEventListener('mousedown', stopAnchorEvent, true);
       button.addEventListener('mouseup', stopAnchorEvent, true);
-      if (group.status === 'no_match') {
-        button.disabled = true;
-      } else {
-        button.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void activateInlineAssistTarget(target, group, button);
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openInlineAssistTrayFromAnchor(target, group, {
+          autoOpen: false,
         });
-      }
+      });
       setInlineAssistAnchorPosition(button, target.fieldElement, entry);
       entry.layer.appendChild(button);
+    }
+  }
+
+  if (!runtime.inlineAssistActiveTrayContextKey) {
+    const autoOpenTarget = targets.find((target) => {
+      const group = groups[target.contextGroupKey];
+      if (!group || group.status !== 'ready' || !shouldAutoOpenInlineAssist(group.matchKind)) {
+        return false;
+      }
+      if (runtime.inlineAssistAutoOpenedStrongContexts.has(target.contextGroupKey)) {
+        return false;
+      }
+      if (runtime.inlineAssistDismissedTrayContexts.has(target.contextGroupKey)) {
+        return false;
+      }
+      return true;
+    });
+    if (autoOpenTarget) {
+      openInlineAssistTrayFromAnchor(autoOpenTarget, groups[autoOpenTarget.contextGroupKey], {
+        autoOpen: true,
+      });
+      return;
+    }
+  }
+
+  if (runtime.inlineAssistActiveTrayContextKey) {
+    const activeTarget = availableTargetsByContext.get(runtime.inlineAssistActiveTrayContextKey);
+    if (activeTarget) {
+      runtime.inlineAssistActiveTrayTarget = activeTarget;
+      const entry = runtime.inlineAssistRoots.get(activeTarget.document);
+      if (entry?.tray instanceof HTMLElement) {
+        if (!entry.layer.contains(entry.tray)) {
+          entry.layer.appendChild(entry.tray);
+        }
+        setInlineAssistFloatingPosition(entry.tray, activeTarget.fieldElement, entry);
+        return;
+      }
+      void renderActiveInlineAssistTray({});
     }
   }
 }
@@ -2184,6 +2791,7 @@ async function scanInlineAssistNow() {
       context: debugContextSummary(detectBestLoginContext()),
       googleStage,
     });
+    closeInlineAssistTray({ dismiss: false });
     for (const [document] of runtime.inlineAssistRoots.entries()) {
       disposeInlineAssistRoot(document);
     }
@@ -2290,6 +2898,20 @@ function startInlineAssistRuntime() {
     return;
   }
   runtime.inlineAssistInitialized = true;
+  if (!runtime.inlineAssistGlobalListenersBound) {
+    runtime.inlineAssistGlobalListenersBound = true;
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key !== 'Escape' || !runtime.inlineAssistActiveTrayContextKey) {
+          return;
+        }
+        closeInlineAssistTray({ dismiss: true });
+        scheduleInlineAssistScan();
+      },
+      true,
+    );
+  }
   ensureInlineAssistObservation(document);
   if (document.readyState === 'loading') {
     document.addEventListener(

@@ -3,7 +3,7 @@
 Project: `VaultLite`
 Source of truth: `AGENTS.v2.md` + `docs/UI_STYLE.v2.md` + `docs/WEB_UI_EXECUTION.md` + `docs/PRD.md` + `docs/SECURITY.md` + `docs/THREAT_MODEL.md` + `docs/ARCHITECTURE.md` + `status-card.md`
 Status card version: `2026-03-30-v2.3.1-r21`
-Last updated: `2026-03-30`
+Last updated: `2026-04-09`
 Overall status: `phase12_in_progress`
 Canonical terminology: `remote authentication`, `local unlock`, `session restoration`, `expected_bundle_version`, `deprovisioned`
 
@@ -245,7 +245,7 @@ Post-Phase-13 queued sequence: `P13-C08` -> `P13-C09` -> `P13-C10` -> `P13-C11` 
 - `P13-C02` Item change history with field-level diff visibility — `not_started`
 - `P13-C03` Form metadata capture and sync contracts — `done`
 - `P13-C04` Inline field suggestion anchor (content-script) — `review_needed`
-- `P13-C05` Inline mini-search and ranked credential suggestion tray — `not_started`
+- `P13-C05` Inline mini-search and ranked credential suggestion tray — `review_needed`
 - `P13-C06` Save login and update password post-submit prompts — `not_started`
 - `P13-C07` Heuristic autofill engine v1 (same-origin iframe) — `not_started`
 - `P13-C08` Identity/address/card fill profiles v1 — `not_started`
@@ -2480,7 +2480,7 @@ Suggested next action: compare implemented flows to the original threat assumpti
 Card ID: `P12-C02`
 Title: `OPERATIONS.md`
 Phase/Epic: `Phase 12 - Final Hardening and Release Readiness`
-Status: `not_started`
+Status: `review_needed`
 Priority: `P1`
 Objective: Document deployment operations, backup, restore, and routine maintenance.
 Description: Create the operator guide for the supported Cloudflare-first, owner-deployed V1 administration model.
@@ -2722,14 +2722,14 @@ Motivation: Evitar abrir popup e acelerar preenchimento em contexto de login.
 Scope includes: tray inline ancorada ao campo; ranking por origem/metadado/domínio e busca local rápida; ação de fill/open-and-fill a partir da própria tray; fallback útil mesmo sem match forte.
 Out of scope: ranking por telemetria remota.
 Dependencies: `P13-C04`; `P11-C02`; `P7-C04`.
-Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/popup-view-model.js`.
-Deliverables: mini-lista inline com seleção de credencial e preenchimento.
-Required tests: testes de ranking e busca inline cobrindo baixa confiança e fallback manual.
-Acceptance criteria: com ou sem match forte, usuário consegue selecionar credencial e preencher sem abrir popup.
+Files/areas impacted: `apps/extension/content-script.js`; `apps/extension/background.js`; `apps/extension/runtime-common.js`; `apps/extension/src/background-controller.ts`; `apps/extension/src/capability-matrix.ts`; `apps/extension/src/inline-assist-runtime.test.js`; `apps/extension/src/background-controller.test.ts`.
+Deliverables: tray inline com card principal, busca local, lista ranqueada curta e preenchimento via pipeline já existente.
+Required tests: `@vaultlite/extension` green com cobertura de ranking, auto-open apenas para match forte, tray única por contexto, busca local com debounce e fechamento por `Escape`/outside click.
+Acceptance criteria: com ou sem match forte, usuário consegue selecionar credencial e preencher sem abrir popup; match forte pode autoabrir uma única tray estável; confiança média/baixa permanece colapsada até clique explícito.
 Risks / cautions: ranking ruim pode aumentar falso positivo de preenchimento.
-Notes for Codex/dev: reaproveitar o pipeline inline já presente no `P13-C04`; o `content-script` não deve rankear nem descriptografar sozinho. Baixa confiança deve continuar mostrando sugestões, mas sem autofill silencioso.
-Evidence required to mark done: testes de ranking e demo manual em domínios sem match exato.
-Suggested next action: implementar função de score determinística com pesos versionados e uma shell de tray ancorada, curta e keyboard-friendly.
+Notes for Codex/dev: reaproveitar o pipeline inline já presente no `P13-C04`; o `content-script` não deve rankear nem descriptografar sozinho. Regra oficial de UX: auto-open only for strong matches; collapsed anchor for medium/low confidence; single-primary-tray per active context. Em termos práticos, apenas `metadata_confirmed` e `exact_origin` podem abrir a tray automaticamente; `domain_match` e `metadata_heuristic` continuam no modo colapsado até clique explícito.
+Evidence required to mark done: suíte `@vaultlite/extension` verde, smoke manual em login clássico, login em etapas, modal e cenário sem match forte, com evidência de auto-open apenas em `metadata_confirmed`/`exact_origin`.
+Suggested next action: validar manualmente tray em domínios com e sem match forte, incluindo Google/Kabum/modal, antes de mover para `done`.
 
 ### P13-C06 - Save login and update password post-submit prompts
 Card ID: `P13-C06`
@@ -2905,6 +2905,7 @@ Suggested next action: registrar ADR curto de permissões e riscos antes de coda
   Owner/area: project management and handoff.
 
 ## Decision Log
+- 2026-04-09: `P13-C05` saiu de `not_started` para `review_needed`. A implementação reaproveita o pipeline inline do `P13-C04` e adiciona `inline_assist_query` local-first no background, tray única por contexto ativo, auto-open restrito a `metadata_confirmed`/`exact_origin`, busca local curta com debounce, e execução final sempre delegada ao pipeline já existente de `fill`/`open-and-fill`.
 - 2026-04-09: `P13-C04` permanece em `review_needed`, mas a base inline já está ativa o suficiente para destravar `P13-C05`. A pesquisa externa sobre Chromium, Bitwarden, 1Password e Password Manager Resources foi convertida em backlog explícito para evolução futura do detector: parsing de `autocomplete` mais alinhado ao Chromium, state machine de auth por estágio, pequeno registry de quirks por site e modelo formal de `page details`/grupos de campos. Isso melhora a trilha futura sem ampliar o escopo imediato do card.
 - 2026-03-30: Added `Phase 13 - Intelligent Assist and Contextual Autofill` with card IDs `P13-C01` to `P13-C12`, explicit dependencies, and V1/V2 scope boundaries (same-origin iframe in V1, cross-origin iframe deferred). This phase is queued after Phase 12 and does not change the current release-hardening focus.
 - 2026-03-23: Synced status-card with repository state and moved execution focus to Phase 12. `P11-C01`, `P11-C02`, and `P11-C03` are now `done` based on implemented LTS-only extension pairing, unlock/session continuity with backend-mediated unlock grants, strict bridge hardening, listing/fill stabilization, and green automated suites in `@vaultlite/extension` and `@vaultlite/api` extension auth coverage.

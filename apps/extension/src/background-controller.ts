@@ -63,6 +63,7 @@ export interface InlineAssistLoginProjection {
   title: string;
   subtitle: string;
   urls: string[];
+  faviconCandidates?: string[];
 }
 
 export interface InlineAssistTargetProjection {
@@ -93,6 +94,25 @@ export interface InlineAssistPrefetchGroup {
   matchKind: 'exact_origin' | 'metadata_confirmed' | 'domain_match' | 'metadata_heuristic' | 'none';
   candidateCount: number;
   fillMode: 'fill' | 'open-and-fill' | 'open-url' | null;
+}
+
+export interface InlineAssistQueryResult {
+  itemId: string;
+  title: string;
+  subtitle: string;
+  matchKind: InlineAssistPrefetchGroup['matchKind'];
+  fillMode: InlineAssistPrefetchGroup['fillMode'];
+  exactOrigin: boolean;
+  domainScore: number;
+  iconUrl?: string | null;
+}
+
+export interface InlineAssistQueryResponse {
+  status: 'ready' | 'no_match' | 'unsupported' | 'error';
+  matchKind: InlineAssistPrefetchGroup['matchKind'];
+  autoOpenEligible: boolean;
+  primary: InlineAssistQueryResult | null;
+  results: InlineAssistQueryResult[];
 }
 
 function toHostSummary(urls: string[]): string {
@@ -274,6 +294,96 @@ function inlineAssistMatchRank(matchKind: InlineAssistPrefetchGroup['matchKind']
   }
 }
 
+function shouldAutoOpenInlineAssist(matchKind: InlineAssistPrefetchGroup['matchKind']): boolean {
+  return matchKind === 'metadata_confirmed' || matchKind === 'exact_origin';
+}
+
+function buildInlineAssistCandidates(input: {
+  target: InlineAssistTargetProjection;
+  items: InlineAssistLoginProjection[];
+  formMetadataRecords: InlineAssistMetadataProjection[];
+  pageUrl: string;
+  pageOrigin: string | null;
+  isDevelopment: boolean;
+  siteAutomationPermissionGranted: boolean;
+}): InlineAssistQueryResult[] {
+  return (Array.isArray(input.items) ? input.items : [])
+    .filter((item) => item?.itemType === 'login' && Array.isArray(item.urls))
+    .map((item) => {
+      const metadataMatchKind = inlineAssistMetadataMatchKind({
+        target: input.target,
+        itemId: item.itemId,
+        pageOrigin: input.pageOrigin,
+        records: input.formMetadataRecords,
+      });
+      const exactOrigin = isCredentialAllowedForSite({
+        pageUrl: input.pageUrl,
+        credentialUrls: item.urls,
+        options: { isDevelopment: input.isDevelopment },
+      });
+      const domainScore = scoreDomainMatch({
+        pageUrl: input.pageUrl,
+        candidateUrls: item.urls,
+      });
+      const matchKind: InlineAssistPrefetchGroup['matchKind'] =
+        metadataMatchKind === 'metadata_confirmed'
+          ? 'metadata_confirmed'
+          : exactOrigin
+            ? 'exact_origin'
+            : domainScore > 0
+              ? 'domain_match'
+              : metadataMatchKind === 'metadata_heuristic'
+                ? 'metadata_heuristic'
+                : 'none';
+      return {
+        itemId: item.itemId,
+        title: item.title,
+        subtitle: item.subtitle,
+        matchKind,
+        exactOrigin,
+        domainScore,
+        iconUrl:
+          Array.isArray(item.faviconCandidates) &&
+          typeof item.faviconCandidates[0] === 'string' &&
+          item.faviconCandidates[0].length > 0
+            ? item.faviconCandidates[0]
+            : null,
+        fillMode: resolveInlineAssistFillMode({
+          pageUrl: input.pageUrl,
+          candidateUrls: item.urls,
+          isDevelopment: input.isDevelopment,
+          siteAutomationPermissionGranted: input.siteAutomationPermissionGranted,
+        }),
+      };
+    })
+    .sort((left, right) => {
+      const rankDelta = inlineAssistMatchRank(right.matchKind) - inlineAssistMatchRank(left.matchKind);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      const exactDelta = Number(right.exactOrigin) - Number(left.exactOrigin);
+      if (exactDelta !== 0) {
+        return exactDelta;
+      }
+      if (right.domainScore !== left.domainScore) {
+        return right.domainScore - left.domainScore;
+      }
+      return left.title.localeCompare(right.title);
+    });
+}
+
+function rankInlineAssistCandidates(input: {
+  target: InlineAssistTargetProjection;
+  items: InlineAssistLoginProjection[];
+  formMetadataRecords: InlineAssistMetadataProjection[];
+  pageUrl: string;
+  pageOrigin: string | null;
+  isDevelopment: boolean;
+  siteAutomationPermissionGranted: boolean;
+}): InlineAssistQueryResult[] {
+  return buildInlineAssistCandidates(input).filter((candidate) => candidate.matchKind !== 'none');
+}
+
 function resolveInlineAssistFillMode(input: {
   pageUrl: string;
   candidateUrls: string[];
@@ -397,6 +507,64 @@ export function resolveInlineAssistPrefetch(input: {
     };
   }
   return groups;
+}
+
+export function resolveInlineAssistQuery(input: {
+  target: InlineAssistTargetProjection | null;
+  items: InlineAssistLoginProjection[];
+  formMetadataRecords: InlineAssistMetadataProjection[];
+  pageUrl: string;
+  isDevelopment: boolean;
+  siteAutomationPermissionGranted: boolean;
+  query: string;
+  limit: number;
+}): InlineAssistQueryResponse {
+  const target = input.target ? normalizeInlineAssistTargets([input.target])[0] ?? null : null;
+  if (!target) {
+    return {
+      status: 'unsupported',
+      matchKind: 'none',
+      autoOpenEligible: false,
+      primary: null,
+      results: [],
+    };
+  }
+
+  let pageOrigin: string | null = null;
+  try {
+    pageOrigin = new URL(input.pageUrl).origin;
+  } catch {
+    pageOrigin = null;
+  }
+
+  const rankedCandidates = rankInlineAssistCandidates({
+    target,
+    items: input.items,
+    formMetadataRecords: input.formMetadataRecords,
+    pageUrl: input.pageUrl,
+    pageOrigin,
+    isDevelopment: input.isDevelopment,
+    siteAutomationPermissionGranted: input.siteAutomationPermissionGranted,
+  });
+
+  if (rankedCandidates.length === 0) {
+    return {
+      status: 'no_match',
+      matchKind: 'none',
+      autoOpenEligible: false,
+      primary: null,
+      results: [],
+    };
+  }
+  const filteredResults = rankedCandidates.slice(0, Math.max(1, input.limit));
+  const primary = filteredResults[0];
+  return {
+    status: 'ready',
+    matchKind: primary.matchKind,
+    autoOpenEligible: shouldAutoOpenInlineAssist(primary.matchKind),
+    primary,
+    results: filteredResults,
+  };
 }
 
 function buildSearchText(item: DecryptedVaultProjection): string {

@@ -191,6 +191,10 @@ function rootSearchBase(root: QueryableRoot): Element | ShadowRoot | null {
   return root;
 }
 
+function isVaultLiteInlineElement(element: Element): boolean {
+  return element.closest('[data-vaultlite-inline-root="true"]') instanceof Element;
+}
+
 function collectQueryableRoots(root: QueryableRoot): QueryableRoot[] {
   const roots: QueryableRoot[] = [root];
   const seen = new Set<Node>([root]);
@@ -202,6 +206,9 @@ function collectQueryableRoots(root: QueryableRoot): QueryableRoot[] {
     }
     const elements = Array.from(base.querySelectorAll('*'));
     for (const element of elements) {
+      if (element instanceof Element && isVaultLiteInlineElement(element)) {
+        continue;
+      }
       if (!(element instanceof HTMLElement) || !(element.shadowRoot instanceof ShadowRoot)) {
         continue;
       }

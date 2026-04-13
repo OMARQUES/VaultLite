@@ -24,4 +24,12 @@ describe('background icons realtime and cache behavior', () => {
     const source = readFileSync(backgroundPath, 'utf8');
     expect(source).not.toContain('buildFaviconCandidates(');
   });
+
+  test('reuses cached and persisted login icon candidates across popup and inline projections', () => {
+    const source = readFileSync(backgroundPath, 'utf8');
+    expect(source).toContain('function collectFaviconCandidatesForLoginUrls(');
+    expect(source).toContain('faviconCandidates: collectFaviconCandidatesForLoginUrls(candidateUrls, credential.faviconCandidates),');
+    expect(source).toContain('faviconCandidates: collectFaviconCandidatesForLoginUrls(credential.urls, credential.faviconCandidates),');
+    expect(source).toContain('faviconCandidates: collectFaviconCandidatesForLoginUrls(entry.urls, entry.faviconCandidates),');
+  });
 });

@@ -48,6 +48,7 @@ const CONTEXT_CAPABILITIES = {
     'bridge:auto_pair',
     'form_metadata:signal',
     'inline_assist:prefetch',
+    'inline_assist:query',
     'inline_assist:activate',
   ]),
 };
