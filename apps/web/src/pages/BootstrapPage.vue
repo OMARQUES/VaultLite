@@ -123,10 +123,12 @@ async function initializeOwner() {
 <template>
   <section class="public-page public-page--onboarding">
     <div class="panel-card panel-card--form onboarding-card">
-      <div class="onboarding-card__header">
-        <div class="onboarding-card__meta">
-          <p class="eyebrow">BOOTSTRAP</p>
-          <p class="onboarding-card__step">Step {{ step }} of 2</p>
+      <div class="onboarding-card__header bootstrap-flow__header">
+        <div class="bootstrap-progress" aria-label="Bootstrap progress">
+          <span class="bootstrap-progress__track">
+            <span class="bootstrap-progress__fill" :style="{ width: step === 1 ? '33.333%' : '66.666%' }"></span>
+          </span>
+          <p class="eyebrow bootstrap-progress__label">BOOTSTRAP · STEP {{ step }} OF 3</p>
         </div>
         <h1 v-if="step === 1">Initialize deployment</h1>
         <h1 v-else>Create owner account</h1>
@@ -138,6 +140,7 @@ async function initializeOwner() {
         <TextField
           v-model="form.bootstrapToken"
           label="Bootstrap token"
+          class="field--mono"
           autocomplete="off"
           required
         />
@@ -157,7 +160,10 @@ async function initializeOwner() {
           required
         />
         <TextField v-model="form.deviceName" label="Device name" autocomplete="off" required />
-        <p class="field-helper">Forgotten master passwords can’t be recovered.</p>
+        <p class="bootstrap-warning">
+          <span class="material-symbols-rounded" aria-hidden="true">warning</span>
+          <span>Forgotten master passwords can't be recovered.</span>
+        </p>
         <div class="form-actions">
           <PrimaryButton
             type="submit"

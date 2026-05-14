@@ -25,7 +25,13 @@ type IconName =
   | 'download'
   | 'edit'
   | 'chevron_left'
-  | 'close';
+  | 'close'
+  | 'arrow_right'
+  | 'warning'
+  | 'monitor'
+  | 'shield_check'
+  | 'link'
+  | 'key';
 
 const props = withDefaults(
   defineProps<{
@@ -62,6 +68,12 @@ const iconNameMap: Record<IconName, string> = {
   edit: 'edit',
   chevron_left: 'chevron_left',
   close: 'close',
+  arrow_right: 'arrow_forward',
+  warning: 'warning',
+  monitor: 'desktop_windows',
+  shield_check: 'verified_user',
+  link: 'link',
+  key: 'key',
 };
 
 const glyph = computed(() => iconNameMap[props.name] ?? 'help');

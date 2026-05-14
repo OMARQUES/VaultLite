@@ -13,12 +13,12 @@ export function resolveMinHeight(layoutMode, linkRequestOpen) {
     return 520;
   }
   if (layoutMode === 'unlock') {
-    return 252;
+    return 320;
   }
   if (linkRequestOpen) {
-    return 470;
+    return 420;
   }
-  return 340;
+  return 300;
 }
 
 export function measurePopupHeight(input) {

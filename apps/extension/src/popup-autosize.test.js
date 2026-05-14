@@ -4,9 +4,9 @@ import { measurePopupHeight, resolveMinHeight } from '../popup-autosize.js';
 
 describe('popup autosize helpers', () => {
   test('returns minimum heights by layout', () => {
-    expect(resolveMinHeight('pairing', false)).toBe(340);
-    expect(resolveMinHeight('pairing', true)).toBe(470);
-    expect(resolveMinHeight('unlock', false)).toBe(252);
+    expect(resolveMinHeight('pairing', false)).toBe(300);
+    expect(resolveMinHeight('pairing', true)).toBe(420);
+    expect(resolveMinHeight('unlock', false)).toBe(320);
     expect(resolveMinHeight('ready', false)).toBe(520);
   });
 
@@ -44,7 +44,7 @@ describe('popup autosize helpers', () => {
       linkRequestOpen: false,
       maxHeight: 600,
     });
-    expect(height).toBe(252);
+    expect(height).toBe(320);
   });
 
   test('clamps to max popup height when measured height exceeds ceiling', () => {

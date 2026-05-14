@@ -57,6 +57,7 @@ describe('PublicTopbar', () => {
   test('renders desktop nav links when mobile drawer is not active', () => {
     const wrapper = mount(PublicTopbar);
 
+    expect(wrapper.find('.brand .app-icon').exists()).toBe(true);
     expect(wrapper.text()).toContain('Home');
     expect(wrapper.text()).toContain('Onboarding');
     expect(wrapper.text()).toContain('Add device');

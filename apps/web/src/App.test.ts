@@ -305,10 +305,9 @@ describe('App shell', () => {
     expect(window.location.pathname).toBe('/unlock');
   });
 
-  test('falls back to /auth when restore fails on authenticated route with unknown bootstrap state', async () => {
+  test('keeps authenticated route stable when initial restore fails', async () => {
     window.history.pushState({}, '', '/vault?scope=all');
-    const sessionStore = createSessionStore('anonymous');
-    sessionStore.state.bootstrapState = null;
+    const sessionStore = createSessionStore('ready');
     sessionStore.restoreSession.mockRejectedValueOnce(new Error('restore_failed'));
     const router = createVaultLiteRouter(sessionStore);
 
@@ -324,8 +323,31 @@ describe('App shell', () => {
     await router.isReady();
     await flushPromises();
 
-    expect(window.location.pathname).toBe('/auth');
-    expect(window.location.search).toContain('next=');
+    expect(window.location.pathname).toBe('/vault');
+    expect(window.location.search).toContain('scope=all');
+  });
+
+  test('shows recoverable auth gate error instead of infinite spinner when restore fails on authenticated route', async () => {
+    window.history.pushState({}, '', '/vault');
+    const sessionStore = createSessionStore('ready');
+    sessionStore.restoreSession.mockRejectedValueOnce(new Error('restore_failed'));
+    const router = createVaultLiteRouter(sessionStore);
+
+    const wrapper = mount(App, {
+      global: {
+        plugins: [router],
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await router.isReady();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Could not check your session.');
+    expect(wrapper.text()).toContain('Try again');
+    expect(wrapper.text()).not.toContain('Checking your session…');
   });
 
   test('retries session restore immediately after redirecting to auth for trusted remote-auth state', async () => {

@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { useRoute } from 'vue-router';
 
+import AppIcon from '../ui/AppIcon.vue';
+
 const route = useRoute();
 const showPrimaryNav = computed(() => route.path !== '/unlock' && route.path !== '/onboarding');
 const isMobileNav = ref(false);
@@ -58,7 +60,10 @@ onUnmounted(() => {
 <template>
   <header class="public-topbar">
     <div class="public-topbar__inner">
-      <RouterLink class="brand" to="/">VaultLite</RouterLink>
+      <RouterLink class="brand" to="/">
+        <AppIcon name="lock" :size="18" />
+        <span>VaultLite</span>
+      </RouterLink>
       <nav v-if="showDesktopNav" class="public-nav" aria-label="Primary">
         <RouterLink to="/">Home</RouterLink>
         <RouterLink to="/onboarding">Onboarding</RouterLink>

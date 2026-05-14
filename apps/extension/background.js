@@ -592,42 +592,63 @@ function nextRecoverRetryDelayMs(attempt) {
   return Math.min(5 * 60 * 1000, 1_500 * 2 ** (capped - 1));
 }
 
-function classifyRecoverFailure(error) {
-  const described = describeError(error, 'recover_failed');
+function classifyExtensionRemoteFailure(error, fallbackCode = 'remote_failed') {
+  const described = describeError(error, fallbackCode);
   const status = Number.isFinite(error?.status) ? error.status : null;
+  const message =
+    typeof error?.message === 'string'
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
   const transientCodes = new Set([
     'request_timeout',
     'rate_limited',
+    'request_failed_408',
     'request_failed_429',
     'request_failed_500',
     'request_failed_502',
     'request_failed_503',
     'request_failed_504',
     'server_connection_failed',
+    'restore_failed',
+    'snapshot_failed',
+    'recover_failed',
   ]);
   const terminalCodes = new Set([
+    'unauthorized',
+    'request_failed_401',
+    'request_failed_403',
     'no_linked_surface',
     'device_revoked',
     'recover_key_invalid',
+    'trusted_link_invalid',
+    'deployment_mismatch',
+    'server_changed',
+    'user_mismatch',
+    'device_mismatch',
     'context_mismatch',
+    'lifecycle_state',
   ]);
 
   if (terminalCodes.has(described.code)) {
     return { kind: 'terminal', ...described };
   }
-  if (transientCodes.has(described.code)) {
+  if (
+    transientCodes.has(described.code) ||
+    status === 408 || status === 429 || status >= 500 ||
+    error?.name === 'AbortError' ||
+    message.includes('Failed to fetch') ||
+    message.includes('NetworkError') ||
+    message.includes('Load failed')
+  ) {
     return { kind: 'transient', ...described };
   }
-  if (status !== null && status >= 500) {
-    return { kind: 'transient', ...described };
-  }
-  if (status === 429) {
-    return { kind: 'transient', ...described };
-  }
-  if (described.code === 'unauthorized' || described.code === 'request_failed_401') {
-    return { kind: 'terminal', ...described };
-  }
-  return { kind: 'transient', ...described };
+  return { kind: status === null ? 'transient' : 'terminal', ...described };
+}
+
+function classifyRecoverFailure(error) {
+  return classifyExtensionRemoteFailure(error, 'recover_failed');
 }
 
 function clearLinkPairingSession() {
@@ -1576,6 +1597,44 @@ function hasValidUnlockedContext() {
       Number.isFinite(unlockedContext.unlockedUntil) &&
       unlockedContext.unlockedUntil > Date.now(),
   );
+}
+
+function canAttemptLocalUnlockFromTrustedState(value) {
+  return Boolean(
+    value &&
+      value.localUnlockEnvelope &&
+      typeof value.authSalt === 'string' &&
+      value.authSalt.length > 0,
+  );
+}
+
+async function preserveReadyStateAfterTransientRemoteFailure(classified) {
+  if (classified?.kind !== 'transient') {
+    return false;
+  }
+  if (state.phase === 'ready' && hasValidUnlockedContext()) {
+    cacheWarmupState = 'sync_failed';
+    cacheWarmupError = classified.message ?? 'Server temporarily unavailable. Using local cache.';
+    updatePopupSyncDomains(['session', 'vault', 'folders', 'icons'], 'failed');
+    setPhase('ready', null);
+    touchUnlockedContext();
+    void loadCredentialCacheFromLocalBestEffort();
+    return true;
+  }
+  return false;
+}
+
+async function preserveLocalUnlockAfterTransientRemoteFailure(classified) {
+  if (classified?.kind !== 'transient') {
+    return false;
+  }
+  if (trustedState && canAttemptLocalUnlockFromTrustedState(trustedState)) {
+    cacheWarmupState = 'sync_failed';
+    cacheWarmupError = classified.message ?? 'Server temporarily unavailable.';
+    setPhase('local_unlock_required', 'Server temporarily unavailable. Unlock this trusted device locally.');
+    return true;
+  }
+  return false;
 }
 
 function shouldRunUnlockGrantApprovalScheduler() {
@@ -3478,6 +3537,14 @@ async function restoreSessionInternal(force = false) {
         };
       }
       sessionToken = recovered.extensionSessionToken;
+      if (typeof recovered.sessionRecoverKey === 'string' && recovered.sessionRecoverKey.length > 0) {
+        trustedState = {
+          ...trustedState,
+          sessionRecoverKey: recovered.sessionRecoverKey,
+          updatedAt: nowIso(),
+        };
+        await persistTrusted(trustedState);
+      }
       withSessionIdentity(recovered);
       await persistSessionToken();
       setRecoverRetryState({
@@ -3517,10 +3584,17 @@ async function restoreSessionInternal(force = false) {
 
     if (!sessionToken && trustedState) {
       if (!force && Date.now() < recoverRetryState.nextAttemptAt) {
-        setPhase(
-          'remote_authentication_required',
-          'Session temporarily unavailable. Retrying automatically.',
-        );
+        const preserved = await preserveLocalUnlockAfterTransientRemoteFailure({
+          kind: 'transient',
+          code: recoverRetryState.lastCode ?? 'recover_backoff',
+          message: 'Session temporarily unavailable. Retrying automatically.',
+        });
+        if (!preserved) {
+          setPhase(
+            'remote_authentication_required',
+            'Session temporarily unavailable. Retrying automatically.',
+          );
+        }
         return;
       }
       const recoverResult = await recoverExtensionSessionInternal(apiClient);
@@ -3538,10 +3612,13 @@ async function restoreSessionInternal(force = false) {
           nextAttemptAt: Date.now() + delayMs,
           lastCode: recoverResult.code ?? 'recover_failed',
         });
-        setPhase(
-          'remote_authentication_required',
-          'Session temporarily unavailable. Retrying automatically.',
-        );
+        const preserved = await preserveLocalUnlockAfterTransientRemoteFailure(recoverResult);
+        if (!preserved) {
+          setPhase(
+            'remote_authentication_required',
+            'Session temporarily unavailable. Retrying automatically.',
+          );
+        }
         return;
       }
       setRecoverRetryState({
@@ -3605,10 +3682,13 @@ async function restoreSessionInternal(force = false) {
             nextAttemptAt: Date.now() + delayMs,
             lastCode: recovered.code ?? 'recover_failed',
           });
-          setPhase(
-            'remote_authentication_required',
-            'Session temporarily unavailable. Retrying automatically.',
-          );
+          const preserved = await preserveReadyStateAfterTransientRemoteFailure(recovered);
+          if (!preserved && !(await preserveLocalUnlockAfterTransientRemoteFailure(recovered))) {
+            setPhase(
+              'remote_authentication_required',
+              'Session temporarily unavailable. Retrying automatically.',
+            );
+          }
           return;
         }
       }
@@ -3695,14 +3775,25 @@ async function restoreSessionInternal(force = false) {
           nextAttemptAt: Date.now() + delayMs,
           lastCode: recovered.code ?? 'recover_failed',
         });
-        setPhase(
-          'remote_authentication_required',
-          'Session temporarily unavailable. Retrying automatically.',
-        );
+        const preserved = await preserveReadyStateAfterTransientRemoteFailure(recovered);
+        if (!preserved && !(await preserveLocalUnlockAfterTransientRemoteFailure(recovered))) {
+          setPhase(
+            'remote_authentication_required',
+            'Session temporarily unavailable. Retrying automatically.',
+          );
+        }
+        return;
+      }
+      const classified = classifyExtensionRemoteFailure(error, 'restore_failed');
+      const preserved = await preserveReadyStateAfterTransientRemoteFailure(classified);
+      if (preserved) {
+        return;
+      }
+      if (await preserveLocalUnlockAfterTransientRemoteFailure(classified)) {
         return;
       }
       clearSensitiveMemory();
-      setPhase('remote_authentication_required', described.message);
+      setPhase('remote_authentication_required', classified.message);
     }
   })();
 
@@ -4311,7 +4402,6 @@ async function performCredentialCacheWarmup(options = {}) {
       described.code === 'request_failed_403'
     ) {
       await clearExtensionSessionToken();
-      clearSensitiveMemory();
       await restoreSessionInternal(true);
       if (!trustedState || state.phase === 'pairing_required') {
         cacheWarmupState = 'sync_failed';
@@ -4331,6 +4421,11 @@ async function performCredentialCacheWarmup(options = {}) {
       cacheWarmupState = 'sync_failed';
       cacheWarmupError = described.message;
       return fail('remote_authentication_required', described.message);
+    }
+    const classified = classifyExtensionRemoteFailure(error, 'snapshot_failed');
+    const preserved = await preserveReadyStateAfterTransientRemoteFailure(classified);
+    if (preserved) {
+      return ok();
     }
     cacheWarmupState = 'sync_failed';
     cacheWarmupError = described.message;
@@ -4380,6 +4475,33 @@ async function refreshCredentialCache(options = {}) {
     return ok();
   }
   return cacheWarmupInFlight;
+}
+
+async function ensureCredentialAvailableInCache(itemId) {
+  const normalizedItemId = typeof itemId === 'string' ? itemId.trim() : '';
+  if (!normalizedItemId) {
+    return null;
+  }
+
+  let targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === normalizedItemId) ?? null;
+  if (targetCredential) {
+    return targetCredential;
+  }
+
+  await loadCredentialCacheFromLocalBestEffort();
+  targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === normalizedItemId) ?? null;
+  if (targetCredential) {
+    return targetCredential;
+  }
+
+  const cacheResult = await refreshCredentialCache({
+    awaitCompletion: true,
+    preferLocalCache: true,
+  });
+  if (!cacheResult.ok) {
+    return cacheResult;
+  }
+  return credentialsCache.credentials.find((entry) => entry.itemId === normalizedItemId) ?? null;
 }
 
 function projectCredentialForPopup(credential, pageUrl) {
@@ -4818,18 +4940,14 @@ async function inlineAssistActivateInternal(input = {}, sender = null) {
   const senderTabId = Number(sender?.tab?.id);
   const senderTabUrl = typeof sender?.tab?.url === 'string' ? sender.tab.url : '';
   if (Number.isInteger(senderTabId) && senderTabId >= 0 && senderTabUrl) {
-    const cacheResult = await refreshCredentialCache({
-      awaitCompletion: false,
-      preferLocalCache: true,
-    });
-    if (!cacheResult.ok) {
-      return cacheResult;
+    const targetCredential = await ensureCredentialAvailableInCache(itemId);
+    if (targetCredential?.ok === false) {
+      return targetCredential;
     }
-    armIdleLockTimer();
-    const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
     if (!targetCredential) {
       return fail('credential_not_found', 'Credential not found in extension cache.');
     }
+    armIdleLockTimer();
     if (targetCredential.itemType !== 'login') {
       return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
     }
@@ -5185,7 +5303,10 @@ async function fetchIconObjectDataUrl(objectUrl, input = {}) {
         return null;
       }
       const contentTypeHeader = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-      const contentType = contentTypeHeader.startsWith('image/') ? contentTypeHeader : 'image/png';
+      if (!contentTypeHeader.startsWith('image/')) {
+        return null;
+      }
+      const contentType = contentTypeHeader;
       const arrayBuffer = await response.arrayBuffer();
       if (!arrayBuffer || arrayBuffer.byteLength <= 0) {
         return null;
@@ -6614,19 +6735,14 @@ async function fillCredentialInTabInternal(input = {}) {
     return fail('manual_fill_unavailable', 'Manual fill unavailable on this page.');
   }
 
-  const cacheResult = await refreshCredentialCache({
-    awaitCompletion: false,
-    preferLocalCache: true,
-  });
-  if (!cacheResult.ok) {
-    return cacheResult;
+  const targetCredential = await ensureCredentialAvailableInCache(itemId);
+  if (targetCredential?.ok === false) {
+    return targetCredential;
   }
-  armIdleLockTimer();
-
-  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
   if (!targetCredential) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
+  armIdleLockTimer();
   if (targetCredential.itemType !== 'login') {
     return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
   }
@@ -6722,19 +6838,14 @@ async function dispatchLoginRowActionInternal(input = {}) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
 
-  const cacheResult = await refreshCredentialCache({
-    awaitCompletion: false,
-    preferLocalCache: true,
-  });
-  if (!cacheResult.ok) {
-    return cacheResult;
+  const targetCredential = await ensureCredentialAvailableInCache(itemId);
+  if (targetCredential?.ok === false) {
+    return targetCredential;
   }
-  armIdleLockTimer();
-
-  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
   if (!targetCredential) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
+  armIdleLockTimer();
   if (targetCredential.itemType !== 'login') {
     return fail('manual_fill_unavailable', 'Manual fill is available for login items only.');
   }
@@ -6780,19 +6891,14 @@ async function openAndFillCredentialInternal(input = {}) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
 
-  const cacheResult = await refreshCredentialCache({
-    awaitCompletion: false,
-    preferLocalCache: true,
-  });
-  if (!cacheResult.ok) {
-    return cacheResult;
+  const targetCredential = await ensureCredentialAvailableInCache(itemId);
+  if (targetCredential?.ok === false) {
+    return targetCredential;
   }
-  armIdleLockTimer();
-
-  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
   if (!targetCredential) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
+  armIdleLockTimer();
   if (targetCredential.itemType !== 'login') {
     return fail('invalid_target_url', 'Automatic open and fill is available for login items only.');
   }
@@ -6907,18 +7013,14 @@ async function processPendingOpenFillJobForTab(tabId, tabUrl) {
 }
 
 async function getCredentialFieldInternal(itemId, field) {
-  const cacheResult = await refreshCredentialCache({
-    preferLocalCache: true,
-  });
-  if (!cacheResult.ok) {
-    return cacheResult;
+  const targetCredential = await ensureCredentialAvailableInCache(itemId);
+  if (targetCredential?.ok === false) {
+    return targetCredential;
   }
-  armIdleLockTimer();
-
-  const targetCredential = credentialsCache.credentials.find((entry) => entry.itemId === itemId) ?? null;
   if (!targetCredential) {
     return fail('credential_not_found', 'Credential not found in extension cache.');
   }
+  armIdleLockTimer();
 
   const value = resolveItemFieldValue(targetCredential, field);
   if (value === null) {
@@ -9608,7 +9710,7 @@ async function unlockLocalInternal(input) {
 async function lockInternal() {
   clearPopupReconcileTimer();
   clearSensitiveMemory();
-  if (trustedState && sessionToken) {
+  if (canAttemptLocalUnlockFromTrustedState(trustedState)) {
     setPhase('local_unlock_required', null);
   } else if (trustedState) {
     setPhase('remote_authentication_required', 'Session expired. Authenticate again to continue.');

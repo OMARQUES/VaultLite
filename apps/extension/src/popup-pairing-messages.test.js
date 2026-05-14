@@ -18,4 +18,19 @@ describe('popup pairing completion messaging', () => {
     expect(source).toContain("elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';");
     expect(source).toContain("elements.unlockDeviceValue.textContent = `#${currentState?.deviceName ?? 'VaultLite Extension'}`;");
   });
+
+  test('preserves edited pairing device name across server-url reconciliation before submit', () => {
+    const source = readFileSync(popupScriptPath, 'utf8');
+    const submitIndex = source.indexOf('async function startLinkPairing()');
+    const ensureIndex = source.indexOf('const serverSetup = await ensureServerOriginConfigured();', submitIndex);
+    const captureIndex = source.indexOf('const deviceNameHint = resolvePairingDeviceNameHint();', submitIndex);
+    const sendIndex = source.indexOf('deviceNameHint,', submitIndex);
+
+    expect(source).toContain("let pairingDeviceNameDraft = '';");
+    expect(source).toContain('function resolvePairingDeviceNameHint()');
+    expect(source).toContain("elements.deviceNameInput.addEventListener('input'");
+    expect(captureIndex).toBeGreaterThan(submitIndex);
+    expect(captureIndex).toBeLessThan(ensureIndex);
+    expect(sendIndex).toBeGreaterThan(ensureIndex);
+  });
 });

@@ -76,6 +76,8 @@ import type {
 } from '@vaultlite/contracts';
 import { dispatchVaultUnauthorizedEvent } from './http-events';
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 12_000;
+
 function readCookie(name: string): string | null {
   const prefix = `${name}=`;
   const target = document.cookie
@@ -200,19 +202,36 @@ async function requestJson<T>(
   init?: RequestInit,
   options?: {
     emitUnauthorizedEvent?: boolean;
+    timeoutMs?: number;
   },
 ): Promise<T> {
-  const response = await fetch(input, {
-    credentials: 'include',
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(init?.method && init.method !== 'GET' && readCookie('vl_csrf')
-        ? { 'x-csrf-token': readCookie('vl_csrf') ?? '' }
-        : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeoutHandle = setTimeout(() => {
+    controller.abort('request_timeout');
+  }, timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(input, {
+      credentials: 'include',
+      ...init,
+      headers: {
+        'content-type': 'application/json',
+        ...(init?.method && init.method !== 'GET' && readCookie('vl_csrf')
+          ? { 'x-csrf-token': readCookie('vl_csrf') ?? '' }
+          : {}),
+        ...(init?.headers ?? {}),
+      },
+      signal: init?.signal ?? controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('request_timeout');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   if (!response.ok) {
     let responseCode = '';
@@ -253,6 +272,27 @@ async function requestJson<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+async function requestWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    controller.abort('request_timeout');
+  }, timeoutMs);
+  try {
+    return await fetch(input, {
+      credentials: 'include',
+      ...init,
+      signal: init?.signal ?? controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('request_timeout');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function resolveFetchUrl(baseUrl: string, path: string): string {
@@ -626,10 +666,9 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       if (Array.isArray(input?.domains) && input.domains.length > 0) {
         query.set('domains', input.domains.join(','));
       }
-      const response = await fetch(
+      const response = await requestWithTimeout(
         resolveFetchUrl(baseUrl, `/api/icons/state${query.size > 0 ? `?${query.toString()}` : ''}`),
         {
-          credentials: 'include',
           method: 'GET',
           headers: {
             ...(input?.etag ? { 'if-none-match': input.etag } : {}),
@@ -748,8 +787,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       );
     },
     async listManualSiteIcons(input) {
-      const response = await fetch(resolveFetchUrl(baseUrl, '/api/icons/manual'), {
-        credentials: 'include',
+      const response = await requestWithTimeout(resolveFetchUrl(baseUrl, '/api/icons/manual'), {
         method: 'GET',
         headers: {
           ...(input?.etag ? { 'if-none-match': input.etag } : {}),
@@ -814,8 +852,7 @@ export function createVaultLiteAuthClient(baseUrl = ''): VaultLiteAuthClient {
       );
     },
     async listVaultFoldersState(input) {
-      const response = await fetch(resolveFetchUrl(baseUrl, '/api/vault/folders/state'), {
-        credentials: 'include',
+      const response = await requestWithTimeout(resolveFetchUrl(baseUrl, '/api/vault/folders/state'), {
         headers: {
           ...(input?.etag ? { 'if-none-match': input.etag } : {}),
         },

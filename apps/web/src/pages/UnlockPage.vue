@@ -142,7 +142,11 @@ async function goToDeviceSetup() {
       </InlineAlert>
 
       <form class="unlock-simplified-form" @submit.prevent="submit">
-        <label ref="passwordShellRef" class="unlock-simplified-password-shell">
+        <label
+          ref="passwordShellRef"
+          class="unlock-simplified-password-shell"
+          :class="{ 'unlock-simplified-password-shell--error': passwordFieldError }"
+        >
           <input
             ref="passwordFieldRef"
             v-model="password"

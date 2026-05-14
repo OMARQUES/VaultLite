@@ -5,6 +5,7 @@ import { RouterView, useRoute, useRouter } from 'vue-router';
 import AppShell from './components/layout/AppShell.vue';
 import PublicTopbar from './components/layout/PublicTopbar.vue';
 import SidebarNav from './components/layout/SidebarNav.vue';
+import PrimaryButton from './components/ui/PrimaryButton.vue';
 import { useSessionStore } from './composables/useSessionStore';
 import { foregroundRefreshCoordinator, withIntervalJitter } from './lib/foreground-refresh-coordinator';
 import { VAULT_UNAUTHORIZED_EVENT, type VaultUnauthorizedEventDetail } from './lib/http-events';
@@ -16,6 +17,7 @@ const route = useRoute();
 const router = useRouter();
 const handlingUnauthorized = ref(false);
 const sessionRestoreResolved = ref(false);
+const sessionRestoreError = ref<string | null>(null);
 const phaseRedirectInFlight = ref(false);
 const sessionSyncInFlight = ref(false);
 const fastRestoreInFlight = ref(false);
@@ -33,7 +35,12 @@ const isAuthenticatedShell = computed(
 );
 
 async function maybeRedirectForSessionPhase() {
-  if (!sessionRestoreResolved.value || handlingUnauthorized.value || phaseRedirectInFlight.value) {
+  if (
+    !sessionRestoreResolved.value ||
+    handlingUnauthorized.value ||
+    phaseRedirectInFlight.value ||
+    sessionRestoreError.value
+  ) {
     return;
   }
 
@@ -152,6 +159,25 @@ async function refreshSessionBestEffort() {
   }
 }
 
+async function runInitialSessionRestore() {
+  sessionRestoreError.value = null;
+  try {
+    await router.isReady();
+    await sessionStore.restoreSession();
+  } catch {
+    sessionRestoreError.value = 'Could not check your session. Check the server connection and try again.';
+  } finally {
+    sessionRestoreResolved.value = true;
+    await maybeRedirectForSessionPhase();
+    await maybeFastRestoreOnAuthSurface();
+  }
+}
+
+async function retryInitialSessionRestore() {
+  sessionRestoreResolved.value = false;
+  await runInitialSessionRestore();
+}
+
 function requestSessionRefresh(options: { force?: boolean } = {}) {
   void foregroundRefreshCoordinator.run('session', refreshSessionBestEffort, {
     force: options.force === true,
@@ -220,21 +246,7 @@ function schedulePeriodicSessionRefresh() {
 }
 
 onMounted(() => {
-  void (async () => {
-    try {
-      await router.isReady();
-      await sessionStore.restoreSession();
-    } catch (error) {
-      sessionStore.handleUnauthorized({
-        reasonCode: 'session_restore_failed',
-        message: toHumanErrorMessage(error),
-      });
-    } finally {
-      sessionRestoreResolved.value = true;
-      await maybeRedirectForSessionPhase();
-      await maybeFastRestoreOnAuthSurface();
-    }
-  })();
+  void runInitialSessionRestore();
   window.addEventListener('pointerdown', handleActivity);
   window.addEventListener('keydown', handleActivity);
   window.addEventListener(VAULT_UNAUTHORIZED_EVENT, handleUnauthorizedEvent as EventListener);
@@ -296,6 +308,19 @@ onUnmounted(() => {
     <div class="public-shell__content">
       <section class="panel-card panel-card--compact panel-card--narrow">
         <p class="module-empty-hint">Checking your session…</p>
+      </section>
+    </div>
+  </main>
+
+  <main
+    v-else-if="isAuthenticatedRoute && sessionRestoreError"
+    data-testid="auth-gate"
+    class="public-shell"
+  >
+    <div class="public-shell__content">
+      <section class="panel-card panel-card--compact panel-card--narrow auth-gate-error">
+        <p class="module-empty-hint">{{ sessionRestoreError }}</p>
+        <PrimaryButton @click="retryInitialSessionRestore">Try again</PrimaryButton>
       </section>
     </div>
   </main>

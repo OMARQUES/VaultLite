@@ -788,6 +788,18 @@ function scoreUsernameField(input, passwordField, orderedFields) {
   return score;
 }
 
+function hasStrongUsernameSignal(input) {
+  const autocompleteToken = readAutocompleteToken(input);
+  if (autocompleteToken === 'username' || autocompleteToken === 'email') {
+    return true;
+  }
+  if (normalizeInputType(input) === 'email') {
+    return true;
+  }
+  const hint = inputHint(input);
+  return USERNAME_HINT_PATTERN.test(hint) && !USERNAME_NEGATIVE_PATTERN.test(hint);
+}
+
 function choosePasswordField(passwordFields, activeElement) {
   if (passwordFields.length === 0) {
     return null;
@@ -826,7 +838,7 @@ function pickUsernameField(passwordField, orderedFields) {
       score: scoreUsernameField(candidate, passwordField, searchPool),
     }))
     .sort((left, right) => right.score - left.score);
-  if (scored.length === 0 || scored[0].score < 0) {
+  if (scored.length === 0 || scored[0].score < 50 || !hasStrongUsernameSignal(scored[0].candidate)) {
     return null;
   }
   return scored[0].candidate;
@@ -857,7 +869,7 @@ function pickContextualUsernameField(passwordField, orderedFields) {
       };
     })
     .sort((left, right) => right.score - left.score);
-  if (scored.length === 0 || scored[0].score < 0) {
+  if (scored.length === 0 || scored[0].score < 50 || !hasStrongUsernameSignal(scored[0].candidate)) {
     return null;
   }
   return scored[0].candidate;
@@ -928,7 +940,7 @@ function pickIdentifierField(orderedFields) {
       };
     })
     .sort((left, right) => right.score - left.score);
-  if (scored.length === 0 || scored[0].score < 0) {
+  if (scored.length === 0 || scored[0].score < 50 || !hasStrongUsernameSignal(scored[0].candidate)) {
     return null;
   }
   return scored[0].candidate;

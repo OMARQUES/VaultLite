@@ -45,7 +45,7 @@ function parseCsvOrigins(input: string | undefined): string[] {
   return Array.from(allowed);
 }
 
-function buildWebCsp(mode: string, env: Record<string, string>): string {
+export function buildWebCsp(mode: string, env: Record<string, string>): string {
   const connectSrc = new Set<string>(["'self'"]);
 
   if (mode === 'development') {

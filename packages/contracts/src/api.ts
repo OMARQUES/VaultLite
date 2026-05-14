@@ -1333,6 +1333,7 @@ export const ExtensionSessionRecoverOutputSchema = z
     result: CanonicalResultSchema,
     extensionSessionToken: z.string().min(1),
     sessionExpiresAt: isoDatetimeSchema,
+    sessionRecoverKey: base64UrlSchema.min(24).optional(),
     user: z
       .object({
         userId: z.string().min(1),

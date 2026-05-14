@@ -168,6 +168,28 @@ async function createWorkerApp(env: Partial<VaultLiteWorkerBindings> = {}) {
   });
 }
 
+function runtimeBootstrapFailureResponse(error: unknown): Response {
+  const message = error instanceof Error ? error.message : 'runtime_bootstrap_failed';
+  if (message.startsWith('runtime_config_invalid:')) {
+    return Response.json(
+      {
+        ok: false,
+        code: 'runtime_config_invalid',
+      },
+      { status: 503 },
+    );
+  }
+
+  console.error('[api] Worker bootstrap failed', error);
+  return Response.json(
+    {
+      ok: false,
+      code: 'runtime_bootstrap_failed',
+    },
+    { status: 503 },
+  );
+}
+
 let cachedAppPromise: Promise<ReturnType<typeof createVaultLiteApi>> | null = null;
 let cachedConfigSignature = '';
 
@@ -196,9 +218,14 @@ export default {
       cachedAppPromise = createWorkerApp(env);
       cachedConfigSignature = nextSignature;
     }
-
-    const cachedApp = await cachedAppPromise;
-    return cachedApp.fetch(request);
+    try {
+      const cachedApp = await cachedAppPromise;
+      return cachedApp.fetch(request);
+    } catch (error) {
+      cachedAppPromise = null;
+      cachedConfigSignature = '';
+      return runtimeBootstrapFailureResponse(error);
+    }
   },
   async queue(batch: QueueBatchLike, env?: Partial<VaultLiteWorkerBindings>) {
     const nextSignature = getConfigSignature(env);
@@ -206,7 +233,18 @@ export default {
       cachedAppPromise = createWorkerApp(env);
       cachedConfigSignature = nextSignature;
     }
-    const cachedApp = await cachedAppPromise;
+    let cachedApp;
+    try {
+      cachedApp = await cachedAppPromise;
+    } catch (error) {
+      cachedAppPromise = null;
+      cachedConfigSignature = '';
+      console.error('[api] Worker queue bootstrap failed', error);
+      for (const message of batch?.messages ?? []) {
+        message.retry();
+      }
+      return;
+    }
     const token = env?.VAULTLITE_INTERNAL_QUEUE_TOKEN?.trim() ?? '';
     if (!token) {
       for (const message of batch?.messages ?? []) {

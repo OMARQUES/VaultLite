@@ -63,8 +63,10 @@ describe('BootstrapCheckpointPage', () => {
     await flushPromises();
 
     expect(sessionStore.reissueAccountKit).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain('BOOTSTRAP · STEP 3 OF 3');
     expect(wrapper.text()).toContain('Account Kit ready');
     expect(wrapper.text()).toContain('Download signed Account Kit');
+    expect(wrapper.text()).not.toContain('Step 2 of 2');
   });
 
   test('redirects to unlock when local unlock is required', async () => {

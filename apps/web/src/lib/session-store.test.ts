@@ -541,6 +541,87 @@ describe('createSessionStore', () => {
     expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
   });
 
+  test('bootstrapDevice fails closed when Account Kit username is missing', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.verifyAccountKit.mockResolvedValue({
+      status: 'valid',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.bootstrapDevice({
+        username: 'alice',
+        password: 'correct-password',
+        deviceName: 'Recovered Browser',
+        accountKitJson: JSON.stringify({
+          payload: {
+            version: 'account-kit.v1',
+            serverUrl: 'https://vaultlite.example.com',
+            accountKey: 'A'.repeat(43),
+            deploymentFingerprint: 'deployment_fp_v1',
+            issuedAt: '2026-03-15T12:00:00.000Z',
+          },
+          signature: 'signed_payload',
+        }),
+      }),
+    ).rejects.toThrow('Account Kit username mismatch');
+    expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
+  });
+
+  test('bootstrapDevice fails closed when Account Kit serverUrl is missing', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.verifyAccountKit.mockResolvedValue({
+      status: 'valid',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.bootstrapDevice({
+        username: 'alice',
+        password: 'correct-password',
+        deviceName: 'Recovered Browser',
+        accountKitJson: JSON.stringify({
+          payload: {
+            version: 'account-kit.v1',
+            username: 'alice',
+            accountKey: 'A'.repeat(43),
+            deploymentFingerprint: 'deployment_fp_v1',
+            issuedAt: '2026-03-15T12:00:00.000Z',
+          },
+          signature: 'signed_payload',
+        }),
+      }),
+    ).rejects.toThrow('Account Kit deployment mismatch');
+    expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
+  });
+
+  test('bootstrapDevice fails closed when Account Kit deploymentFingerprint is missing', async () => {
+    const dependencies = createMockDependencies();
+    dependencies.authClient.verifyAccountKit.mockResolvedValue({
+      status: 'valid',
+    });
+    const store = createSessionStore(dependencies as never);
+
+    await expect(
+      store.bootstrapDevice({
+        username: 'alice',
+        password: 'correct-password',
+        deviceName: 'Recovered Browser',
+        accountKitJson: JSON.stringify({
+          payload: {
+            version: 'account-kit.v1',
+            serverUrl: 'https://vaultlite.example.com',
+            username: 'alice',
+            accountKey: 'A'.repeat(43),
+            issuedAt: '2026-03-15T12:00:00.000Z',
+          },
+          signature: 'signed_payload',
+        }),
+      }),
+    ).rejects.toThrow('Account Kit deployment mismatch');
+    expect(dependencies.authClient.requestRemoteAuthenticationChallenge).not.toHaveBeenCalled();
+  });
+
   test('bootstrapDevice persists sanitized trusted local state without accountKit', async () => {
     const dependencies = createMockDependencies();
     dependencies.authClient.verifyAccountKit.mockResolvedValue({

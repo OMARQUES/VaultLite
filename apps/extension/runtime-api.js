@@ -1,4 +1,4 @@
-const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 
 function buildHeaders(input = {}) {
   const headers = {

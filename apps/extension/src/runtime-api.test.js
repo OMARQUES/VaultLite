@@ -1,8 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createExtensionApiClient } from '../runtime-api.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const runtimeApiPath = resolve(import.meta.dirname, '../runtime-api.js');
+const runtimeUiPath = resolve(import.meta.dirname, '../runtime-ui.js');
 
 describe('runtime api client', () => {
+  test('allows slow Cloudflare cold-start responses before aborting', () => {
+    const source = readFileSync(runtimeApiPath, 'utf8');
+    expect(source).toContain('const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;');
+  });
+
+  test('keeps popup background command timeout above API request timeout', () => {
+    const source = readFileSync(runtimeUiPath, 'utf8');
+    expect(source).toContain('const BACKGROUND_COMMAND_TIMEOUT_MS = 35_000;');
+  });
+
   test('uses no-store cache policy for metadata and snapshot fetches', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,

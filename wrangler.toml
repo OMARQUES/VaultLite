@@ -54,7 +54,7 @@ VAULTLITE_RUNTIME_MODE = "production"
 VAULTLITE_SERVER_URL = "https://vaultlite-web.pages.dev"
 VAULTLITE_DEPLOYMENT_FINGERPRINT = "vaultlite_prod_001"
 VAULTLITE_REALTIME_ENABLED = "true"
-VAULTLITE_REALTIME_WS_BASE_URL = "wss://vaultlite-api-prod.sigfarm.workers.dev"
+VAULTLITE_REALTIME_WS_BASE_URL = "wss://vaultlite-api-prod.otavio-marques20.workers.dev"
 VAULTLITE_REALTIME_AUTH_LEASE_SECONDS = "600"
 VAULTLITE_REALTIME_HEARTBEAT_INTERVAL_MS = "25000"
 VAULTLITE_WS_WEB_ALLOWED_ORIGINS = "https://vaultlite-web.pages.dev"
@@ -66,7 +66,7 @@ class_name = "VaultLiteRealtimeHub"
 [[env.production.d1_databases]]
 binding = "VAULTLITE_DB"
 database_name = "vaultlite-prod-db"
-database_id = "7868f682-0288-4766-8acf-d780cf03a3ad"
+database_id = "c1ef0842-6ae4-485b-bec9-ddd94ea1aea2"
 
 [[env.production.r2_buckets]]
 binding = "VAULTLITE_BLOBS"

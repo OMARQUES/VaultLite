@@ -137,6 +137,39 @@ describe('inline assist runtime', () => {
     ]);
   });
 
+  test('does not render identifier-step anchor for generic text search forms', async () => {
+    document.body.innerHTML = `
+      <form role="search">
+        <input id="site-search" type="text" name="q" placeholder="Search docs" />
+        <button type="submit">Search</button>
+      </form>
+    `;
+
+    const source = readFileSync(contentScriptPath, 'utf8');
+    globalThis.Function(source)();
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await flushInlineAssist();
+
+    expect(document.querySelector('[data-vaultlite-inline-root="true"]')).toBeNull();
+  });
+
+  test('does not infer login context from generic text field before password-like control', async () => {
+    document.body.innerHTML = `
+      <form>
+        <label>Project name <input id="project" type="text" name="project" /></label>
+        <label>Access code <input id="access-code" type="password" name="accessCode" /></label>
+        <button type="submit">Save</button>
+      </form>
+    `;
+
+    const source = readFileSync(contentScriptPath, 'utf8');
+    globalThis.Function(source)();
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await flushInlineAssist();
+
+    expect(document.querySelector('[data-vaultlite-inline-root="true"]')).toBeNull();
+  });
+
   test('reacts to late modal insertion and adds identifier-step anchor', async () => {
     document.body.innerHTML = '<main><button type="button">Open</button></main>';
 

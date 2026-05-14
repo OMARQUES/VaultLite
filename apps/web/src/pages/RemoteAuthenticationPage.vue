@@ -136,10 +136,11 @@ async function bootstrapDevice() {
 
 <template>
   <section class="public-page public-page--auth">
-    <div class="panel-card panel-card--compact auth-stack auth-card">
+    <div class="panel-card panel-card--compact auth-stack auth-card add-device-card">
       <div class="page-header">
         <p class="eyebrow">DEVICE SETUP</p>
         <h1>Add a device</h1>
+        <p class="page-subtitle">Recover access on a trusted device using your signed Account Kit.</p>
       </div>
 
       <InlineAlert v-if="surfaceError" tone="danger">
@@ -147,9 +148,16 @@ async function bootstrapDevice() {
       </InlineAlert>
 
       <form class="form-stack auth-mode auth-mode--add-device" @submit.prevent="bootstrapDevice">
-        <TextField v-model="bootstrap.deviceName" label="New device name" autocomplete="off" required />
+        <TextField
+          v-model="bootstrap.deviceName"
+          class="add-device-field add-device-field--device"
+          label="New device name"
+          autocomplete="off"
+          required
+        />
         <SecretField
           v-model="bootstrap.password"
+          class="add-device-field"
           label="Master password"
           autocomplete="current-password"
           required
@@ -212,8 +220,9 @@ async function bootstrapDevice() {
           </div>
         </dl>
 
-        <div class="form-actions">
+        <div class="form-actions add-device-submit-row">
           <PrimaryButton type="submit" :disabled="isBusy || !bootstrap.accountKitJson.trim()">
+            <AppIcon name="shield_check" :size="18" />
             {{ bootstrapLabel }}
           </PrimaryButton>
         </div>

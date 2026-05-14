@@ -37,9 +37,11 @@ describe('popup ui style regressions', () => {
 
   test('keeps pre-auth layouts compact with centered simplified unlock stage', () => {
     const source = readFileSync(popupHtmlPath, 'utf8');
-    expect(source).toContain('--pairing-min-height: 340px;');
-    expect(source).toContain('--pairing-min-height-link-open: 470px;');
-    expect(source).toContain('--unlock-min-height: 252px;');
+    expect(source).toContain('--pairing-width: 360px;');
+    expect(source).toContain('--pairing-min-height: 300px;');
+    expect(source).toContain('--pairing-min-height-link-open: 420px;');
+    expect(source).toContain('--unlock-width: 360px;');
+    expect(source).toContain('--unlock-min-height: 320px;');
     expect(source).toContain('--ready-min-height: 520px;');
     expect(source).toContain("body[data-layout='pairing'][data-link-request='open']");
     expect(source).not.toContain('height: var(--pairing-height);');
@@ -54,7 +56,7 @@ describe('popup ui style regressions', () => {
     expect(source).toContain('align-items: center;');
     expect(source).toContain("body[data-layout='pairing'] {");
     expect(source).toContain("body[data-layout='unlock'] {");
-    expect(source).toContain('background: #1c1e24;');
+    expect(source).toContain('background: #111422;');
   });
 
   test('renders simplified unlock stage with account-only title and inline field actions', () => {
@@ -67,8 +69,19 @@ describe('popup ui style regressions', () => {
     expect(source).toContain('id="unlockBtn"');
     expect(source).toContain('placeholder="Enter your password"');
     expect(source).toContain('.unlock-password-shell');
-    expect(source).toContain('background: #2a2f37;');
-    expect(source).toContain('border-color: #2562ea;');
+    expect(source).toContain('.unlock-stage-topline');
+    expect(source).toContain('background: var(--vl-bg-elevated);');
+    expect(source).toContain('border-color: var(--vl-accent);');
+    expect(source).toContain('Connected');
+  });
+
+  test('renders compact trusted-device pairing surface', () => {
+    const source = readFileSync(popupHtmlPath, 'utf8');
+    expect(source).toContain('PAIR NEW DEVICE');
+    expect(source).toContain('Connect with trusted device');
+    expect(source).toContain('Start a trusted-device request and approve it in web settings.');
+    expect(source).toContain('class="pairing-hero"');
+    expect(source).toContain('var(--vl-bg-elevated)');
   });
 
   test('keeps detail icon edit affordance transient and aligned', () => {

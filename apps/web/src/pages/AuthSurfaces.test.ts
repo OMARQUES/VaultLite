@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { sessionStoreKey } from '../app-context';
 import OnboardingPage from './OnboardingPage.vue';
+import HomePage from './HomePage.vue';
 import RemoteAuthenticationPage from './RemoteAuthenticationPage.vue';
 import UnlockPage from './UnlockPage.vue';
 
@@ -14,6 +15,10 @@ const routeState = reactive({
 });
 
 vi.mock('vue-router', () => ({
+  RouterLink: {
+    props: ['to'],
+    template: '<a :href="to"><slot /></a>',
+  },
   useRouter: () => ({
     push,
   }),
@@ -87,6 +92,27 @@ describe('auth surfaces', () => {
     expect(wrapper.text()).toContain('Continue');
     expect(wrapper.text()).not.toContain('Generate Account Kit');
     expect(wrapper.text()).not.toContain('Finalize account creation');
+  });
+
+  test('home renders calm vault hero with feature strip and no decorative gradient copy', async () => {
+    const wrapper = mount(HomePage, {
+      global: {
+        stubs: {
+          RouterLink: {
+            props: ['to'],
+            template: '<a :href="to"><slot /></a>',
+          },
+        },
+      },
+    });
+
+    expect(wrapper.find('.home-hero-card').exists()).toBe(true);
+    expect(wrapper.find('.home-hero-visual').exists()).toBe(true);
+    expect(wrapper.findAll('.home-feature')).toHaveLength(3);
+    expect(wrapper.text()).toContain('Trusted devices');
+    expect(wrapper.text()).toContain('Local-first access');
+    expect(wrapper.text()).toContain('Approval-based security');
+    expect(wrapper.text()).not.toContain('gradient');
   });
 
   test('onboarding treats prefilled invite token as accepted context instead of exposing raw token', async () => {
@@ -209,9 +235,12 @@ describe('auth surfaces', () => {
     });
 
     expect(wrapper.text()).toContain('Add a device');
+    expect(wrapper.text()).toContain('Recover access on a trusted device using your signed Account Kit.');
     expect(wrapper.text()).not.toContain('Add device');
     expect(wrapper.text()).not.toContain('Trusted device');
     expect(wrapper.findAll('.panel-card')).toHaveLength(1);
+    expect(wrapper.find('.add-device-card').exists()).toBe(true);
+    expect(wrapper.find('.add-device-submit-row').exists()).toBe(true);
     expect(wrapper.text()).toContain('Account Kit file');
     expect(wrapper.text()).not.toContain('Authenticate trusted device');
     expect(wrapper.find('textarea').exists()).toBe(false);
@@ -286,5 +315,112 @@ describe('auth surfaces', () => {
     expect(wrapper.text()).toContain('VaultLite');
     expect(wrapper.text()).toContain('alice');
     expect(wrapper.text()).not.toContain('Your account is suspended. Ask the owner to reactivate access.');
+  });
+
+  test('unlock shows password retry message when local unlock fails with invalid credentials', async () => {
+    routeState.path = '/unlock';
+    const sessionStore = createSessionStore();
+    sessionStore.state.phase = 'local_unlock_required';
+    sessionStore.localUnlock.mockRejectedValueOnce(new Error('Request failed with status 401 (invalid_credentials)'));
+
+    const wrapper = mount(UnlockPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await wrapper.get('input').setValue('wrong-password');
+    await wrapper.get('form').trigger('submit.prevent');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Check your password and try again.');
+  });
+
+  test('add-device page shows password retry message when bootstrap fails with invalid credentials', async () => {
+    const sessionStore = createSessionStore();
+    sessionStore.bootstrapDevice.mockRejectedValueOnce(new Error('Request failed with status 401 (invalid_credentials)'));
+
+    const wrapper = mount(RemoteAuthenticationPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    const inputs = wrapper.findAll('input');
+    await inputs[0]?.setValue('Recovered Browser');
+    await inputs[1]?.setValue('wrong-password');
+    await wrapper.get('[data-testid="manual-json-toggle"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('textarea').setValue('{"payload":{"username":"alice"},"signature":"signed"}');
+    await wrapper.get('form').trigger('submit.prevent');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('Check your password and try again.');
+  });
+
+  test('add-device submit stays disabled when Account Kit JSON is invalid', async () => {
+    const sessionStore = createSessionStore();
+
+    const wrapper = mount(RemoteAuthenticationPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="manual-json-toggle"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('textarea').setValue('{not-json');
+
+    const submitButton = wrapper.get('button[type="submit"]');
+    expect((submitButton.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test('add-device submit stays disabled when Account Kit username is missing', async () => {
+    const sessionStore = createSessionStore();
+
+    const wrapper = mount(RemoteAuthenticationPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    await wrapper.get('[data-testid="manual-json-toggle"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('textarea').setValue('{"payload":{"serverUrl":"https://vaultlite.local","deploymentFingerprint":"development_deployment"},"signature":"signed"}');
+
+    const submitButton = wrapper.get('button[type="submit"]');
+    expect((submitButton.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test('add-device shows local Account Kit validation message without calling bootstrap', async () => {
+    const sessionStore = createSessionStore();
+
+    const wrapper = mount(RemoteAuthenticationPage, {
+      global: {
+        provide: {
+          [sessionStoreKey as symbol]: sessionStore,
+        },
+      },
+    });
+
+    const inputs = wrapper.findAll('input');
+    await inputs[0]?.setValue('Recovered Browser');
+    await inputs[1]?.setValue('correct-password');
+    await wrapper.get('[data-testid="manual-json-toggle"]').trigger('click');
+    await flushPromises();
+    await wrapper.get('textarea').setValue('{"payload":{"serverUrl":"https://vaultlite.local","deploymentFingerprint":"development_deployment"},"signature":"signed"}');
+    await wrapper.get('form').trigger('submit.prevent');
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('This Account Kit file is incomplete or invalid.');
+    expect(sessionStore.bootstrapDevice).not.toHaveBeenCalled();
   });
 });

@@ -309,6 +309,8 @@ describe('extension LTS pairing and extension bearer session', () => {
       ok: boolean;
       result: string;
       extensionSessionToken: string;
+      sessionRecoverKey: string;
+      device: { deviceId: string };
     };
     expect(consumePayload).toEqual(
       expect.objectContaining({
@@ -338,6 +340,41 @@ describe('extension LTS pairing and extension bearer session', () => {
       },
     });
     expect(syncResponse.status).toBe(200);
+
+    const recoverResponse = await app.request('/api/auth/extension/session/recover', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        deviceId: consumePayload.device.deviceId,
+        sessionRecoverKey: consumePayload.sessionRecoverKey,
+      }),
+    });
+    expect(recoverResponse.status).toBe(200);
+    const recoverPayload = (await recoverResponse.json()) as {
+      extensionSessionToken: string;
+      sessionRecoverKey: string;
+    };
+    expect(recoverPayload.extensionSessionToken).toBeTruthy();
+    expect(recoverPayload.sessionRecoverKey).toBeTruthy();
+    expect(recoverPayload.sessionRecoverKey).not.toBe(consumePayload.sessionRecoverKey);
+
+    const oldRecoverResponse = await app.request('/api/auth/extension/session/recover', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        deviceId: consumePayload.device.deviceId,
+        sessionRecoverKey: consumePayload.sessionRecoverKey,
+      }),
+    });
+    expect(oldRecoverResponse.status).toBe(401);
+    expect(await oldRecoverResponse.json()).toEqual({
+      ok: false,
+      code: 'recover_key_invalid',
+    });
 
     const blocked = await app.request('/api/auth/devices', {
       headers: {

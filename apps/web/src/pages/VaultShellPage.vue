@@ -2656,6 +2656,10 @@ async function fetchIconDataUrlFromObjectUrl(input: {
     if (!response.ok) {
       return null;
     }
+    const contentTypeHeader = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (!contentTypeHeader.startsWith('image/')) {
+      return null;
+    }
     const blob = await response.blob();
     if (!blob.type.startsWith('image/')) {
       return null;

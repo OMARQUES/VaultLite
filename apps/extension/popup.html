@@ -33,25 +33,33 @@
 
       :root {
         color-scheme: dark;
-        --vl-shell: #19181d;
-        --vl-surface: #1f232d;
-        --vl-surface-2: #262c37;
-        --vl-input: #313844;
-        --vl-border: #364154;
+        --vl-bg-base: #090b14;
+        --vl-bg-surface: #111422;
+        --vl-bg-elevated: #1a1e30;
+        --vl-bg-hover: #1f2438;
+        --vl-shell: #111422;
+        --vl-surface: #111422;
+        --vl-surface-2: #1a1e30;
+        --vl-input: #1a1e30;
+        --vl-border: rgba(255, 255, 255, 0.08);
         --vl-divider: rgba(255, 255, 255, 0.08);
-        --vl-text: #f4f7fb;
-        --vl-text-muted: #b7c0d1;
-        --vl-text-soft: #8b96ab;
+        --vl-text: #f0f2ff;
+        --vl-text-muted: #8b90ad;
+        --vl-text-soft: #4f546b;
         --vl-primary: #2562ea;
         --vl-primary-hover: #1f56d6;
+        --vl-accent: #3d63e8;
+        --vl-accent-hover: #2f53d4;
+        --vl-accent-glow: rgba(61, 99, 232, 0.25);
+        --vl-success: #2dd4a0;
         --vl-danger: #d84f60;
         --vl-warning: #d08a2e;
 
-        --pairing-width: 470px;
-        --pairing-min-height: 340px;
-        --pairing-min-height-link-open: 470px;
-        --unlock-width: 470px;
-        --unlock-min-height: 252px;
+        --pairing-width: 360px;
+        --pairing-min-height: 300px;
+        --pairing-min-height-link-open: 420px;
+        --unlock-width: 360px;
+        --unlock-min-height: 320px;
         --ready-width: 560px;
         --ready-expanded-width: 800px;
         --ready-min-height: 520px;
@@ -86,7 +94,7 @@
       body[data-layout='pairing'] {
         width: var(--pairing-width);
         min-height: var(--pairing-min-height);
-        background: #19181d;
+        background: #111422;
       }
 
       body[data-layout='pairing'][data-link-request='open'] {
@@ -96,7 +104,7 @@
       body[data-layout='unlock'] {
         width: var(--unlock-width);
         min-height: var(--unlock-min-height);
-        background: #1c1e24;
+        background: #111422;
       }
 
       body[data-layout='ready'] {
@@ -114,7 +122,7 @@
         height: 100%;
         display: grid;
         grid-template-rows: auto minmax(0, 1fr);
-        background: #19181d;
+        background: var(--vl-bg-surface);
         border: 1px solid color-mix(in srgb, var(--vl-border) 72%, transparent);
         overflow: hidden;
         overflow: clip;
@@ -2679,6 +2687,214 @@
       [hidden] {
         display: none !important;
       }
+      /* VaultLite pre-auth redesign */
+      body[data-layout='pairing'] .popup-shell,
+      body[data-layout='unlock'] .popup-shell {
+        border: 0;
+        background: var(--vl-bg-surface);
+      }
+
+      body[data-layout='pairing'] .popup-shell {
+        height: auto;
+        min-height: var(--pairing-min-height);
+        grid-template-rows: auto auto;
+      }
+
+      body[data-layout='pairing'] .popup-header {
+        padding: 24px 24px 10px;
+        border-bottom: 0;
+      }
+
+      body[data-layout='pairing'] .popup-header-top {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      body[data-layout='pairing'] .popup-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 20px;
+        line-height: 24px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+
+      body[data-layout='pairing'] .popup-title::before {
+        content: 'lock';
+        font-family: 'Material Symbols Rounded';
+        color: var(--vl-accent);
+        font-size: 22px;
+        font-variation-settings:
+          'FILL' 0,
+          'wght' 500,
+          'GRAD' 0,
+          'opsz' 24;
+      }
+
+      body[data-layout='pairing'] .header-actions,
+      body[data-layout='pairing'] .site-context {
+        display: none;
+      }
+
+      body[data-layout='pairing'] .popup-content {
+        align-self: start;
+        gap: 16px;
+        min-height: auto;
+        overflow: visible;
+        padding: 0 24px 24px;
+      }
+
+      body[data-layout='pairing'] .compact-intro {
+        margin: 0;
+        color: var(--vl-text-muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .pairing-hero {
+        display: grid;
+        gap: 6px;
+        padding: 14px 0;
+        border-top: 1px solid var(--vl-border);
+        border-bottom: 1px solid var(--vl-border);
+      }
+
+      .pairing-hero__label {
+        margin: 0;
+        color: var(--vl-text-soft);
+        font-size: 10px;
+        line-height: 14px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+
+      body[data-layout='pairing'] .form-field {
+        display: grid;
+        gap: 5px;
+      }
+
+      body[data-layout='pairing'] .form-field label {
+        color: var(--vl-text-soft);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      body[data-layout='pairing'] #serverUrlInput,
+      body[data-layout='pairing'] #deviceNameInput {
+        height: 40px;
+        border: 1px solid var(--vl-border);
+        border-radius: 6px;
+        background: var(--vl-bg-elevated);
+        color: var(--vl-text);
+        padding: 0 12px;
+      }
+
+      body[data-layout='pairing'] #serverUrlInput {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 12px;
+      }
+
+      body[data-layout='pairing'] #linkPairBtn {
+        width: 100%;
+        height: 42px;
+        margin-top: 4px;
+        border-radius: 6px;
+        border-color: var(--vl-accent);
+        background: var(--vl-accent);
+        color: #fff;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      body[data-layout='pairing'] #linkPairBtn::before {
+        content: 'link';
+        margin-right: 10px;
+        font-family: 'Material Symbols Rounded';
+        font-size: 19px;
+        vertical-align: -4px;
+      }
+
+      .unlock-stage {
+        position: relative;
+        max-width: none;
+        min-height: var(--unlock-min-height);
+      }
+
+      .unlock-stage-topline {
+        position: absolute;
+        top: -20px;
+        left: -20px;
+        right: -20px;
+        height: 2px;
+        background: var(--vl-accent);
+      }
+
+      .unlock-stage-inner {
+        gap: 20px;
+      }
+
+      .unlock-stage-logo {
+        font-size: 44px;
+        line-height: 48px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+
+      .unlock-stage-account {
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .unlock-stage-account-icon {
+        color: var(--vl-accent);
+      }
+
+      .unlock-password-shell {
+        min-height: 44px;
+        border: 1px solid var(--vl-border);
+        border-radius: 6px;
+        background: var(--vl-bg-elevated);
+      }
+
+      .unlock-password-shell:focus-within {
+        border-color: var(--vl-accent);
+        box-shadow: 0 0 0 3px var(--vl-accent-glow);
+      }
+
+      .unlock-submit-btn {
+        border-radius: 0 6px 6px 0;
+        background: var(--vl-accent);
+        color: #fff;
+      }
+
+      .unlock-device-value {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        color: var(--vl-text-muted);
+      }
+
+      .unlock-connected {
+        margin: 0;
+        justify-self: start;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px;
+        border: 1px solid var(--vl-border);
+        border-radius: 999px;
+        color: var(--vl-text-muted);
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11px;
+      }
+
+      .unlock-connected::before {
+        content: '';
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--vl-success);
+      }
     </style>
   </head>
   <body data-layout="pairing" data-detail="closed">
@@ -2833,12 +3049,15 @@
         <div id="statusAlert" class="alert alert--warning" hidden></div>
 
         <section id="pairingSection" class="compact-stage" hidden>
-          <p class="compact-intro popup-subtitle" id="pairingDescription">Start a trusted-device request and approve it in web settings.</p>
-          <label class="field">
+          <div class="pairing-hero">
+            <p class="pairing-hero__label">PAIR NEW DEVICE</p>
+            <p class="compact-intro popup-subtitle" id="pairingDescription">Start a trusted-device request and approve it in web settings.</p>
+          </div>
+          <label class="field form-field">
             <span>Server URL</span>
             <input id="serverUrlInput" autocomplete="off" placeholder="http://127.0.0.1:8787" />
           </label>
-          <label class="field">
+          <label class="field form-field">
             <span>Device name</span>
             <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="VaultLite Extension" />
           </label>
@@ -2862,6 +3081,7 @@
         </section>
 
         <section id="unlockSection" class="compact-stage unlock-stage" hidden>
+          <div class="unlock-stage-topline" aria-hidden="true"></div>
           <div class="unlock-stage-inner">
             <h2 class="unlock-stage-logo">VaultLite</h2>
             <div class="unlock-stage-account-row">
@@ -2896,6 +3116,7 @@
               </button>
             </div>
             <p id="unlockPasswordError" class="unlock-password-error" hidden>Check your password and try again.</p>
+            <p class="unlock-connected">Connected · development_deployment</p>
             <p id="unlockDeviceValue" class="unlock-device-value">#VaultLite Extension</p>
           </div>
         </section>

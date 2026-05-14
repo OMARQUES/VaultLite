@@ -5836,6 +5836,13 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
       rotatedFromSessionId: null,
       ttlSeconds: Math.ceil(timeoutMs / 1000) * 3,
     });
+    const nextSessionRecoverKey = issueExtensionSessionRecoverKey();
+    await options.storage.extensionSessionRecoverSecrets.upsert({
+      userId: user.userId,
+      deviceId: device.deviceId,
+      secretHash: sha256Base64Url(nextSessionRecoverKey),
+      updatedAt: nowIso,
+    });
 
     await createAuditEvent({
       storage: options.storage,
@@ -5857,6 +5864,7 @@ export function createVaultLiteApi(options: VaultLiteApiOptions) {
         result: 'success_changed',
         extensionSessionToken: issued.token,
         sessionExpiresAt: issued.session.expiresAt,
+        sessionRecoverKey: nextSessionRecoverKey,
         user: {
           userId: user.userId,
           username: user.username,

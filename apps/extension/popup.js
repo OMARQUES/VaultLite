@@ -228,6 +228,8 @@ const detailRows = [
 ];
 
 let currentState = null;
+let pairingDeviceNameDraft = '';
+let pairingDeviceNameDirty = false;
 let currentItems = [];
 let selectedItemId = null;
 let activeTypeFilter = 'all';
@@ -3639,7 +3641,7 @@ function renderState(payload) {
   }
   applyLayoutState(effectivePhase);
   scheduleRefresh();
-  elements.deviceNameInput.value = currentState?.deviceName ?? 'VaultLite Extension';
+  syncPairingDeviceNameInput();
   elements.unlockAccountValue.textContent = currentState?.username ?? 'Unknown account';
   elements.unlockDeviceValue.textContent = `#${currentState?.deviceName ?? 'VaultLite Extension'}`;
   if (document.activeElement !== elements.serverUrlInput) {
@@ -3884,6 +3886,31 @@ async function refreshStateAndMaybeList(options = {}) {
   });
 }
 
+function resolvePairingDeviceNameHint() {
+  const candidate = elements.deviceNameInput.value.trim();
+  return candidate.length > 0 ? candidate : 'VaultLite Extension';
+}
+
+function syncPairingDeviceNameInput() {
+  if (currentState?.deviceName) {
+    pairingDeviceNameDraft = '';
+    pairingDeviceNameDirty = false;
+    elements.deviceNameInput.value = currentState.deviceName;
+    return;
+  }
+
+  if (pairingDeviceNameDirty) {
+    elements.deviceNameInput.value = pairingDeviceNameDraft;
+    return;
+  }
+
+  if (document.activeElement === elements.deviceNameInput) {
+    return;
+  }
+
+  elements.deviceNameInput.value = 'VaultLite Extension';
+}
+
 async function runAction(task) {
   if (inFlight) {
     return;
@@ -3958,6 +3985,9 @@ async function startLinkPairing() {
   const previousLabel = elements.linkPairBtn.textContent;
   elements.linkPairBtn.textContent = 'Connecting...';
   try {
+    const deviceNameHint = resolvePairingDeviceNameHint();
+    pairingDeviceNameDraft = deviceNameHint;
+    pairingDeviceNameDirty = deviceNameHint !== 'VaultLite Extension';
     const serverSetup = await ensureServerOriginConfigured();
     if (!serverSetup.ok) {
       pairingInProgress = false;
@@ -3970,7 +4000,7 @@ async function startLinkPairing() {
 
     const response = await sendBackgroundCommand({
       type: 'vaultlite.start_link_pairing',
-      deviceNameHint: elements.deviceNameInput.value,
+      deviceNameHint,
     });
     if (!response.ok) {
       pairingInProgress = false;
@@ -5137,6 +5167,10 @@ function wireEvents() {
 
   elements.linkPairBtn.addEventListener('click', () => {
     void runAction(startLinkPairing);
+  });
+  elements.deviceNameInput.addEventListener('input', () => {
+    pairingDeviceNameDraft = elements.deviceNameInput.value;
+    pairingDeviceNameDirty = true;
   });
   elements.unlockBtn.addEventListener('click', () => {
     void handleUnlock();

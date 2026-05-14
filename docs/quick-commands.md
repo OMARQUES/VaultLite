@@ -45,6 +45,8 @@ npx wrangler delete --name vaultlite-api-prod --env production
 npx wrangler pages project delete vaultlite-web
 npx wrangler d1 delete vaultlite-prod-db
 npx wrangler r2 bucket delete vaultlite-prod-blobs
+npx wrangler queues delete vaultlite-icon-discovery-prod
+npx wrangler queues delete vaultlite-icon-discovery-prod-dlq
 ```
 
 ```txt
@@ -57,9 +59,11 @@ npx wrangler r2 bucket delete vaultlite-prod-blobs
 ## 3) Criar recursos Cloudflare novamente
 
 ```bash
-# cria DB e bucket
+# cria DB, bucket e filas
 npx wrangler d1 create vaultlite-prod-db
 npx wrangler r2 bucket create vaultlite-prod-blobs
+npx wrangler queues create vaultlite-icon-discovery-prod
+npx wrangler queues create vaultlite-icon-discovery-prod-dlq
 ```
 
 ```txt
@@ -88,8 +92,10 @@ openssl pkey -in account-kit-private.pem -pubout -out account-kit-public.pem
 ### 4.2 Subir secrets no Worker
 
 ```bash
-# token forte (troque pelo seu)
-printf '%s' 'iMsExpJ4PzM3S9E38tULSIFHS40U57M8sPG-yFG5BbQU0svVL3aJG_pDwLoa5z_X' | npx wrangler secret put VAULTLITE_BOOTSTRAP_ADMIN_TOKEN --env production
+# tokens fortes (troque pelos seus)
+printf '%s' '<GENERATE_STRONG_BOOTSTRAP_ADMIN_TOKEN>' | npx wrangler secret put VAULTLITE_BOOTSTRAP_ADMIN_TOKEN --env production
+printf '%s' '<GENERATE_STRONG_REALTIME_CONNECT_TOKEN_SECRET>' | npx wrangler secret put VAULTLITE_REALTIME_CONNECT_TOKEN_SECRET --env production
+printf '%s' '<GENERATE_STRONG_INTERNAL_QUEUE_TOKEN>' | npx wrangler secret put VAULTLITE_INTERNAL_QUEUE_TOKEN --env production
 
 # chaves account kit
 cat account-kit-private.pem | npx wrangler secret put VAULTLITE_ACCOUNT_KIT_PRIVATE_KEY --env production
@@ -102,17 +108,17 @@ cat account-kit-public.pem  | npx wrangler secret put VAULTLITE_ACCOUNT_KIT_PUBL
 npx wrangler deploy --env production
 
 # validar
-curl https://vaultlite-api-prod.otavio-marques20.workers.dev/api/runtime/metadata
+curl https://vaultlite-api-prod.<SEU_SUBDOMINIO_WORKERS>.workers.dev/api/runtime/metadata
 ```
 
 ## 6) Deploy do Web (Pages)
 
 ```bash
 # cria projeto pages (uma vez)
-npx wrangler pages project create vaultlite-web --production-branch main
+npx wrangler pages project create vaultlite-web --production-branch main --cwd apps/web
 
 # define origem da API para o Pages Function proxy
-printf '%s' 'https://vaultlite-api-prod.otavio-marques20.workers.dev' | npx wrangler pages secret put VAULTLITE_API_ORIGIN --project-name vaultlite-web
+printf '%s' 'https://vaultlite-api-prod.otavio-marques20.workers.dev' | npx wrangler pages secret put VAULTLITE_API_ORIGIN --project-name vaultlite-web --cwd apps/web
 
 # build web
 npm run build --workspace @vaultlite/web
@@ -126,6 +132,8 @@ npx wrangler pages deploy dist --project-name vaultlite-web --branch main --cwd 
 ```txt
 # em wrangler.toml (env.production.vars):
 # VAULTLITE_SERVER_URL = "https://vaultlite-web.pages.dev"
+# VAULTLITE_REALTIME_WS_BASE_URL = "wss://vaultlite-api-prod.<SEU_SUBDOMINIO_WORKERS>.workers.dev"
+# VAULTLITE_WS_WEB_ALLOWED_ORIGINS = "https://vaultlite-web.pages.dev"
 ```
 
 ```bash
@@ -136,7 +144,7 @@ npx wrangler deploy --env production
 ## 8) Verificacoes finais
 
 ```bash
-curl https://vaultlite-api-prod.otavio-marques20.workers.dev/api/runtime/metadata
+curl https://vaultlite-api-prod.<SEU_SUBDOMINIO_WORKERS>.workers.dev/api/runtime/metadata
 curl https://vaultlite-web.pages.dev/api/bootstrap/state
 ```
 

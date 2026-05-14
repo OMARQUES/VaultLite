@@ -148,10 +148,12 @@ onMounted(async () => {
 <template>
   <section class="public-page public-page--onboarding">
     <div class="panel-card panel-card--form onboarding-card">
-      <div class="onboarding-card__header">
-        <div class="onboarding-card__meta">
-          <p class="eyebrow">BOOTSTRAP</p>
-          <p class="onboarding-card__step">Step 2 of 2</p>
+      <div class="onboarding-card__header bootstrap-flow__header">
+        <div class="bootstrap-progress" aria-label="Bootstrap progress">
+          <span class="bootstrap-progress__track">
+            <span class="bootstrap-progress__fill" style="width: 100%"></span>
+          </span>
+          <p class="eyebrow bootstrap-progress__label">BOOTSTRAP · STEP 3 OF 3</p>
         </div>
         <h1>Save your Account Kit</h1>
         <p class="page-subtitle onboarding-card__subtitle">
@@ -163,6 +165,7 @@ onMounted(async () => {
 
       <article v-if="accountKit" class="account-kit-card">
         <header class="account-kit-card__header">
+          <span class="account-kit-card__icon material-symbols-rounded" aria-hidden="true">verified_user</span>
           <h2>Account Kit ready</h2>
           <span class="account-kit-card__badge">Signed and verified</span>
         </header>
@@ -187,9 +190,12 @@ onMounted(async () => {
       >
         <PrimaryButton
           type="button"
+          class="account-kit-download-button"
+          :class="{ 'account-kit-download-button--secondary': downloadAttempted }"
           :disabled="downloadingAccountKit || finishingSetup"
           @click="downloadAccountKit"
         >
+          <span class="material-symbols-rounded" aria-hidden="true">download</span>
           {{ downloadLabel }}
         </PrimaryButton>
       </div>
@@ -203,7 +209,7 @@ onMounted(async () => {
         </PrimaryButton>
       </div>
       <p v-if="hint" class="onboarding-step__hint">{{ hint }}</p>
-      <label class="checkbox-row">
+      <label class="checkbox-row checkbox-row--custom">
         <input v-model="acknowledged" type="checkbox" />
         <span>I saved the Account Kit outside this browser.</span>
       </label>
